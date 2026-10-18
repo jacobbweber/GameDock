@@ -389,3 +389,12 @@ def test_sampler_runs_with_the_app_lifespan(svc, backend):
         assert [x for x in backend.calls if x[0] == "stats"]
         assert c.get("/api/health").status_code == 200
     assert not any(t.name == "gamedock-sampler" for t in threading.enumerate())
+
+
+def test_state_changes_invalidate_cached_stats(svc, backend, clock):
+    a = deploy(svc, "Alpha", 27015)
+    svc.start(a)
+    svc.sample_stats()
+    assert svc.get_all_stats().servers[0].running
+    svc.stop(a)  # no clock advance: without invalidation the cached "running" snapshot would be returned
+    assert not svc.get_all_stats().servers[0].running

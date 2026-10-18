@@ -87,6 +87,7 @@ class GameDockService:
             yield
         finally:
             lock.release()
+            self._latest_ts = None  # state may have changed: the next stats request reads fresh numbers
 
     # ------------------------------------------------------------------ catalog
     def _catalog(self) -> dict[str, CatalogEntry]:

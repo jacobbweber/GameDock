@@ -117,9 +117,8 @@ function serverCard(s) {
 function liveBlock(s) {
   const st = stats && stats.servers.find((x) => x.server_id === s.id);
   const pts = (history.servers[s.id] && history.servers[s.id].points) || [];
-  if (!st || !st.running) {
-    return el("div", { class: "live idle", textContent: s.status === "running" ? "Waiting for the first reading\u2026" : "Not running" });
-  }
+  if (s.status !== "running") return el("div", { class: "live idle", textContent: "Not running" });
+  if (!st || !st.running) return el("div", { class: "live idle", textContent: "Waiting for the first reading\u2026" });
   const cell = (label, value, sub, spark) => el("div", { class: "live-cell" },
     el("div", { class: "live-label", textContent: label }),
     el("div", { class: "live-value", textContent: value }),

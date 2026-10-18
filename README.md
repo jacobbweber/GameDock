@@ -4,12 +4,13 @@ A small, self-hosted game hosting manager for home use. Each game server runs in
 
 GameDock is not tied to any particular machine or game: games are described by small YAML files in `catalog/`.
 
-![Dashboard](docs/gamedock-step2-dashboard.png)
 ![Catalog](docs/gamedock-step2-catalog.png)
+![Dashboard with live stats](docs/gamedock-step4-dashboard.png)
+![Monitoring](docs/gamedock-step4-monitoring.png)
 ![Backups](docs/gamedock-step3-backups.png)
 ![Config editor](docs/gamedock-step3-config.png)
 
-**Status:** step 3 of the plan. Browse a catalog of game templates, deploy servers (several of the same game can coexist on different ports), edit their settings, start / stop / restart, back up and restore their data, update their images, edit their config files, and delete them safely. Planned next: resource monitoring and the MCP endpoint.
+**Status:** step 4 of the plan. Browse a catalog of game templates, deploy servers (several of the same game can coexist on different ports), edit their settings, start / stop / restart, back up and restore their data, update their images, edit their config files, watch CPU / memory / network per game, and delete them safely. Planned next: the MCP endpoint.
 
 ## Concepts
 
@@ -44,6 +45,11 @@ GAMEDOCK_BACKEND=fake python -m gamedock
 | `GAMEDOCK_DATA_DIR` | `./data` | Server data and `instances.json`. Relative volume paths go under `<data>/<server id>/` |
 | `GAMEDOCK_BACKEND` | `docker` | `docker` or `fake` |
 | `GAMEDOCK_BACKUP_RETENTION` | `10` | Backups kept per server; the oldest are removed after each new backup |
+| `GAMEDOCK_STATS_ENABLED` | `true` | Run the background sampler that feeds the sparklines |
+| `GAMEDOCK_STATS_INTERVAL` | `10` | Seconds between samples (2 to 300) |
+| `GAMEDOCK_STATS_HISTORY_SECONDS` | `3600` | History kept in memory (60 to 86400); at most 2000 points per server |
+| `GAMEDOCK_METRICS_ENABLED` | `false` | Serve Prometheus text at `/metrics` |
+| `GAMEDOCK_METRICS_ALLOW_REMOTE` | `false` | Let non-local clients read `/metrics` |
 
 ## Using it
 
@@ -65,6 +71,50 @@ Every server has a **Backups** panel (dashboard card, "Backups" button).
 - **Delete server with its data** needs two confirmations (`confirm` and `confirm_delete_data`), a stopped server, and first saves a backup outside the data folder at `<data>/backups/_deleted/<id>-<time>-pre-delete.tar.gz`. If that backup fails nothing is deleted.
 - **Permissions:** GameDock runs as its own user. If a game container wrote files as another user (often root) that GameDock cannot read, the backup stops with a clear message (and the `chown` command that would fix it), nothing partial is left, and any operation that needed the backup first (restore, wipe, delete with data, update) is cancelled.
 - Only the server's own data folder is saved. Volumes with an **absolute** host path in a catalog entry live outside it and are not backed up. Backups are taken and restored as the GameDock user, so file ownership becomes that user's.
+
+## Monitoring
+
+Built in, light, and with no database or extra services (it does not need Prometheus).
+
+- **Dashboard cards** show live CPU, memory, network rate and uptime for each running server, with small sparklines of the last ~10 minutes.
+- **Monitoring page** shows host totals (CPU, memory, load, free disk on the volume holding the data folder, uptime) and a table ranking your servers by CPU or memory (click a column header), with each server's share of the whole host and a total row.
+- CPU is shown the way Docker does: 100% is one full core. "Of host" divides by the number of cores.
+- **How it stays cheap:** a background thread samples every `GAMEDOCK_STATS_INTERVAL` seconds (default 10). Each sample makes at most two Docker calls for *all* servers together (`docker inspect` for state and start times, and `docker stats --no-stream` for the running ones), never one per server. If nothing is running it makes just the one small inspect call, at half the normal rate, and records nothing; with no servers deployed it makes no Docker call. Host numbers come from `/proc` and `shutil`.
+- **History** lives in fixed-size in-memory ring buffers (about one hour at the default settings, hard-capped at 2000 points per server), so memory use is bounded and it resets when GameDock restarts. Stopping or deleting a server drops its history.
+- Network and block I/O are cumulative counters from Docker; the UI shows network as a rate computed between samples.
+
+### Optional Prometheus / Grafana
+
+Off by default. To let your own Prometheus scrape GameDock, set `GAMEDOCK_METRICS_ENABLED=true`. GameDock then serves Prometheus text format at `/metrics`, built from the sampler's latest reading (so a scrape never triggers extra Docker calls). It answers only clients on the same machine unless you also set `GAMEDOCK_METRICS_ALLOW_REMOTE=true` (and make GameDock reachable with `GAMEDOCK_HOST`; there is no login, so only do that on a network you trust).
+
+Prometheus on the same host:
+
+```yaml
+scrape_configs:
+  - job_name: gamedock
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["127.0.0.1:8080"]
+```
+
+If Prometheus runs in a Docker container it does not appear as `127.0.0.1` to GameDock, so you need `GAMEDOCK_METRICS_ALLOW_REMOTE=true` and a `GAMEDOCK_HOST` it can reach.
+
+Metrics (labels `server` = server id, `game` = catalog id):
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `gamedock_server_running` | gauge | 1 if the container runs |
+| `gamedock_server_cpu_percent` | gauge | 100 = one core |
+| `gamedock_server_memory_bytes`, `gamedock_server_memory_limit_bytes` | gauge | memory in use / limit |
+| `gamedock_server_network_receive_bytes_total`, `..._transmit_bytes_total` | counter | since container start |
+| `gamedock_server_block_read_bytes_total`, `..._block_write_bytes_total` | counter | disk I/O since container start |
+| `gamedock_server_uptime_seconds` | gauge | running servers only |
+| `gamedock_servers`, `gamedock_build_info{version}` | gauge | count of servers, version |
+| `gamedock_host_cpu_percent`, `gamedock_host_cpu_count`, `gamedock_host_load1` | gauge | host CPU |
+| `gamedock_host_memory_total_bytes`, `gamedock_host_memory_used_bytes` | gauge | host memory |
+| `gamedock_host_disk_total_bytes`, `gamedock_host_disk_free_bytes` | gauge | volume with the data folder |
+
+Example Grafana queries: `gamedock_server_cpu_percent` (one line per game), `sum(gamedock_server_memory_bytes)`, `rate(gamedock_server_network_transmit_bytes_total[5m])`.
 
 ## Updating a server
 
@@ -132,6 +182,11 @@ A server keeps a snapshot of its template from the time it was deployed, so conf
 | POST | `/api/servers/{id}/update-image?confirm=true` | update the image |
 | GET | `/api/servers/{id}/config` | declared config files |
 | GET / PUT | `/api/servers/{id}/config/file?path=...` | read (masked) / save `{path, content}` |
+| GET | `/api/stats?sort=cpu\|memory\|name` | host totals and every server's numbers (latest sample) |
+| GET | `/api/stats/host` | host totals, read live |
+| GET | `/api/servers/{id}/stats` | one server's numbers |
+| GET | `/api/stats/history?window=600`, `/api/servers/{id}/stats/history?window=600` | recent samples for sparklines (seconds back, 10 to the history kept) |
+| GET | `/metrics` | Prometheus text; only when `GAMEDOCK_METRICS_ENABLED=true` |
 | GET | `/api/health` | liveness |
 
 Errors are `{"error": "..."}` with 400 (invalid or missing confirmation), 403 (file permission problem), 404 (unknown), 409 (conflict: port in use, server running, or another operation in progress), 413 (file too large), 422 (malformed request), 500 (operation failed, e.g. disk full) or 502 (Docker problem). Interactive docs at `/api/docs`.
@@ -145,8 +200,11 @@ gamedock/
   store.py         persistent JSON store of deployed servers
   backups.py       backup archives: create, list, restore, prune
   configfiles.py   safe config file read/write, masking, .bak copies
+  hoststats.py     host CPU / memory / disk from /proc and shutil
+  sampler.py       background thread feeding the in-memory history
+  metrics.py       Prometheus text output
   service.py       all management logic (web and future MCP call this)
-  backends/        container engine interface: docker_cli.py (real), fake.py (in-memory)
+  backends/        container engine interface: docker_cli.py (real), fake.py (in-memory), docker_stats.py (parsers)
   web/             FastAPI app + static dashboard (vanilla JS, no build step)
 catalog/           game templates (examples)
 tests/             pytest suite (no Docker needed)
