@@ -318,6 +318,8 @@ def _render(it: _Item, kind: str, new: str) -> str:
             raise ValidationError(f"'{it.key}' must be True or False")
         if it.raw.islower():
             return low
+        if it.raw.isupper():
+            return low.upper()
         return "True" if low == "true" else "False"
     if it.type == "number":
         if not _NUMBER_RE.match(new.strip()):
