@@ -345,7 +345,7 @@ def client(svc):
 def test_version_endpoint_and_health(client, repos):
     v = client.get("/api/version").json()
     assert v["version"] == "0.3.0" and v["commit_short"] == repos.head()[:7] and v["self_update"]["possible"] is True
-    assert client.get("/api/health").json() == {"ok": True, "version": "0.5.0"}
+    assert client.get("/api/health").json() == {"ok": True, "version": "0.5.1"}
     assert "update_available" in client.get("/api/status").json()
 
 

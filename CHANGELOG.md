@@ -2,6 +2,26 @@
 
 All notable changes. Dates are 2026.
 
+## 0.5.1: dialogs keep one fixed frame (Config editor layout fix)
+
+Reported from Jacob's browser (about 1000 x 880): in the Config editor's settings form, changing a few settings made the "These changes will be saved" box appear and the dialog broke: it shrank, it had its own scrollbar plus a second one around the field list, and the Close and Save buttons were cut off at the bottom.
+
+### Fixed
+
+- **Config editor.** The dialog now has one fixed size (85% of the window height, set with `dvh` units, never changed by the review box appearing or going away). The title, the file selector, the search box, the "Only changed" filter, the changed count, the review box and the Close/Save buttons always stay visible; **only the field list scrolls** (one scrollbar). The review box is capped (about 21% of the window height, less in short windows) and scrolls by itself when many settings are changed, so it can never push the buttons out. Save and error messages now sit above the buttons, where they are always seen. The raw text view fills the same frame and is its only scroll area.
+- **Root causes** (all in `style.css`): (1) the dialog, the panel inside it and the field list each had their own `max-height` and `overflow: auto`, in `vh` units that did not add up (92vh dialog, 90vh panel, 50vh list), so three nested scroll areas fought each other and the footer scrolled out of sight; (2) nothing told the flex children they may shrink (`min-height: 0`), so the content pushed the buttons down instead of the list giving way; (3) the hidden checkbox inside every on/off switch is `position: absolute` and had no positioned ancestor except the dialog itself, so it escaped the field list's clipping and made the whole dialog taller than its box (that is why the dialog could be scrolled by hand and jumped when a switch was toggled); (4) the "Settings form / Raw text" selector was squashed to a thin line in a short window.
+- **Same frame for every dialog.** `openDialog()` now builds one structure for all of them: title on top, one scrolling body, and a footer with messages and buttons that never scrolls away. This fixes the same flaw (buttons or messages only reachable by scrolling, two scrollbars, or buttons cut off) in **Logs, Backups, Updates, Image update, Schedules, Review (catalog entry), Deploy/Edit and the confirmation dialogs**, at 1000 x 880, 700 x 500 and 390 x 760. Logs also has a fixed height now, with the log text filling it. The Review dialog's file text no longer has a second scrollbar of its own, and the Schedules dialog no longer overflows the window edge on a phone (its width belongs to the dialog, not the panel).
+- Small windows: a long game note above the settings is shortened to two lines (the full text is in its tooltip), and the file path and restart note are hidden when the window is under 650 px high, so the field list always has room.
+
+### Added
+
+- `scripts/check_dialog_layout.py`: a browser check (Playwright and Chrome) that opens the Config editor on a nested Enshrouded-style settings file with 40+ fields, changes four settings and asserts that (a) the dialog has exactly the same size and position before and after, (b) the footer buttons are fully inside the window and nothing covers them, (c) only one element in the dialog scrolls, and that nothing sticks out of the dialog box. It repeats this for 16 changes, the raw view, and all the other dialogs, at three window sizes. `tests/test_browser_dialog_layout.py` runs it under pytest; it is skipped when Playwright or Chrome is missing or when `GAMEDOCK_SKIP_BROWSER_TESTS=1`.
+- Screenshots before and after in `docs/` (`gamedock-051-config-before.png`, `gamedock-051-config-fixed.png`, and the other dialogs).
+
+### Changed
+
+- Version 0.5.1 (only the version lines of `pyproject.toml` and `gamedock/__init__.py`, so the header update button accepts it).
+
 ## 0.5.0: adding a game is now a repeatable procedure, also for AI agents
 
 Asked for: make adding new games (the first is ASKA) easy to repeat, by a written procedure in the repository and through the MCP endpoint, so a local AI harness can research a game and add it, while Jacob keeps control.

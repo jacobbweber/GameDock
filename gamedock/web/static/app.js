@@ -421,10 +421,27 @@ function renderCatalog() {
 }
 
 // -------------------------------------------------------------------- dialogs
+// Gives every dialog the same frame: the title on top, ONE scrolling body, and a footer (messages + buttons) that never
+// scrolls away. The elements are moved, not copied, so code that holds on to them keeps working.
+function frameDialog(d) {
+  const box = d.firstElementChild;
+  if (!box || d.children.length !== 1) return;
+  box.classList.add("dlg");
+  const kids = [...box.children];
+  const head = kids.length && kids[0].tagName === "H3" ? kids.shift() : null;
+  const actions = kids.length && kids[kids.length - 1].classList.contains("dialog-actions") ? kids.pop() : null;
+  const foot = [];
+  if (actions) {
+    while (kids.length && /(^|\s)(form-error|okmsg)(\s|$)/.test(kids[kids.length - 1].className)) foot.unshift(kids.pop());
+    foot.push(actions);
+  }
+  box.replaceChildren(...(head ? [head] : []), el("div", { class: "dialog-body" }, ...kids), ...(actions ? [el("div", { class: "dialog-foot" }, ...foot)] : []));
+}
 function openDialog(...content) {
   const d = $("dialog");
   d.className = "";
   d.replaceChildren(...content);
+  frameDialog(d);
   const h = d.querySelector("h3");
   if (h) { h.id = "dialog-title"; d.setAttribute("aria-labelledby", "dialog-title"); }
   else d.removeAttribute("aria-labelledby");
@@ -434,6 +451,12 @@ function openDialog(...content) {
 function openWide(...content) {
   const d = openDialog(...content);
   d.className = "wide";
+  return d;
+}
+// A wide dialog with one fixed height (about 85% of the window) so it never changes size while its content changes.
+function openTall(...content) {
+  const d = openWide(...content);
+  d.className = "wide tall";
   return d;
 }
 const closeDialog = () => { const d = $("dialog"); if (d.open) d.close(); };
@@ -949,7 +972,7 @@ async function openLogs(id) {
   reload.addEventListener("click", load);
   copy.addEventListener("click", () => copyText(pre.textContent, copy));
 
-  const d = openWide(el("div", { class: "panel" },
+  const d = openTall(el("div", { class: "panel" },
     el("h3", { textContent: `Logs \u2013 ${s0.name}` }),
     stateLine,
     el("div", { class: "toolbar wrap" },
@@ -978,9 +1001,9 @@ async function openConfig(id) {
   catch (e) { return openDialog(resultView("Config", [[e.message, "warn"]])); }
 
   const select = el("select", { id: "config-file" }, ...files.map((f) => el("option", { value: f.path, textContent: f.label || f.path })));
-  const pathLabel = el("div", { class: "meta" });
+  const pathLabel = el("div", { class: "meta cfg-intro" });
   const catNote = el("p", { class: "warn", hidden: true });
-  const note = el("p", { class: "hint" });
+  const note = el("p", { class: "hint cfg-intro" });
   const err = el("div", { class: "form-error", hidden: true });
   const ok = el("div", { class: "okmsg", hidden: true });
   const body = el("div", { class: "cfg-body" });
@@ -1181,7 +1204,7 @@ async function openConfig(id) {
       if (r.form) setFormBase(r.content, r.form);
       pathLabel.replaceChildren("File: ", el("code", { textContent: r.info.path }),
         r.info.backups.length ? ` \u2013 ${r.info.backups.length} automatic .bak cop${r.info.backups.length === 1 ? "y" : "ies"} kept next to it` : "");
-      catNote.textContent = r.info.note || ""; catNote.hidden = !r.info.note;
+      catNote.textContent = r.info.note || ""; catNote.title = r.info.note || ""; catNote.hidden = !r.info.note;
       note.textContent = r.note;
       if (!r.info.exists) return showMissing();
       ui.toggle = r.form ? el("div", { class: "seg", role: "group", "aria-label": "View" },
@@ -1227,7 +1250,7 @@ async function openConfig(id) {
     finally { save.textContent = "Save"; if (cur) refreshButtons(); }
   });
 
-  openWide(el("div", { class: "panel" },
+  openTall(el("div", { class: "panel" },
     el("h3", { textContent: `Config \u2013 ${s.name}` }),
     files.length > 1 ? el("label", { class: "field" }, el("span", { textContent: "File" }), select) : select,
     pathLabel, catNote, note, wrap, ok, err,

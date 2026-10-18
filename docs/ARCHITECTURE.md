@@ -107,4 +107,6 @@ flowchart LR
 
 `scripts/make_screenshots.py` (and `make_screenshots_authoring.py` for the review step) start the real app on the fake backend and drives it with a headless browser (Playwright, not part of the normal test run); it doubles as a browser smoke test for the progress UI, log viewer and config form.
 
+`scripts/check_dialog_layout.py` is the layout check for dialogs: every dialog is built by `openDialog()` as title, one scrolling body and a footer (CSS classes `.dlg`, `.dialog-body`, `.dialog-foot`), and the check asserts a fixed size, visible buttons and a single scroll area at 1000x880, 700x500 and 390x760 (it also runs under pytest, skipped without Playwright and Chrome).
+
 `tests/` runs without Docker. The engine is the in-memory fake; the Docker command is checked by recording the exact argument lists it would run, and by tiny fake `docker` shell scripts that simulate "daemon down" and "permission denied". The real engine is exercised for the first time in [NIMO_FIRST_TEST.md](NIMO_FIRST_TEST.md).

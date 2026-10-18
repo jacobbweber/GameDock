@@ -40,7 +40,7 @@ A server that is still downloading its game files shows **Installing 52%** inste
 - A step-by-step guide for adding new games ([docs/ADDING_A_GAME.md](docs/ADDING_A_GAME.md)), a template (`catalog/_template.yaml`), and MCP tools so an AI agent can research, validate and add an entry that you then review and approve.
 - An optional MCP endpoint for AI agents (read-only, standard or full mode, with two-step confirmation for anything destructive).
 
-**Version:** 0.5.0. See [CHANGELOG.md](CHANGELOG.md). How it is built: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+**Version:** 0.5.1. See [CHANGELOG.md](CHANGELOG.md). How it is built: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Quick start
 
@@ -596,4 +596,4 @@ pip install -e '.[dev]'
 pytest
 ```
 
-The tests use the in-memory engine and fake `docker` scripts, so they need no Docker. The real Docker backend is covered by command-construction tests but has not yet been run against a real engine; [docs/NIMO_FIRST_TEST.md](docs/NIMO_FIRST_TEST.md) is the first real run.
+The tests use the in-memory engine and fake `docker` scripts, so they need no Docker. One extra browser test (`tests/test_browser_dialog_layout.py`, from `scripts/check_dialog_layout.py`) checks that every dialog keeps a fixed size with a single scroll area; it needs Playwright and Chrome and is skipped without them (or with `GAMEDOCK_SKIP_BROWSER_TESTS=1`). The real Docker backend is covered by command-construction tests but has not yet been run against a real engine; [docs/NIMO_FIRST_TEST.md](docs/NIMO_FIRST_TEST.md) is the first real run.
