@@ -138,3 +138,24 @@ table.rank tfoot td { font-weight: 600; border-top: 2px solid var(--border); bor
 @media (max-width: 700px) { .live { grid-template-columns: repeat(2, 1fr); } }
 .card .actions.tools button { padding: 7px 12px; }
 .card .actions.tools { gap: 6px; }
+
+/* ---- step 5: MCP page ---- */
+.mcp-status { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.tile-value.mono { font-size: 15px; word-break: break-all; margin-bottom: 8px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.chip { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; padding: 2px 8px;
+  border-radius: 10px; background: #1f2a37; border: 1px solid var(--border); }
+.chip.danger { border-color: #6e2b2b; color: #ff9b9b; }
+button.small { padding: 4px 10px; font-size: 12px; }
+.snippet { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; }
+.snippet-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+.snippet pre { margin: 8px 0 0; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  overflow-x: auto; font-size: 12.5px; line-height: 1.45; }
+table.audit { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+table.audit td.small { font-size: 12px; color: var(--muted); word-break: break-word; max-width: 420px; }
+.nowrap { white-space: nowrap; }
+.abadge { display: inline-block; font-size: 11.5px; padding: 1px 8px; border-radius: 10px; background: #1f2a37; border: 1px solid var(--border); }
+.abadge.st-ok { color: #56d364; border-color: #2a5a35; }
+.abadge.st-error, .abadge.st-denied, .abadge.st-token_rejected, .abadge.st-invalid_arguments, .abadge.st-crashed, .abadge.st-unknown_tool { color: #ff9b9b; border-color: #6e2b2b; }
+.abadge.st-confirmation_required { color: #e3b341; border-color: #6b5316; }

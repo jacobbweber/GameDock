@@ -623,15 +623,131 @@ async function refreshStats() {
   renderMonitoring();
 }
 
+// -------------------------------------------------------------------- MCP page
+let mcpInfo = null;
+let mcpAudit = [];
+const DESTRUCTIVE_TOOLS = ["delete_server", "restore_backup", "delete_backup", "wipe_server_data"];
+
+function copyText(text, button) {
+  const done = () => { const old = button.textContent; button.textContent = "Copied"; setTimeout(() => { button.textContent = old; }, 1500); };
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(done, () => fallbackCopy(text, done));
+  } else fallbackCopy(text, done);
+}
+function fallbackCopy(text, done) {
+  const ta = el("textarea", { value: text });
+  ta.style.position = "fixed"; ta.style.opacity = "0";
+  document.body.append(ta); ta.select();
+  try { document.execCommand("copy"); done(); } catch (_) { /* leave it to the user */ }
+  ta.remove();
+}
+
+function snippetBlock(title, note, text) {
+  const btn = el("button", { class: "small", textContent: "Copy" });
+  btn.addEventListener("click", () => copyText(text, btn));
+  return el("div", { class: "snippet" },
+    el("div", { class: "snippet-head" }, el("strong", { textContent: title }), btn),
+    note ? el("div", { class: "live-sub", textContent: note }) : null,
+    el("pre", { textContent: text }));
+}
+
+function mcpSnippets(info) {
+  const url = info.endpoint_url;
+  const auth = info.token_set ? { headers: { Authorization: "Bearer <YOUR_GAMEDOCK_MCP_TOKEN>" } } : {};
+  const generic = JSON.stringify({ mcpServers: { gamedock: { type: "streamable-http", url, ...auth } } }, null, 2);
+  const bridgeArgs = ["-y", "mcp-remote", url];
+  const bridge = { command: "npx", args: bridgeArgs };
+  if (info.token_set) {
+    bridgeArgs.push("--header", "Authorization:${GAMEDOCK_AUTH}");
+    bridge.env = { GAMEDOCK_AUTH: "Bearer <YOUR_GAMEDOCK_MCP_TOKEN>" };
+  }
+  const py = [
+    "import asyncio, httpx2",
+    "from mcp import Client",
+    "from mcp.client.streamable_http import streamable_http_client", "",
+    "async def main():",
+    info.token_set ? '    http = httpx2.AsyncClient(headers={"Authorization": "Bearer <YOUR_GAMEDOCK_MCP_TOKEN>"})'
+      : "    http = httpx2.AsyncClient()",
+    `    async with http, Client(streamable_http_client("${url}", http_client=http)) as c:`,
+    "        print([t.name for t in (await c.list_tools()).tools])",
+    '        print(await c.call_tool("list_servers", {}))', "",
+    "asyncio.run(main())"].join("\n");
+  const curl = ["curl -s " + url, '  -H "Content-Type: application/json"', '  -H "Accept: application/json, text/event-stream"']
+    .concat(info.token_set ? ['  -H "Authorization: Bearer <YOUR_GAMEDOCK_MCP_TOKEN>"'] : [])
+    .concat([`  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'`]).join(" \\\n");
+  return [
+    snippetBlock("Generic MCP client (streamable HTTP)", "Works for most MCP-capable agent harnesses: add this to their MCP server list.", generic),
+    snippetBlock("Client that only speaks stdio", "Uses the mcp-remote bridge (needs Node.js).", JSON.stringify({ mcpServers: { gamedock: bridge } }, null, 2)),
+    snippetBlock("Python (official MCP SDK)", null, py),
+    snippetBlock("Quick check with curl", "Lists the tools this endpoint serves.", curl),
+  ];
+}
+
+function renderMcp() {
+  if (!mcpInfo) return;
+  const i = mcpInfo;
+  const modeText = { off: "Off", read_only: "Read only", standard: "Standard", full: "Full" }[i.mode] || i.mode;
+  const modeHelp = {
+    off: "Nothing is served.",
+    read_only: "Agents can look but not change anything.",
+    standard: "Agents can deploy, start/stop, change settings, back up and edit config files. Destructive tools are hidden.",
+    full: "Standard plus delete / restore / wipe, each behind a two-step confirmation.",
+  }[i.mode];
+  const urlBtn = el("button", { class: "small", textContent: "Copy" });
+  urlBtn.addEventListener("click", () => copyText(i.endpoint_url, urlBtn));
+  const cell = (label, ...kids) => el("div", { class: "tile" }, el("div", { class: "live-label", textContent: label }), ...kids);
+  const tools = (i.tools || []).map((t) => el("span", { class: `chip ${DESTRUCTIVE_TOOLS.includes(t) ? "danger" : ""}`, textContent: t }));
+  $("mcp-status").replaceChildren(
+    cell("Endpoint", el("div", { class: "tile-value mono", id: "mcp-url", textContent: i.endpoint_url }), urlBtn),
+    cell("Mode", el("div", { class: "tile-value", id: "mcp-mode", textContent: modeText }),
+      el("div", { class: "live-sub", textContent: i.reason || modeHelp || "" })),
+    cell("Access token", el("div", { class: "tile-value", id: "mcp-token", textContent: i.token_set ? "Required" : "Not set" }),
+      el("div", { class: "live-sub", textContent: i.token_set ? "Clients send it as a Bearer token. The value is never shown here." : "Only this machine can reach the endpoint. Set GAMEDOCK_MCP_TOKEN to require a token." })),
+    cell(`Tools served (${tools.length})`, el("div", { class: "chips", id: "mcp-tools" }, ...(tools.length ? tools : [el("span", { class: "live-sub", textContent: "none" })])),
+      i.enabled && !i.tools.some((t) => DESTRUCTIVE_TOOLS.includes(t)) ? el("div", { class: "live-sub", textContent: "Destructive tools are not available in this mode." }) : null));
+  $("mcp-snippets").replaceChildren(...(i.enabled ? mcpSnippets(i)
+    : [el("p", { class: "empty-small", textContent: "MCP is switched off, so there is nothing to connect to. Set GAMEDOCK_MCP_MODE (and GAMEDOCK_MCP_TOKEN if GameDock is not bound to localhost) and restart." })]));
+  renderMcpAudit();
+}
+
+function renderMcpAudit() {
+  const argText = (a) => {
+    const parts = Object.entries(a || {}).map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`);
+    const t = parts.join(" ");
+    return t.length > 140 ? t.slice(0, 140) + "\u2026" : t;
+  };
+  const fmt = (iso) => { const d = new Date(iso); return isNaN(d) ? iso : d.toLocaleString(); };
+  $("mcp-audit").replaceChildren(mcpAudit.length
+    ? el("table", { class: "list audit" },
+        el("thead", {}, el("tr", {}, el("th", { textContent: "Time" }), el("th", { textContent: "Tool" }), el("th", { textContent: "Arguments (secrets hidden)" }), el("th", { textContent: "Result" }))),
+        el("tbody", {}, ...mcpAudit.map((e) => el("tr", {},
+          el("td", { class: "nowrap", textContent: fmt(e.time) }),
+          el("td", {}, el("code", { textContent: e.tool })),
+          el("td", { class: "mono small", textContent: argText(e.args) }),
+          el("td", {}, el("span", { class: `abadge st-${e.status}`, textContent: e.status.replaceAll("_", " ") }),
+            e.detail ? el("div", { class: "live-sub", textContent: e.detail }) : null)))))
+    : el("p", { class: "empty-small", textContent: "No MCP calls yet." }));
+}
+
+async function refreshMcp() {
+  try {
+    mcpInfo = await api("/api/mcp/info");
+    mcpAudit = (await api("/api/mcp/audit?limit=25")).entries;
+  } catch (e) { /* connection indicator shows problems */ }
+  renderMcp();
+}
+
 // -------------------------------------------------------------------- routing
 function route() {
   const page = location.hash.startsWith("#/catalog") ? "catalog"
+    : location.hash.startsWith("#/mcp") ? "mcp"
     : location.hash.startsWith("#/monitoring") ? "monitoring" : "dashboard";
-  for (const p of ["dashboard", "catalog", "monitoring"]) {
+  for (const p of ["dashboard", "catalog", "monitoring", "mcp"]) {
     $(`page-${p}`).hidden = page !== p;
     $(`nav-${p}`).classList.toggle("active", page === p);
   }
   if (page === "monitoring") renderMonitoring();
+  if (page === "mcp") refreshMcp();
   showError("");
 }
 
@@ -662,4 +778,5 @@ loadCatalog();
 refresh().then(refreshStats);
 setInterval(() => {
   if (busy.size === 0 && !$("dialog").open && !document.hidden) refresh().then(refreshStats);
+  if (location.hash.startsWith("#/mcp") && !document.hidden) refreshMcp();
 }, POLL_MS);
