@@ -3,7 +3,7 @@
 "use strict";
 
 const POLL_MS = 3000;
-const busy = new Set();          // server ids with an action in flight
+const busy = new Map();          // server id -> what this page asked for (starting, stopping...), while the request runs
 let servers = [];
 let catalog = [];
 let stats = null;                // latest /api/stats snapshot
@@ -21,7 +21,7 @@ function el(tag, props = {}, ...children) {
   for (const [k, v] of Object.entries(props)) {
     if (k === "class") node.className = v;
     else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
-    else if (k.startsWith("aria-") || k === "role") node.setAttribute(k, v);
+    else if (k.startsWith("aria-") || k.startsWith("data-") || k === "role") node.setAttribute(k, v);
     else node[k] = v;
   }
   for (const c of children) if (c !== null && c !== undefined && c !== false) node.append(c);
@@ -87,36 +87,121 @@ function sparkline(values, { max, cls = "" } = {}) {
 const portText = (ports) => ports.length ? ports.map((p) => `${p.host}/${p.protocol}`).join(", ") : "none";
 
 // ------------------------------------------------------------------ dashboard
+// What GameDock itself is doing right now (also reported by the server, so it survives a page reload).
+const ACTIVITY = {
+  start: "starting", stop: "stopping", restart: "restarting",
+};
+const ACTIVITY_LABEL = {
+  deploying: "Deploying", starting: "Starting", stopping: "Stopping", restarting: "Restarting",
+  "backing up": "Backing up", restoring: "Restoring", updating: "Updating", "wiping data": "Wiping data",
+  deleting: "Deleting", "saving settings": "Saving settings", "saving config": "Saving config",
+};
+const ACTIVITY_HELP = {
+  deploying: "Downloading the game image and creating the server. The first time this can take a few minutes.",
+  starting: "Starting the container\u2026",
+  stopping: "Stopping. The game gets time to save and shut down cleanly (up to a minute).",
+  restarting: "Stopping the game and starting it again\u2026",
+  "backing up": "Copying the server's data. A running server is stopped first for a consistent copy and started again afterwards.",
+  restoring: "Saving a safety backup, then restoring the chosen backup\u2026",
+  updating: "Downloading the newest image, backing up, and recreating the container. This can take several minutes.",
+  "wiping data": "Saving a safety backup, then emptying the data folder\u2026",
+  deleting: "Removing the server\u2026",
+  "saving settings": "Re-creating the container with the new settings\u2026",
+  "saving config": "Saving the config file\u2026",
+};
+
+const spinner = () => el("span", { class: "spinner", "aria-hidden": "true" });
+
+// One answer to "what should this tile say?": { kind, label, working, progress (0-100|null), sub }
+function serverState(s) {
+  const act = busy.get(s.id) || s.activity;
+  if (act) {
+    return { kind: "busy", label: `${ACTIVITY_LABEL[act] || act}\u2026`, working: true, progress: null, sub: ACTIVITY_HELP[act] || "" };
+  }
+  if (s.status === "running") {
+    if (s.phase === "installing") {
+      const p = typeof s.progress === "number" ? s.progress : null;
+      return { kind: "installing", label: p === null ? "Installing" : `Installing ${Math.round(p)}%`, working: true, progress: p,
+        sub: s.phase_detail || "Downloading and installing game files. It cannot be joined yet." };
+    }
+    if (s.phase === "starting") {
+      return { kind: "starting", label: "Starting", working: true, progress: null,
+        sub: s.phase_detail || "The container is up but the game is not ready to join yet." };
+    }
+    if (s.phase === "unhealthy") return { kind: "unhealthy", label: "Unhealthy", working: false, progress: null, sub: s.phase_detail };
+    return { kind: "running", label: "Running", working: false, progress: null, sub: "", ready: s.ready !== false };
+  }
+  return { kind: s.status, label: s.status.replace("_", " "), working: false, progress: null, sub: "" };
+}
+
+function progressBar(st) {
+  const known = st.progress !== null && st.progress !== undefined;
+  const bar = el("div", { class: `progress ${known ? "" : "indeterminate"}`, role: "progressbar", "aria-label": st.label,
+    "aria-valuemin": 0, "aria-valuemax": 100 }, el("div", { class: "fill", style: known ? `width:${Math.max(2, Math.min(100, st.progress))}%` : "" }));
+  if (known) bar.setAttribute("aria-valuenow", String(Math.round(st.progress)));
+  return bar;
+}
+
+function statusBox(st) {
+  const box = el("div", { class: `statusbox ${st.kind}` });
+  if (st.working) {
+    box.append(progressBar(st), el("div", { class: "status-text", textContent: st.sub }));
+  } else if (st.kind === "unhealthy") {
+    box.append(el("div", { class: "status-text warn", textContent: st.sub }));
+  } else if (st.kind === "running" && st.ready) {
+    box.append(el("div", { class: "status-text ok", textContent: "\u2713 Ready to join" }));
+  }
+  box.hidden = !box.childNodes.length;
+  return box;
+}
+
+function badgeNode(st) {
+  return el("span", { class: `badge ${st.working ? "busy" : st.kind}`, "aria-live": "polite" }, st.working ? spinner() : null, st.label);
+}
+
 function serverCard(s) {
-  const isBusy = busy.has(s.id);
+  const st = serverState(s);
+  const isBusy = st.kind === "busy";
   const running = s.status === "running";
-  const label = isBusy ? "working" : s.status.replace("_", " ");
-  const badgeClass = isBusy ? "busy" : s.status;
 
   const btn = (text, cls, onclick, disabled, title) =>
     el("button", { class: cls, type: "button", textContent: text, disabled: disabled || isBusy, title: title || "",
       onclick, "aria-label": `${text} ${s.name}` });
 
-  return el("article", { class: "card", id: `card-${s.id}` },
+  return el("article", { class: `card ${st.working ? "working" : ""}`, id: `card-${s.id}` },
     el("div", { class: "card-head" },
       el("h2", { textContent: s.name }),
-      el("span", { class: `badge ${badgeClass}`, textContent: label })),
+      badgeNode(st)),
     el("p", { class: "desc", textContent: s.game_name }),
+    statusBox(st),
     el("div", { class: "meta" }, "Image: ", el("code", { textContent: s.image })),
     el("div", { class: "meta", textContent: `Host ports: ${portText(s.ports)}` }),
-    s.detail ? el("div", { class: s.status === "error" ? "meta problem" : "meta", textContent: s.detail }) : null,
+    s.detail && s.status !== "not_created" ? el("div", { class: s.status === "error" ? "meta problem" : "meta", textContent: s.detail }) : null,
     liveBlock(s),
     el("div", { class: "actions" },
       btn("Start", "start", () => act(s.id, "start"), running),
       btn("Stop", "stop", () => act(s.id, "stop"), !running),
       btn("Restart", "", () => act(s.id, "restart"), !running)),
     el("div", { class: "actions tools" },
+      btn("Logs", "secondary", () => openLogs(s.id), s.status === "not_created"),
       btn("Backups", "secondary", () => openBackups(s.id), false),
       s.config_file_count > 0 ? btn("Config", "secondary", () => openConfig(s.id), false) : null,
       s.update_method !== "none" ? btn("Update", "secondary", () => openUpdate(s.id), false) : null,
       el("span", { class: "spacer" }),
       btn("Edit", "secondary", () => openEdit(s), running, running ? "Stop the server to edit it" : ""),
       btn("Delete", "danger", () => openDelete(s), running, running ? "Stop the server to delete it" : "")));
+}
+
+function failedDeployCard(job) {
+  return el("article", { class: "card failed", id: `card-deploy-${job.key}` },
+    el("div", { class: "card-head" },
+      el("h2", { textContent: job.name }),
+      el("span", { class: "badge error", textContent: "Deploy failed" })),
+    el("p", { class: "desc", textContent: job.entry.name }),
+    el("div", { class: "statusbox failed" }, el("div", { class: "status-text warn", textContent: job.error })),
+    el("div", { class: "actions" },
+      el("button", { class: "primary", type: "button", textContent: "Back to the form", onclick: () => { deployJobs.delete(job.key); renderServers(); openDeploy(job.entry); } }),
+      el("button", { class: "secondary", type: "button", textContent: "Dismiss", onclick: () => { deployJobs.delete(job.key); renderServers(); } })));
 }
 
 function liveBlock(s) {
@@ -139,14 +224,93 @@ function liveBlock(s) {
     cell("Uptime", fmtUptime(st.uptime_seconds), null, null));
 }
 
+// Tiles are updated in place, not rebuilt, so spinners and progress bars keep animating between polls.
+const cardCache = new Map();   // key -> { node, structSig, badgeSig, statusSig, liveSig }
+const deployJobs = new Map();  // deploys started from this page: key -> { key, name, entry, state, error }
+let jobSeq = 0;
+
+function pendingJobs() {
+  // A deploy shows up in the server list itself (activity "deploying") once the server knows about it; until then
+  // (or if it failed) this page shows its own tile so there is feedback at once.
+  return [...deployJobs.values()].filter((j) => j.state === "failed"
+    || !servers.some((x) => x.activity === "deploying" && x.name.toLowerCase() === j.name.toLowerCase()));
+}
+
+function liveSig(s) {
+  const st = stats && stats.servers.find((x) => x.server_id === s.id);
+  const pts = history.servers[s.id] && history.servers[s.id].points;
+  return s.status === "running" ? JSON.stringify([st, pts && pts.length, pts && pts.length && pts[pts.length - 1].t]) : "idle";
+}
+
+function syncCard(key, s, build) {
+  const st = serverState(s);
+  const structSig = JSON.stringify([s.name, s.status, s.detail, s.ports, s.image, s.config_file_count, s.update_method,
+    s.game_name, st.kind === "busy", s.id, s.env && s.env.length]);
+  const badgeSig = `${st.working ? 1 : 0}|${st.kind}|${st.label}`;
+  const statusSig = JSON.stringify([st.kind, st.working, st.progress, st.sub, st.ready]);
+  const lsig = liveSig(s);
+  let c = cardCache.get(key);
+  if (!c || c.structSig !== structSig) {
+    c = { node: build(s), structSig, badgeSig, statusSig, liveSig: lsig };
+    cardCache.set(key, c);
+    return c.node;
+  }
+  c.node.classList.toggle("working", st.working);
+  if (c.badgeSig !== badgeSig) {
+    c.node.querySelector(".badge").replaceWith(badgeNode(st));
+    c.badgeSig = badgeSig;
+  }
+  if (c.statusSig !== statusSig) {
+    const old = c.node.querySelector(".statusbox");
+    const fill = old && old.querySelector(".progress:not(.indeterminate) .fill");
+    const prev = JSON.parse(c.statusSig);
+    if (fill && st.working && st.kind === prev[0] && st.progress !== null) {
+      fill.style.width = `${Math.max(2, Math.min(100, st.progress))}%`;   // same kind of wait: just move the bar
+      old.querySelector(".progress").setAttribute("aria-valuenow", String(Math.round(st.progress)));
+      old.querySelector(".status-text").textContent = st.sub;
+    } else {
+      old.replaceWith(statusBox(st));
+    }
+    c.statusSig = statusSig;
+  }
+  if (c.liveSig !== lsig) {
+    c.node.querySelector(".live").replaceWith(liveBlock(s));
+    c.liveSig = lsig;
+  }
+  return c.node;
+}
+
 function renderServers() {
-  $("servers").replaceChildren(...servers.map(serverCard));
+  const wanted = [];
+  const keys = new Set();
+  for (const j of pendingJobs()) {
+    const key = `job-${j.key}`;
+    keys.add(key);
+    if (j.state === "failed") {
+      let c = cardCache.get(key);
+      if (!c) { c = { node: failedDeployCard(j) }; cardCache.set(key, c); }
+      wanted.push(c.node);
+    } else {
+      wanted.push(syncCard(key, {
+        id: key, name: j.name, game_name: j.entry.name, image: j.entry.image, status: "not_created", ports: [],
+        detail: "", activity: "deploying", config_file_count: 0, update_method: "none", env: [] }, serverCard));
+    }
+  }
+  for (const s of servers) {
+    keys.add(s.id);
+    wanted.push(syncCard(s.id, s, serverCard));
+  }
+  for (const k of [...cardCache.keys()]) if (!keys.has(k)) cardCache.delete(k);
+  const box = $("servers");
+  // Touch the page only where something changed (moving a tile restarts its animations).
+  [...box.children].forEach((n) => { if (!wanted.includes(n)) n.remove(); });
+  wanted.forEach((n, idx) => { if (box.children[idx] !== n) box.insertBefore(n, box.children[idx] || null); });
   $("loading").hidden = serversLoaded;
-  $("empty").hidden = !serversLoaded || servers.length > 0;
+  $("empty").hidden = !serversLoaded || servers.length > 0 || wanted.length > 0;
 }
 
 async function act(id, action) {
-  busy.add(id);
+  busy.set(id, ACTIVITY[action] || action);
   showError("");
   renderServers();
   try {
@@ -246,6 +410,8 @@ function buildServerForm({ title, submitText, name, nameEditable = true, ports, 
     ev.preventDefault();
     err.hidden = true;
     submit.disabled = true;
+    const submitLabel = submit.textContent;
+    submit.replaceChildren(spinner(), "Working\u2026");
     const env = {};
     form.querySelectorAll("input[data-env]").forEach((i) => { env[i.dataset.env] = i.value; });
     const body = {
@@ -262,10 +428,13 @@ function buildServerForm({ title, submitText, name, nameEditable = true, ports, 
       err.hidden = false;
     } finally {
       submit.disabled = false;
+      submit.textContent = submitLabel;
     }
   });
   return form;
 }
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function openDeploy(entry) {
   const values = Object.fromEntries(entry.fields.map((f) => [f.name, f.default]));
@@ -273,7 +442,20 @@ function openDeploy(entry) {
     title: `Deploy ${entry.name}`, submitText: "Deploy", name: entry.name,
     ports: entry.ports, fields: entry.fields, values, editing: false, showStart: true,
     onSubmit: async (body, startAfter) => {
-      await api("/api/servers", "POST", { game_id: entry.id, start: startAfter, ...body });
+      // Quick problems (name taken, port in use, missing field) come back within a moment and are shown in this
+      // form. If the request is still running after that, deploying is slow (downloading the image): close the
+      // form and show a "Deploying" tile on the dashboard at once instead of leaving the user staring at a button.
+      const req = api("/api/servers", "POST", { game_id: entry.id, start: startAfter, ...body });
+      const outcome = await Promise.race([req.then(() => "done"), sleep(700).then(() => "slow")]);
+      if (outcome === "slow") {
+        const job = { key: ++jobSeq, name: body.name, entry, state: "deploying", error: "" };
+        deployJobs.set(job.key, job);
+        location.hash = "#/";
+        renderServers();
+        req.then(() => deployJobs.delete(job.key), (e) => { job.state = "failed"; job.error = `Could not deploy: ${e.message}`; })
+          .finally(() => refresh());
+        return;
+      }
       await refresh();
       location.hash = "#/";
     },
@@ -339,8 +521,11 @@ function openDelete(s) {
 }
 
 // ------------------------------------------------------- shared confirm / result views
-function confirmView({ title, paragraphs, checkboxLabel, confirmText, danger, onConfirm, onBack }) {
+function confirmView({ title, paragraphs, checkboxLabel, confirmText, workingText, danger, onConfirm, onBack }) {
   const err = el("div", { class: "form-error", hidden: true });
+  const working = el("div", { class: "statusbox busy", hidden: true, role: "status" },
+    el("div", { class: "progress indeterminate" }, el("div", { class: "fill" })),
+    el("div", { class: "status-text", textContent: workingText || "Working\u2026" }));
   const cb = checkboxLabel ? el("input", { type: "checkbox" }) : null;
   const go = el("button", { type: "submit", class: danger ? "danger" : "primary", textContent: confirmText, disabled: !!cb });
   if (cb) cb.addEventListener("change", () => { go.disabled = !cb.checked; });
@@ -348,14 +533,15 @@ function confirmView({ title, paragraphs, checkboxLabel, confirmText, danger, on
     el("h3", { textContent: title }),
     ...paragraphs.map((t) => el("p", { textContent: t })),
     cb ? el("label", { class: "check" }, cb, checkboxLabel) : null,
-    err,
+    working, err,
     el("div", { class: "dialog-actions" },
       el("button", { type: "button", class: "secondary", textContent: "Cancel", onclick: onBack || closeDialog }), go));
   form.addEventListener("submit", async (ev) => {
     ev.preventDefault();
     err.hidden = true;
     go.disabled = true;
-    go.textContent = "Working\u2026";
+    go.replaceChildren(spinner(), "Working\u2026");
+    working.hidden = false;
     try {
       await onConfirm();
     } catch (e) {
@@ -363,6 +549,7 @@ function confirmView({ title, paragraphs, checkboxLabel, confirmText, danger, on
       err.hidden = false;
       go.disabled = cb ? !cb.checked : false;
       go.textContent = confirmText;
+      working.hidden = true;
     }
   });
   return form;
@@ -396,13 +583,18 @@ async function openBackups(id, message) {
   const msg = el("div", { class: message ? "okmsg" : "okmsg", hidden: !message, textContent: message || "" });
   const err = el("div", { class: "form-error", hidden: true });
   const create = el("button", { type: "button", class: "primary", textContent: "Create backup" });
+  const working = el("div", { class: "statusbox busy", hidden: true, role: "status" },
+    el("div", { class: "progress indeterminate" }, el("div", { class: "fill" })),
+    el("div", { class: "status-text", textContent: running
+      ? "Backing up\u2026 the server is stopped first for a consistent copy and started again afterwards."
+      : "Backing up\u2026" }));
   create.addEventListener("click", async () => {
-    create.disabled = true; create.textContent = "Backing up\u2026"; err.hidden = true;
+    create.disabled = true; create.replaceChildren(spinner(), "Backing up\u2026"); err.hidden = true; working.hidden = false;
     try {
       const r = await api(`/api/servers/${sid(id)}/backups`, "POST", { live: live.checked });
       const extra = r.warnings.length ? " " + r.warnings.join(" ") : "";
       await openBackups(id, `Backup ${r.backup.name} created. ${r.note}${extra}`);
-    } catch (e) { err.textContent = e.message; err.hidden = false; create.disabled = false; create.textContent = "Create backup"; }
+    } catch (e) { err.textContent = e.message; err.hidden = false; create.disabled = false; create.textContent = "Create backup"; working.hidden = true; }
   });
 
   const rows = data.backups.map((b) => el("tr", {},
@@ -421,7 +613,7 @@ async function openBackups(id, message) {
     running ? el("p", { class: "warn", textContent: "This server is running. By default it is stopped for the backup (so the files are consistent) and started again afterwards." }) : null,
     running ? el("label", { class: "check" }, live, "Back up without stopping (live) \u2013 files may be inconsistent") : null,
     el("div", { class: "toolbar" }, create),
-    msg, err,
+    working, msg, err,
     data.backups.length
       ? el("table", { class: "list" },
           el("thead", {}, el("tr", {}, ...["Backup", "Type", "Created", "Size", ""].map((h) => el("th", { textContent: h })))),
@@ -443,6 +635,7 @@ function confirmRestore(id, b) {
     ],
     checkboxLabel: "Yes, replace the current data with this backup.",
     confirmText: "Restore", danger: true,
+    workingText: "Saving a safety backup of the current data, then restoring\u2026",
     onBack: () => openBackups(id),
     onConfirm: async () => {
       const r = await api(`/api/servers/${sid(id)}/backups/${encodeURIComponent(b.name)}/restore?confirm=true`, "POST");
@@ -473,6 +666,7 @@ function confirmWipe(id) {
     ],
     checkboxLabel: "Yes, delete all of this server's data.",
     confirmText: "Wipe data", danger: true,
+    workingText: "Saving a safety backup, then emptying the data folder\u2026",
     onBack: () => openBackups(id),
     onConfirm: async () => {
       const r = await api(`/api/servers/${sid(id)}/wipe-data?confirm=true`, "POST");
@@ -501,6 +695,7 @@ async function openUpdate(id) {
       "A backup of the data is taken automatically before the update. If the backup fails, the update is cancelled. If the image is already the newest, nothing is changed.",
     ],
     confirmText: "Update", danger: false,
+    workingText: "Downloading the newest image, backing up and recreating the container. This can take several minutes\u2026",
     onConfirm: async () => {
       const r = await api(`/api/servers/${sid(id)}/update-image?confirm=true`, "POST");
       await refresh();
@@ -514,7 +709,77 @@ async function openUpdate(id) {
   }));
 }
 
+// -------------------------------------------------------------------- log viewer
+// Doubles as the server's detail view: its header shows the live state (Starting, Installing 52%, ...) next to the log.
+async function openLogs(id) {
+  await refresh();
+  const s0 = findServer(id);
+  if (!s0) return;
+  const view = { lines: 200, follow: true, timer: null, busy: false };
+  const pre = el("pre", { class: "logbox", id: "log-text", tabIndex: 0, "aria-label": `Log of ${s0.name}`, "aria-live": "off" });
+  const stateLine = el("div", { class: "log-state" });
+  const info = el("span", { class: "hint", id: "log-info" });
+  const err = el("div", { class: "form-error", hidden: true });
+  const follow = el("input", { type: "checkbox", id: "log-follow", checked: true });
+  const lines = el("select", { id: "log-lines", "aria-label": "Number of lines" },
+    ...[100, 200, 500, 1000].map((n) => el("option", { value: String(n), textContent: `${n} lines`, selected: n === view.lines })));
+  const copy = el("button", { type: "button", class: "secondary", textContent: "Copy", id: "log-copy" });
+  const reload = el("button", { type: "button", class: "secondary", textContent: "Refresh", id: "log-refresh" });
+
+  function paintState() {
+    const s = findServer(id) || s0;
+    const st = serverState(s);
+    stateLine.replaceChildren(badgeNode(st), el("span", { class: "log-state-text", textContent:
+      st.sub || (st.kind === "running" && st.ready ? "Ready to join." : st.kind === "stopped" ? "Stopped. This is what it logged before it stopped." : "") }));
+    if (st.working) stateLine.append(progressBar(st));
+  }
+
+  async function load() {
+    if (!document.body.contains(pre)) { clearInterval(view.timer); return; }   // another dialog took over
+    if (view.busy) return;
+    view.busy = true;
+    try {
+      const r = await api(`/api/servers/${sid(id)}/logs?lines=${view.lines}`);
+      const nearBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
+      const first = !pre.dataset.loaded;
+      pre.textContent = r.text || r.note || "(nothing logged yet)";
+      pre.classList.toggle("empty", !r.text);
+      pre.dataset.loaded = "1";
+      if (first || (view.follow && nearBottom)) pre.scrollTop = pre.scrollHeight;
+      info.textContent = `Updated ${new Date().toLocaleTimeString()} \u00b7 ${r.lines} line${r.lines === 1 ? "" : "s"}${r.truncated ? " (older lines are not shown)" : ""}`;
+      err.hidden = true;
+    } catch (e) { err.textContent = e.message; err.hidden = false; }
+    finally { view.busy = false; paintState(); }
+  }
+  function schedule() {
+    clearInterval(view.timer);
+    if (view.follow) view.timer = setInterval(load, 3000);
+  }
+  follow.addEventListener("change", () => { view.follow = follow.checked; schedule(); if (view.follow) load(); });
+  lines.addEventListener("change", () => { view.lines = Number(lines.value); load(); });
+  reload.addEventListener("click", load);
+  copy.addEventListener("click", () => copyText(pre.textContent, copy));
+
+  const d = openWide(el("div", { class: "panel" },
+    el("h3", { textContent: `Logs \u2013 ${s0.name}` }),
+    stateLine,
+    el("div", { class: "toolbar wrap" },
+      el("label", { class: "check" }, follow, "Follow (refresh every 3 seconds)"), lines, reload, copy, el("span", { class: "spacer" }), info),
+    err, pre,
+    el("div", { class: "dialog-actions" },
+      el("button", { type: "button", class: "secondary", textContent: "Close", onclick: closeDialog }))));
+  d.addEventListener("close", () => clearInterval(view.timer), { once: true });
+  paintState();
+  await load();
+  schedule();
+}
+
 // -------------------------------------------------------------------- config editor
+const MASK = "********";
+const isBool = (f) => f.type === "bool";
+const boolOf = (v) => String(v).trim().toLowerCase() === "true";
+const sameValue = (f, a, b) => (isBool(f) ? boolOf(a) === boolOf(b) : a === b);
+
 async function openConfig(id) {
   await refresh();
   const s = findServer(id);
@@ -524,42 +789,259 @@ async function openConfig(id) {
   catch (e) { return openDialog(resultView("Config", [[e.message, "warn"]])); }
 
   const select = el("select", { id: "config-file" }, ...files.map((f) => el("option", { value: f.path, textContent: f.label || f.path })));
-  const area = el("textarea", { id: "config-text", spellcheck: false, rows: 18, wrap: "off" });
   const pathLabel = el("div", { class: "meta" });
+  const catNote = el("p", { class: "warn", hidden: true });
   const note = el("p", { class: "hint" });
   const err = el("div", { class: "form-error", hidden: true });
   const ok = el("div", { class: "okmsg", hidden: true });
-  const save = el("button", { type: "button", class: "primary", textContent: "Save" });
-  let current = null;
+  const body = el("div", { class: "cfg-body" });
+  const save = el("button", { type: "button", class: "primary", textContent: "Save", id: "config-save" });
+
+  // everything about the file currently open
+  let cur = null;        // { r, orig: Map id->value, fields, formBase: {text, values: Map}, edits: Map, mode, rawSynced }
+  let ui = {};           // live DOM pieces of the current view
+
+  const editable = () => cur && cur.r.editable_now && cur.r.info.exists !== false;
+  const fieldById = (fid) => cur.fields.find((f) => f.id === fid);
+  const valueOf = (f) => (cur.edits.has(f.id) ? cur.edits.get(f.id) : cur.formBase.values.get(f.id));
+  const isChanged = (f) => !cur.orig.has(f.id) || !sameValue(f, valueOf(f), cur.orig.get(f.id));
+  const changedFields = () => cur.fields.filter(isChanged);
+  const dirty = () => (cur.mode === "raw" ? ui.area.value !== cur.r.content
+    : cur.edits.size > 0 || cur.formBase.text !== cur.r.content);
+
+  function setFormBase(text, form) {
+    cur.formBase = { text, values: new Map(form.fields.map((f) => [f.id, f.value])) };
+    cur.fields = form.fields;
+    cur.edits = new Map();
+  }
+
+  async function preview(text, edits) {
+    return api(`/api/servers/${sid(id)}/config/form`, "POST",
+      { path: select.value, content: text, changes: Object.fromEntries(edits) });
+  }
+
+  function refreshButtons() {
+    save.disabled = !editable() || !dirty();
+    if (cur.mode === "form") {
+      const n = changedFields().length;
+      ui.count.textContent = n ? `${n} setting${n === 1 ? "" : "s"} changed` : "No changes yet";
+      ui.count.classList.toggle("has", n > 0);
+      ui.fields.forEach(({ f, row, was, reset, input }) => {
+        const changed = isChanged(f);
+        row.classList.toggle("changed", changed);
+        was.hidden = !changed;
+        reset.hidden = !changed;
+        if (changed) was.textContent = f.sensitive ? "password will change" : `was: ${cur.orig.has(f.id) ? (cur.orig.get(f.id) === "" ? "(empty)" : cur.orig.get(f.id)) : "(new)"}`;
+      });
+      applyFilter();
+      paintReview();
+    }
+  }
+
+  function paintReview() {
+    const ch = changedFields();
+    ui.review.hidden = !ch.length;
+    if (!ch.length) return;
+    ui.review.replaceChildren(el("strong", { textContent: "These changes will be saved:" }),
+      el("ul", {}, ...ch.map((f) => {
+        const from = cur.orig.has(f.id) ? cur.orig.get(f.id) : "(new)";
+        const shown = (v) => (f.sensitive ? (v === "" ? "(empty)" : "\u2022\u2022\u2022\u2022\u2022\u2022") : v === "" ? "(empty)" : v);
+        return el("li", {}, el("span", { class: "k", textContent: f.label }), ": ",
+          el("span", { class: "from", textContent: shown(from) }), " \u2192 ", el("span", { class: "to", textContent: shown(valueOf(f)) }));
+      })));
+  }
+
+  function applyFilter() {
+    const q = ui.search.value.trim().toLowerCase();
+    const onlyChanged = ui.onlyChanged.checked;
+    let shown = 0;
+    ui.groups.forEach(({ box, rows }) => {
+      let any = false;
+      rows.forEach(({ f, row }) => {
+        const hit = (!q || `${f.label} ${f.key} ${f.group} ${f.sensitive ? "" : valueOf(f)}`.toLowerCase().includes(q)) && (!onlyChanged || isChanged(f));
+        row.hidden = !hit;
+        any = any || hit;
+        if (hit) shown++;
+      });
+      box.hidden = !any;
+    });
+    ui.none.hidden = shown > 0;
+    ui.none.textContent = onlyChanged && !q ? "Nothing has been changed yet." : "No setting matches your search.";
+  }
+
+  function inputFor(f) {
+    const ro = !editable();
+    const set = (v) => { if (sameValue(f, v, cur.formBase.values.get(f.id))) cur.edits.delete(f.id); else cur.edits.set(f.id, v); refreshButtons(); };
+    let input;
+    if (isBool(f)) {
+      input = el("input", { type: "checkbox", role: "switch", checked: boolOf(valueOf(f)), disabled: ro, id: `cfg-${f.id}` });
+      const text = el("span", { class: "switch-text", textContent: boolOf(valueOf(f)) ? "On" : "Off" });
+      input.addEventListener("change", () => { text.textContent = input.checked ? "On" : "Off"; set(input.checked ? "true" : "false"); });
+      return { input, widget: el("label", { class: "switch" }, input, el("span", { class: "slider" }), text) };
+    }
+    if (f.type === "json") {
+      input = el("textarea", { class: "cfg-json", rows: Math.min(8, Math.max(2, valueOf(f).split("\n").length)), spellcheck: false, disabled: ro, id: `cfg-${f.id}` });
+      input.value = valueOf(f);
+      input.addEventListener("input", () => set(input.value));
+      return { input, widget: input };
+    }
+    input = el("input", { type: f.sensitive ? "password" : "text", value: valueOf(f), disabled: ro, id: `cfg-${f.id}`,
+      autocomplete: f.sensitive ? "new-password" : "off", spellcheck: false,
+      inputMode: f.type === "number" ? "decimal" : "text" });
+    if (f.sensitive && valueOf(f) === MASK) input.title = "Hidden. Leave as it is to keep the current value, or type a new one.";
+    input.addEventListener("input", () => set(input.value));
+    return { input, widget: input };
+  }
+
+  function buildForm() {
+    ui.fields = [];
+    ui.groups = [];
+    ui.search = el("input", { type: "search", id: "cfg-search", placeholder: "Search settings\u2026", "aria-label": "Search settings",
+      oninput: () => applyFilter() });
+    ui.onlyChanged = el("input", { type: "checkbox", id: "cfg-only-changed", onchange: () => applyFilter() });
+    ui.count = el("span", { class: "chg-count", id: "cfg-count" });
+    ui.review = el("div", { class: "review", id: "cfg-review", hidden: true });
+    ui.none = el("p", { class: "empty-small", hidden: true });
+    const byGroup = new Map();
+    cur.fields.forEach((f) => { if (!byGroup.has(f.group)) byGroup.set(f.group, []); byGroup.get(f.group).push(f); });
+    const groupBoxes = [];
+    for (const [group, fs] of byGroup) {
+      const rows = [];
+      const box = el("div", { class: "cfg-group" }, group ? el("h4", { textContent: group }) : null);
+      fs.forEach((f) => {
+        const { input, widget } = inputFor(f);
+        const was = el("div", { class: "was", hidden: true });
+        const reset = el("button", { type: "button", class: "small secondary", textContent: "Undo", hidden: true, "aria-label": `Undo change to ${f.label}`,
+          onclick: () => {
+            cur.edits.delete(f.id);
+            const v = cur.orig.has(f.id) ? cur.orig.get(f.id) : cur.formBase.values.get(f.id);
+            if (cur.orig.has(f.id) && !sameValue(f, v, cur.formBase.values.get(f.id))) cur.edits.set(f.id, v);
+            if (isBool(f)) { input.checked = boolOf(v); input.dispatchEvent(new Event("change")); } else { input.value = v; input.dispatchEvent(new Event("input")); }
+            refreshButtons();
+          } });
+        const row = el("div", { class: "cfg-row" },
+          el("label", { class: "cfg-label", htmlFor: `cfg-${f.id}` }, el("span", { class: "nm", textContent: f.label }),
+            el("span", { class: "key", textContent: f.key })),
+          el("div", { class: "cfg-input" }, widget, el("div", { class: "cfg-sub" }, was, reset)));
+        box.append(row);
+        rows.push({ f, row });
+        ui.fields.push({ f, row, was, reset, input });
+      });
+      ui.groups.push({ box, rows });
+      groupBoxes.push(box);
+    }
+    return el("div", { class: "cfg-form" },
+      el("div", { class: "cfg-tools" }, ui.search,
+        el("label", { class: "check" }, ui.onlyChanged, "Only changed"), ui.count),
+      ui.review,
+      el("div", { class: "cfg-list" }, ...groupBoxes, ui.none));
+  }
+
+  function buildRaw(text) {
+    ui.area = el("textarea", { id: "config-text", spellcheck: false, rows: 18, wrap: "soft", disabled: !editable() });
+    ui.area.value = text;
+    ui.area.addEventListener("input", () => refreshButtons());
+    return ui.area;
+  }
+
+  async function show(mode) {
+    err.hidden = true;
+    const leaving = cur.mode;
+    try {
+      if (leaving === "form" && mode === "raw") {
+        const text = cur.edits.size ? (await preview(cur.formBase.text, cur.edits)).content : cur.formBase.text;
+        cur.rawSynced = text;
+        cur.mode = "raw";
+        body.replaceChildren(buildRaw(text), el("p", { class: "hint", textContent: "Raw text, exactly as stored in the file. Long lines wrap on screen only; nothing is added to the file." }));
+      } else if (leaving === "raw" && mode === "form") {
+        if (ui.area.value !== cur.rawSynced) {
+          const res = await api(`/api/servers/${sid(id)}/config/form`, "POST", { path: select.value, content: ui.area.value });
+          if (!res.form) throw new Error("This text can no longer be shown as a form (the structure is not recognised). Fix it in the raw view first.");
+          setFormBase(ui.area.value, res.form);
+        }
+        cur.mode = "form";
+        body.replaceChildren(buildForm());
+      } else {
+        cur.mode = mode;
+        body.replaceChildren(mode === "form" ? buildForm() : buildRaw(cur.r.content));
+        if (mode === "raw") { cur.rawSynced = cur.r.content; body.append(el("p", { class: "hint", textContent: "Raw text, exactly as stored in the file." })); }
+      }
+    } catch (e) {
+      err.textContent = e.message; err.hidden = false;
+      cur.mode = leaving;
+    }
+    paintToggle();
+    refreshButtons();
+  }
+
+  function paintToggle() {
+    if (!ui.toggle) return;
+    ui.toggle.querySelectorAll("button").forEach((b) => {
+      const on = b.dataset.mode === cur.mode;
+      b.classList.toggle("on", on); b.setAttribute("aria-pressed", String(on));
+    });
+  }
 
   async function load() {
     err.hidden = true; ok.hidden = true; save.disabled = true;
+    ui = {};
     try {
       const r = await api(`/api/servers/${sid(id)}/config/file?path=${encodeURIComponent(select.value)}`);
-      current = r;
-      area.value = r.content;
-      area.disabled = !r.editable_now;
-      save.disabled = !r.editable_now;
+      cur = { r, mode: r.form ? "form" : "raw", orig: new Map((r.form ? r.form.fields : []).map((f) => [f.id, f.value])),
+        fields: [], formBase: { text: r.content, values: new Map() }, edits: new Map(), rawSynced: r.content };
+      if (r.form) setFormBase(r.content, r.form);
       pathLabel.replaceChildren("File: ", el("code", { textContent: r.info.path }),
         r.info.backups.length ? ` \u2013 ${r.info.backups.length} automatic .bak cop${r.info.backups.length === 1 ? "y" : "ies"} kept next to it` : "");
+      catNote.textContent = r.info.note || ""; catNote.hidden = !r.info.note;
       note.textContent = r.note;
-    } catch (e) { err.textContent = e.message; err.hidden = false; area.value = ""; area.disabled = true; }
+      if (!r.info.exists) return showMissing();
+      ui.toggle = r.form ? el("div", { class: "seg", role: "group", "aria-label": "View" },
+        el("button", { type: "button", "data-mode": "form", textContent: "Settings form", onclick: () => cur.mode !== "form" && show("form") }),
+        el("button", { type: "button", "data-mode": "raw", textContent: "Raw text", onclick: () => cur.mode !== "raw" && show("raw") })) : null;
+      wrap.replaceChildren(...[ui.toggle, body].filter(Boolean));
+      body.replaceChildren(cur.mode === "form" ? buildForm() : buildRaw(r.content));
+      if (!r.form) body.append(el("p", { class: "hint", textContent: "This kind of file has no settings form, so it is shown as raw text." }));
+      paintToggle();
+      refreshButtons();
+    } catch (e) {
+      cur = null;
+      err.textContent = e.message; err.hidden = false;
+      wrap.replaceChildren();
+    }
   }
+
+  function showMissing() {
+    save.disabled = true;
+    const manual = el("button", { type: "button", class: "secondary", textContent: "Write the file myself anyway",
+      onclick: () => { cur.mode = "raw"; cur.r = { ...cur.r, info: { ...cur.r.info, exists: undefined } }; wrap.replaceChildren(body); body.replaceChildren(buildRaw("")); refreshButtons(); } });
+    wrap.replaceChildren(el("div", { class: "empty-state inline", id: "config-missing" },
+      el("h4", { textContent: "No settings file yet" }),
+      el("p", { textContent: "This game has not created its settings file yet; it appears after the first full start." }),
+      el("p", { class: "hint", textContent: s.status === "running" && !s.ready
+        ? "The server is still starting. Check the Logs, and come back when it shows Running." : "Start the server and wait until it shows Running, then open this page again." }),
+      manual));
+  }
+
+  const wrap = el("div", { class: "cfg-wrap" });
   select.addEventListener("change", load);
   save.addEventListener("click", async () => {
     err.hidden = true; ok.hidden = true; save.disabled = true;
+    save.replaceChildren(spinner(), "Saving\u2026");
     try {
-      const r = await api(`/api/servers/${sid(id)}/config/file`, "PUT", { path: select.value, content: area.value });
-      ok.textContent = r.note; ok.hidden = false;
+      let content;
+      if (cur.mode === "raw") content = ui.area.value;
+      else content = (await preview(cur.formBase.text, cur.edits)).content;
+      const r = await api(`/api/servers/${sid(id)}/config/file`, "PUT", { path: select.value, content });
       await load();
       ok.textContent = r.note; ok.hidden = false;
-    } catch (e) { err.textContent = e.message; err.hidden = false; save.disabled = false; }
+    } catch (e) { err.textContent = e.message; err.hidden = false; if (cur) refreshButtons(); }
+    finally { save.textContent = "Save"; if (cur) refreshButtons(); }
   });
 
   openWide(el("div", { class: "panel" },
     el("h3", { textContent: `Config \u2013 ${s.name}` }),
     files.length > 1 ? el("label", { class: "field" }, el("span", { textContent: "File" }), select) : select,
-    pathLabel, area, note, ok, err,
+    pathLabel, catNote, note, wrap, ok, err,
     el("div", { class: "dialog-actions" },
       el("button", { type: "button", class: "secondary", textContent: "Close", onclick: closeDialog }), save)));
   if (files.length <= 1) select.hidden = true;
@@ -569,6 +1051,11 @@ async function openConfig(id) {
 // -------------------------------------------------------------------- monitoring page
 function bar(pct, cls = "") {
   return el("div", { class: `bar ${cls}` }, el("div", { class: "fill", style: `width:${Math.max(0, Math.min(100, pct || 0))}%` }));
+}
+
+function stateWord(r) {
+  const sv = findServer(r.server_id);
+  return sv ? serverState(sv).label : (r.running ? "running" : "stopped");
 }
 
 function renderMonitoring() {
@@ -605,7 +1092,7 @@ function renderMonitoring() {
   const total = (f) => running.reduce((a, r) => a + f(r), 0);
   const body = rows.map((r) => el("tr", { class: r.running ? "" : "dim", id: `rank-${r.server_id}` },
     el("td", {}, el("strong", { textContent: r.name })),
-    el("td", { textContent: r.running ? "running" : "stopped" }),
+    el("td", { textContent: stateWord(r) }),
     el("td", { class: "num" }, r.running ? el("div", { class: "cellbar" }, el("span", { textContent: fmtPct(r.cpu_percent) }), bar(100 * r.cpu_percent / maxCpu, "cpu")) : "\u2013"),
     el("td", { class: "num", textContent: r.running ? fmtPct(r.cpu_of_host_percent) : "\u2013" }),
     el("td", { class: "num", textContent: r.running ? fmtBytes(r.mem_used) : "\u2013" }),
@@ -863,6 +1350,6 @@ refresh().then(refreshStats);
 refreshStatus();
 setInterval(() => { if (!document.hidden) refreshStatus(); }, 15000);
 setInterval(() => {
-  if (busy.size === 0 && !$("dialog").open && !document.hidden) refresh().then(refreshStats);
+  if (!document.hidden) refresh().then(refreshStats);
   if (location.hash.startsWith("#/mcp") && !document.hidden) refreshMcp();
 }, POLL_MS);
