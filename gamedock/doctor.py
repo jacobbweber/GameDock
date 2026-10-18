@@ -225,7 +225,12 @@ def check_catalog(r: DoctorReport, service: GameDockService) -> None:
 
 
 def check_ports(r: DoctorReport, service: GameDockService, docker_ok: bool) -> None:
-    instances = service.store.all()
+    try:
+        instances = service.store.all()
+    except GameDockError:
+        r.add("ports", "Host ports of deployed servers", INFO,
+              "Skipped: the list of servers cannot be read (see the check above).")
+        return
     if not instances:
         r.add("ports", "Host ports of deployed servers", INFO, "No servers deployed yet, nothing to check.")
         return

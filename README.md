@@ -1,69 +1,100 @@
 # GameDock
 
-A small, self-hosted game hosting manager for home use. Each game server runs in its own Docker container (SteamCMD and Wine based images work well). GameDock gives you a simple web dashboard to see and control them, and has a built-in MCP endpoint so AI agents can manage servers through the same service layer.
+GameDock is a small, self-hosted manager for game servers. Each game server runs in its own Docker container, and GameDock gives you a web page to deploy, start, stop, back up, update and watch them. It also has a built-in endpoint so an AI agent can do the same things (optional, and safe by default).
 
-GameDock is not tied to any particular machine or game: games are described by small YAML files in `catalog/`.
+It is not tied to one machine or one game. A game is just a small YAML file in `catalog/`; anything that ships as a Docker image can be added.
 
-![Catalog](docs/gamedock-step2-catalog.png)
-![Dashboard with live stats](docs/gamedock-step4-dashboard.png)
-![Monitoring](docs/gamedock-step4-monitoring.png)
-![AI agents (MCP) page](docs/gamedock-step5-mcp.png)
-![Backups](docs/gamedock-step3-backups.png)
-![Config editor](docs/gamedock-step3-config.png)
+![Dashboard](docs/gamedock-polish-dashboard.png)
 
-**Status:** step 5 of the plan. Browse a catalog of game templates, deploy servers (several of the same game can coexist on different ports), edit their settings, start / stop / restart, back up and restore their data, update their images, edit their config files, watch CPU / memory / network per game, delete them safely, and let AI agents do the same through MCP (`/mcp`).
+**What you get**
+
+- A catalog of game templates; deploy several servers of the same game on different ports.
+- Start / stop / restart, edit settings, update the image, delete safely.
+- Backups and restore of each server's data folder (always a safety backup first).
+- A text editor for the game's config files, with passwords hidden.
+- Live CPU, memory and network per game, plus host totals. No database needed.
+- A **Health** page and a `doctor` command that tell you in plain language what is wrong and how to fix it.
+- An optional MCP endpoint for AI agents (read-only, standard or full mode, with two-step confirmation for anything destructive).
+
+**Version:** 0.1.0. See [CHANGELOG.md](CHANGELOG.md). How it is built: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Quick start
+
+You need Linux with Docker Engine, Python 3.10 or newer, and a user that can run `docker ps` without `sudo`. (No Docker? Skip to the "fake engine" line below to try the screens.)
+
+```bash
+git clone https://github.com/jacobbweber/GameDock.git
+cd GameDock
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -e .
+cp .env.example .env          # optional; every setting has a safe default
+python -m gamedock doctor     # checks Docker, folders, ports; tells you what to fix
+python -m gamedock            # then open http://127.0.0.1:8080
+```
+
+- Try it without Docker: `GAMEDOCK_BACKEND=fake python -m gamedock` (a pretend engine; nothing real is created).
+- Reaching it from another computer: do **not** open it to the network. Use an SSH tunnel (see [docs/NIMO_FIRST_TEST.md](docs/NIMO_FIRST_TEST.md)).
+- Run it all the time: see [Running it as a service](#running-it-as-a-service).
+- First time on a real machine? Follow the step-by-step list in [docs/NIMO_FIRST_TEST.md](docs/NIMO_FIRST_TEST.md). It starts with a tiny harmless test container.
 
 ## Concepts
 
 - **Catalog entry**: a game template in `catalog/*.yaml` (image, default ports, volumes, the settings you can fill in).
-- **Server**: a deployed instance made from a catalog entry. It has its own name, host ports and settings, and is stored in `data/instances.json` (created with mode 0600 because it can contain passwords; `data/` is git-ignored). A server keeps a snapshot of its template, so later catalog edits never break it.
+- **Server**: a deployed instance made from a catalog entry. It has its own name, host ports and settings, and is stored in `data/instances.json` (mode 0600, because it can hold passwords; `data/` is git-ignored). A server keeps a snapshot of its template, so later catalog edits never break it.
+- **Container**: GameDock creates one Docker container per server, named `gamedock-<server id>`, and labels it `gamedock.managed=true`. It only ever touches containers carrying that label.
 
-## Run it
+## Configuration
 
-Requires Python 3.10+ and, for real use, Docker (the `docker` command must work for the user running GameDock).
-
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -e .            # or: pip install -r requirements.txt
-cp .env.example .env        # optional; edit as needed
-python -m gamedock          # then open http://127.0.0.1:8080
-```
-
-Try it without Docker using the pretend in-memory engine:
-
-```bash
-GAMEDOCK_BACKEND=fake python -m gamedock
-```
-
-### Settings (environment variables or `.env`)
+Set these as environment variables or in a `.env` file in the folder you start GameDock from. Everything is optional.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `GAMEDOCK_HOST` | `127.0.0.1` | Listen address. Local only by default. Only set `0.0.0.0` if you accept that anyone who can reach the port can control your servers (no login yet). |
-| `GAMEDOCK_PORT` | `8080` | Web port |
-| `GAMEDOCK_CATALOG_DIR` | `./catalog` | Folder of game definition files |
-| `GAMEDOCK_DATA_DIR` | `./data` | Server data and `instances.json`. Relative volume paths go under `<data>/<server id>/` |
-| `GAMEDOCK_BACKEND` | `docker` | `docker` or `fake` |
-| `GAMEDOCK_BACKUP_RETENTION` | `10` | Backups kept per server; the oldest are removed after each new backup |
-| `GAMEDOCK_STATS_ENABLED` | `true` | Run the background sampler that feeds the sparklines |
-| `GAMEDOCK_STATS_INTERVAL` | `10` | Seconds between samples (2 to 300) |
-| `GAMEDOCK_STATS_HISTORY_SECONDS` | `3600` | History kept in memory (60 to 86400); at most 2000 points per server |
-| `GAMEDOCK_METRICS_ENABLED` | `false` | Serve Prometheus text at `/metrics` |
-| `GAMEDOCK_METRICS_ALLOW_REMOTE` | `false` | Let non-local clients read `/metrics` |
-| `GAMEDOCK_MCP_MODE` | `standard` | `off`, `read_only`, `standard` or `full` (see [AI agents](#ai-agents-mcp)). Forced to `off` when `GAMEDOCK_HOST` is not localhost and no token is set |
-| `GAMEDOCK_MCP_TOKEN` | *(empty)* | Optional bearer token clients must send to `/mcp` |
-| `GAMEDOCK_MCP_ALLOWED_HOSTS` | *(empty)* | Extra `Host` values `/mcp` accepts, comma separated (`gamedock.lan:8080`) |
-| `GAMEDOCK_MCP_ALLOWED_ORIGINS` | *(empty)* | Extra `Origin` values `/mcp` accepts (browser-based MCP clients), comma separated |
+| `GAMEDOCK_HOST` | `127.0.0.1` | Address the web page listens on. Keep it local. Only use `0.0.0.0` if you accept that anyone who can reach the port controls your servers (there is no login yet). |
+| `GAMEDOCK_PORT` | `8080` | Web port. |
+| `GAMEDOCK_ALLOWED_HOSTS` | *(empty)* | Extra names you type in the browser (comma separated, e.g. `gamedock.lan:8080`). `localhost`, `127.0.0.1` and the bind address always work. Other names get a "421 Host not allowed" (protects against DNS rebinding). |
+| `GAMEDOCK_CATALOG_DIR` | `./catalog` | Folder of game definition files. |
+| `GAMEDOCK_DATA_DIR` | `./data` | Server data, backups and `instances.json`. Relative volume paths go under `<data>/<server id>/`. |
+| `GAMEDOCK_BACKEND` | `docker` | `docker` (real) or `fake` (pretend, for trying and testing). |
+| `GAMEDOCK_STOP_TIMEOUT` | `60` | Seconds a game gets to save and exit when stopped (5 to 600). Also set on the container, so a host shutdown waits as long. Raise it for big worlds. |
+| `GAMEDOCK_BACKUP_RETENTION` | `10` | Backups kept per server; the oldest are removed after each new one. |
+| `GAMEDOCK_STATS_ENABLED` | `true` | Run the background sampler that feeds the live numbers. |
+| `GAMEDOCK_STATS_INTERVAL` | `10` | Seconds between samples (2 to 300). |
+| `GAMEDOCK_STATS_HISTORY_SECONDS` | `3600` | History kept in memory (60 to 86400); at most 2000 points per server. |
+| `GAMEDOCK_METRICS_ENABLED` | `false` | Serve Prometheus text at `/metrics`. |
+| `GAMEDOCK_METRICS_ALLOW_REMOTE` | `false` | Let non-local clients read `/metrics`. |
+| `GAMEDOCK_MCP_MODE` | `standard` | `off`, `read_only`, `standard` or `full` (see [AI agents](#ai-agents-mcp)). Forced to `off` when `GAMEDOCK_HOST` is not localhost and no token is set. |
+| `GAMEDOCK_MCP_TOKEN` | *(empty)* | Optional bearer token clients must send to `/mcp`. |
+| `GAMEDOCK_MCP_ALLOWED_HOSTS` | *(empty)* | Extra `Host` values `/mcp` accepts, comma separated. |
+| `GAMEDOCK_MCP_ALLOWED_ORIGINS` | *(empty)* | Extra `Origin` values `/mcp` accepts (browser-based MCP clients). |
 
 ## Using it
 
-1. Open **Catalog**, press **Deploy** on a game.
-2. Pick a name, check the host ports (prefilled with the defaults; a port already used by another server is refused) and fill in the settings. Password-type settings use password inputs and are never shown again, logged, or returned by the API.
-3. Tick **Start after deploy** if you want it to run right away. Deploy creates the container either way.
-4. On the **Dashboard**: Start / Stop / Restart, **Edit** (name, ports, settings; server must be stopped, its container is recreated; leave a password blank to keep the stored one) and **Delete**.
+1. Open **Catalog** and press **Deploy** on a game.
+2. Pick a name, check the host ports (a port already used by another server, or by anything else on the machine, is refused) and fill in the settings. Password settings are never shown again, logged or returned by the API.
+3. Tick **Start after deploy** if you want it running right away. Deploy creates the container either way. The first deploy of a game downloads its image, which can take a while for big games.
+4. On the **Dashboard**: Start / Stop / Restart, **Edit** (the server must be stopped; its container is recreated; leave a password blank to keep the stored one) and **Delete**.
+5. If something looks wrong, open **Health**. A red banner at the top of every page appears when Docker is not reachable.
 
-## Backups
+## Health check (`doctor`)
+
+```bash
+python -m gamedock doctor            # plain text, exit code 1 if something must be fixed
+python -m gamedock doctor --json     # same, for scripts
+```
+
+The same checks run from the **Health** page (and `GET /api/doctor`). Each line says OK, Warning, Problem or Note, and every problem comes with the fix. It looks at:
+
+- the `docker` command, whether the Docker service answers, and whether this user may use it;
+- the data folder (writable? free space: warns under 5 GB, fails under 512 MB) and whether the list of servers can be read;
+- file owners inside the data folder (files owned by another user, usually root, break backups);
+- every catalog file (broken files are named and skipped, the rest still load);
+- the host ports of your deployed servers (it tries to bind them; a stopped server's port that something else grabbed is flagged);
+- the web address and the MCP mode / token.
+
+It changes nothing. Run it first on any new machine, and again whenever something is odd.
+
+## Backups and restore
 
 Every server has a **Backups** panel (dashboard card, "Backups" button).
 
@@ -123,7 +154,7 @@ Example Grafana queries: `gamedock_server_cpu_percent` (one line per game), `sum
 
 ## Updating a server
 
-**Update** (dashboard card) pulls the newest version of the server's image and recreates the container, keeping data and settings. GameDock pulls first; if the image is already the newest, nothing else happens. Otherwise it stops the server if running (with a 60 s grace period), takes an automatic `...-pre-update` backup (if that fails the update is cancelled and the server is restarted), recreates the container and starts it again if it had been running. The image id before and after is shown. A catalog entry can set `update_method: none` for games that update themselves inside the container (the Update button then disappears).
+**Update** (dashboard card) pulls the newest version of the server's image and recreates the container, keeping data and settings. GameDock pulls first; if the image is already the newest, nothing else happens. Otherwise it stops the server if running (with the stop grace period, default 60 s), takes an automatic `...-pre-update` backup (if that fails the update is cancelled and the server is restarted), recreates the container and starts it again if it had been running. The image id before and after is shown. A catalog entry can set `update_method: none` for games that update themselves inside the container (the Update button then disappears).
 
 ## Editing config files
 
@@ -135,9 +166,11 @@ A catalog entry can declare config files; each server then gets a **Config** but
 - Saving is refused while the server runs unless the catalog marks the file `hot_edit: true`. Most games need a restart to pick up changes; the editor says so.
 - `sensitive_keys` values (passwords) are shown as `********`. Leave the placeholder to keep the real value; type over it to change it. Works for `key=value`, `key: value`, JSON and inline `Key="value"` styles.
 
-## Adding a game
+## Adding a game to the catalog
 
-Drop a `.yaml` (or `.json`) file in `catalog/`; it appears in the Catalog page without a restart.
+Drop a `.yaml` file in `catalog/`. It shows up on the Catalog page after a reload, no restart needed. A file that cannot be read is skipped and named on the Health page and in the banner, so one typo never hides your other games.
+
+All options:
 
 ```yaml
 id: my-game              # lowercase letters, digits, - and _
@@ -163,11 +196,45 @@ fields:                  # settings shown in the deploy/edit form
   - { name: SERVER_PASSWORD, label: Password, secret: true }   # secret = password input
 ```
 
-Never put real passwords in catalog files (they are committed to git); users type them into the deploy form.
+### Worked example: the smoke-test entry
 
-A server keeps a snapshot of its template from the time it was deployed, so config files and update settings added to a catalog entry later only apply to servers deployed afterwards.
+`catalog/smoke-test.yaml` is a real, working entry for a tiny harmless web server, handy for trying GameDock itself. Here it is, line by line:
 
-**The bundled entries (Enshrouded, Palworld, Valheim, Minecraft Java, Satisfactory) are examples.** Their images, ports and variables are written from general knowledge of popular community images and have not been tested here. Check each against the image's own documentation before real use.
+```yaml
+id: smoke-test                       # the short name; the container becomes gamedock-<server id>
+name: "TEST: tiny web server (not a game)"   # what people see on the card
+image: traefik/whoami:latest         # the Docker image to run (about 5 MB)
+description: A tiny harmless web server for testing GameDock. Not a game.
+notes: >-                            # amber warning text on the card
+  Test entry only. ...
+ports:
+  - { protocol: tcp, host: 18080, container: 80 }   # host 18080 -> the program's port 80
+volumes:
+  - { host: ./data, container: /data }  # <data folder>/<server id>/data is mounted at /data
+config_files:                        # gives the card a "Config" button
+  - path: data/notes.txt             # relative to the server's folder
+    label: Test notes (edit me)
+    format: text
+    hot_edit: true                   # editable while the server runs
+    sensitive_keys: [api_key]        # values after "api_key" are hidden in the editor
+fields:                              # the form the user fills in; each becomes an environment variable
+  - { name: WHOAMI_NAME, label: Name shown in the answer, default: "gamedock-smoke-test" }
+  - name: TEST_PASSWORD
+    label: Test password (not used by the container)
+    secret: true                     # password box, never shown again
+```
+
+### Turning a real game into an entry
+
+1. Find the game's Docker image and read its page (Docker Hub or GitHub). Note the **ports** (and TCP/UDP), the **folder inside the container where it saves** (that becomes `volumes`), and the **environment variables** it understands (those become `fields` or `env`).
+2. Copy `catalog/smoke-test.yaml`, change the id, name, image, ports, volumes and fields.
+3. Check **who the container writes files as**. If the image supports `PUID` / `PGID`, add them to `env` with your user's numbers (`id -u`, `id -g`) so backups can read the files.
+4. Open the Catalog page (or run `python -m gamedock doctor`): a mistake in the file is reported in plain words.
+5. Deploy it with the fake engine first (`GAMEDOCK_BACKEND=fake`), then for real.
+
+Never put real passwords in catalog files (they are committed to git); users type them into the form. A server keeps a snapshot of its template from deploy time, so changes to a catalog entry only affect servers deployed afterwards.
+
+**The bundled games (Enshrouded, Palworld, Valheim, Minecraft Java, Satisfactory) are examples.** Their images, ports and variables were written from general knowledge of popular community images and have not been run here. Check each against the image's own documentation before real use.
 
 ## AI agents (MCP)
 
@@ -188,7 +255,7 @@ Tools outside the mode are not listed at all and cannot be called. If `GAMEDOCK_
 
 `delete_server`, `restore_backup`, `delete_backup` and `wipe_server_data` never act on the first call. The first call changes nothing and returns a plain-language **summary** of exactly what would happen (including the automatic backup that is taken first) plus a **confirmation token**. Only a second call with the same arguments plus `confirmation_token` does it. Tokens last about 2 minutes, work once, are kept in memory only, and are tied to the exact action and arguments (change `delete_data` and the token is refused). A running server must be stopped first; that is reported before any token is issued. The built-in guide tells agents to show the summary to a human before confirming.
 
-### Security
+### MCP security
 
 - Optional bearer token: set `GAMEDOCK_MCP_TOKEN` (for example `python -c "import secrets; print(secrets.token_urlsafe(32))"`); clients send `Authorization: Bearer <token>`. The comparison is constant-time and the token is never returned, shown or logged.
 - `Host` header check against DNS rebinding: only localhost names (any port) and the bind address are accepted, plus `GAMEDOCK_MCP_ALLOWED_HOSTS`. When bound to `0.0.0.0` with nothing configured, the token is the protection.
@@ -249,6 +316,59 @@ asyncio.run(main())
 
 `gamedock://guide` (a read-only resource) explains how GameDock works, which tools the current mode has and the confirmation flow. The prompts `gamedock_overview` and `deploy_game_server` give the same guidance as ready-made messages.
 
+## Security model
+
+Read this once. GameDock can create containers, and **anyone who can control Docker can become root on that machine** (a container can mount the whole disk). So GameDock is as powerful as the user it runs as.
+
+- **No login yet.** GameDock relies on being reachable only from the machine itself (`127.0.0.1`). Use an SSH tunnel to reach it from elsewhere. Do not publish the port, do not put it on the internet.
+- **Browser protections:** state-changing requests from another web origin are refused; the page only answers to known Host names (stops DNS rebinding); it cannot be put in a frame; a strict content-security policy is set.
+- **Docker access is limited to what GameDock created.** Containers get a `gamedock.managed=true` label; GameDock refuses to start, stop or remove a container without it, even if the name matches. It never uses `docker rm -f` on a running server and never runs a shell: every docker call is an argument list.
+- **Secrets:** passwords go to Docker through the process environment (not the command line, so they do not show in `ps`), are stored only in `data/instances.json` (0600), and are never returned by the API, any MCP tool, the UI after saving, or logs. Backups contain config files, so they are private too (0600 files in a 0700 folder). Environment names that could change Docker's own behaviour (`PATH`, `DOCKER_HOST`, `LD_PRELOAD`, ...) are refused in catalog files.
+- **Destructive actions** (restore, delete, wipe, update) need explicit confirmation and take a backup first.
+- **Catalog files are trusted input.** A catalog entry picks the image that runs. Only add entries you trust, as you would any Docker image.
+- **MCP** is local-only by default, hides destructive tools unless mode is `full`, and puts those behind two-step confirmation. See [MCP security](#mcp-security).
+- **Running GameDock in Docker** hands it the Docker socket. That is the same power, with one more layer in between. The systemd route is recommended; see [deploy/](deploy/) and [Running it as a service](#running-it-as-a-service).
+
+Known limits: no login or TLS; no rate limit on failed MCP tokens (every refusal is audited); a game container running as root could, in theory, swap files for links while GameDock edits a config file; Linux hosts only (Windows is not supported as the host).
+
+## Running it as a service
+
+The recommended way is a small systemd service running as a normal user with the virtualenv. Example unit files, with every step explained in the comments, are in [`deploy/`](deploy/). Nothing installs them for you.
+
+| File | What it is |
+|---|---|
+| `deploy/gamedock-user.service` | systemd **user** service (recommended for one person on a home server) |
+| `deploy/gamedock.service` | systemd **system** service with its own user and hardening |
+| `deploy/gamedock.env.example` | settings file for the system service |
+| `Dockerfile`, `docker-compose.yml` | **optional**: run GameDock itself in a container |
+
+The Docker route mounts `/var/run/docker.sock` into the GameDock container. That gives the container root-equivalent control of the host, and the data folder must be mounted at the same path inside and outside. Use it only if you cannot use systemd. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+
+Stopping or restarting GameDock does not stop your game servers (they are separate containers with restart policy `unless-stopped`).
+
+## Troubleshooting
+
+Start with `python -m gamedock doctor` (or the Health page). It names most of these.
+
+| What you see | Why | Fix |
+|---|---|---|
+| "The 'docker' command was not found" | Docker Engine is not installed, or not on the PATH of the user running GameDock | Install Docker Engine (docs.docker.com/engine/install). Check `docker --version`. |
+| "Cannot connect to the Docker daemon" | The Docker service is not running | `sudo systemctl enable --now docker`, then `docker ps` |
+| "permission denied ... docker.sock" | This user is not in the `docker` group | `sudo usermod -aG docker $USER`, then log out and back in (or restart the GameDock service). Remember: the docker group is root-equivalent. |
+| "port is already allocated" / "address already in use" | Something else on the machine uses that host port | Pick another host port in the deploy or Edit form. GameDock also checks this before start. |
+| Deploy seems stuck on the first run | The image is being downloaded (can be many GB) | Wait; watch the network. Nothing is wrong unless it ends with an error. |
+| "image not found" / "pull access denied" | Wrong image name in the catalog file, or a private image | Check the name and tag on Docker Hub. |
+| "no matching manifest" | The image does not exist for this CPU type (e.g. x86 only image on ARM) | Use an image built for your CPU. |
+| "A container named ... was not created by GameDock" | A container with that name already exists | Rename or remove it with `docker`, or name the server differently. GameDock will not touch it. |
+| Backup or restore says "permission denied", or Config cannot be saved | The game container wrote files as root (or another user) | Run the `chown` command shown in the message once. To stop it coming back, give the game your user id with its `PUID` / `PGID` settings (use the numbers from `id -u` and `id -g`). |
+| "No space left on device" | The disk holding the data folder is full | Free space, or lower `GAMEDOCK_BACKUP_RETENTION`. |
+| Server shows "exited unexpectedly (exit code N)" | The game crashed or has a bad setting | Run `docker logs gamedock-<server id>` and read the last lines. |
+| Browser says "421 Host not allowed" | You opened GameDock by a name it does not know | Add it to `GAMEDOCK_ALLOWED_HOSTS` (e.g. `gamedock.lan:8080`). Using `localhost` or `127.0.0.1` always works. |
+| MCP page says "Off" although you set a mode | GameDock is not bound to localhost and has no token | Set `GAMEDOCK_MCP_TOKEN`, or bind to `127.0.0.1`. |
+| "instances.json is damaged" | The list of servers cannot be read | Copy `data/instances.json.bak` over it (the message shows the exact path). Containers are not affected. |
+| Systems with SELinux (Fedora, RHEL) cannot read game folders | Bind mounts need a relabel | Not handled by GameDock yet; either relabel the data folder (`chcon -Rt container_file_t <data folder>`) or use a different host. |
+| Windows | Not supported as the host | Run GameDock on the Linux machine and open the page from Windows over an SSH tunnel. |
+
 ## API
 
 | Method | Path | |
@@ -275,6 +395,8 @@ asyncio.run(main())
 | GET | `/api/mcp/info`, `/api/mcp/audit?limit=50` | MCP status for the UI (never includes the token) and the audit log, newest first |
 | POST | `/mcp` | the MCP endpoint (see [AI agents](#ai-agents-mcp)) |
 | GET | `/api/health` | liveness |
+| GET | `/api/status` | small summary for the banner: is Docker reachable, which catalog files are broken |
+| GET | `/api/doctor` | the full health check (same as `python -m gamedock doctor`) |
 
 Errors are `{"error": "..."}` with 400 (invalid or missing confirmation), 403 (file permission problem), 404 (unknown), 409 (conflict: port in use, server running, or another operation in progress), 413 (file too large), 422 (malformed request), 500 (operation failed, e.g. disk full) or 502 (Docker problem). Interactive docs at `/api/docs`.
 
@@ -284,18 +406,22 @@ Errors are `{"error": "..."}` with 400 (invalid or missing confirmation), 403 (f
 gamedock/
   models.py        plain data types (catalog entry vs server instance)
   catalog.py       YAML template loader + validation
-  store.py         persistent JSON store of deployed servers
+  store.py         persistent JSON store of deployed servers (atomic, fsync, .bak)
   backups.py       backup archives: create, list, restore, prune
   configfiles.py   safe config file read/write, masking, .bak copies
   hoststats.py     host CPU / memory / disk from /proc and shutil
+  hostcheck.py     port probe, free space, file-owner scan
+  doctor.py        the health checks (CLI, API and UI share them)
   sampler.py       background thread feeding the in-memory history
   metrics.py       Prometheus text output
   service.py       all management logic (web and MCP both call this)
   serialize.py     result to JSON-friendly dicts, shared by web and MCP
-  mcp_api/         MCP endpoint: tools.py, guard.py (token/Host/Origin), confirm.py (two-step tokens), audit.py, guide.py
-  backends/        container engine interface: docker_cli.py (real), fake.py (in-memory), docker_stats.py (parsers)
+  mcp_api/         MCP endpoint: tools.py, guard.py, confirm.py, audit.py, guide.py
+  backends/        container engine interface: docker_cli.py (real), docker_errors.py, fake.py (in-memory), docker_stats.py
   web/             FastAPI app + static dashboard (vanilla JS, no build step)
-catalog/           game templates (examples)
+catalog/           game templates (examples plus the smoke test)
+deploy/            example systemd units and settings file (not installed anywhere)
+docs/              architecture, deployment, first-test checklist, screenshots
 tests/             pytest suite (no Docker needed)
 ```
 
@@ -306,13 +432,4 @@ pip install -e '.[dev]'
 pytest
 ```
 
-## Safety notes
-
-- Binds to `127.0.0.1` unless you configure otherwise.
-- Environment values are handed to Docker through the process environment, not on the command line.
-- State-changing requests from a different web origin are refused.
-- `.env`, `data/` (including `instances.json`, mode 0600) and `backups/` are git-ignored.
-- Destructive actions (restore, delete, wipe, update) need an explicit confirmation in both the UI and the API, and take a backup first.
-- Only one state-changing operation runs per server at a time.
-- The MCP endpoint is on by default only for local use, hides destructive tools unless mode is `full`, and puts those behind two-step confirmations (see above).
-- Secret settings are never returned by the API or any MCP tool, shown in the UI after saving, or included in logs/`repr`.
+The tests use the in-memory engine and fake `docker` scripts, so they need no Docker. The real Docker backend is covered by command-construction tests but has not yet been run against a real engine; [docs/NIMO_FIRST_TEST.md](docs/NIMO_FIRST_TEST.md) is the first real run.
