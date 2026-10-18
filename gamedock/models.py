@@ -17,6 +17,16 @@ if TYPE_CHECKING:
     from .backups import BackupInfo
 
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+IMAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}$")  # name[:tag][@digest], may start with a registry host
+# Setting values are handed to the docker command through its own environment, so names that would change how
+# the docker command itself behaves (where it looks for programs, which daemon it talks to...) are not allowed.
+RESERVED_ENV_RE = re.compile(
+    r"^(PATH|HOME|USER|LOGNAME|SHELL|TMPDIR|PWD|XDG_[A-Z_]+|SSH_[A-Z_]+|DOCKER_[A-Z_]+|LD_[A-Z_]+|DYLD_[A-Z_]+|"
+    r"(HTTP|HTTPS|ALL|NO)_PROXY|(http|https|all|no)_proxy)$")
+
+
+def is_reserved_env_name(name: str) -> bool:
+    return bool(RESERVED_ENV_RE.match(name))
 
 
 class Status(str, Enum):

@@ -1,41 +1,91 @@
 """Docker backend that shells out to the `docker` CLI (no extra Python deps).
 
-Environment variables are passed to `docker create` as `-e NAME` with the value
-placed in the child process environment, so values never appear in the process
-list (`ps`).
+Safety rules followed here:
+  * every command is an argument list (never a shell string), so nothing in a name or value can be
+    interpreted by a shell;
+  * setting values are passed as `-e NAME` with the value in the child process environment, so they never
+    appear in the process list (`ps`); names that could change how the docker command itself behaves
+    (PATH, DOCKER_HOST, LD_PRELOAD...) are refused;
+  * GameDock only touches containers it created (label gamedock.managed=true). A container that merely has
+    the same name is reported as an error and left alone;
+  * raw docker errors are turned into plain-language messages (see docker_errors.py).
 """
 from __future__ import annotations
 
+import csv
+import io
 import os
+import shutil
 import subprocess
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Callable
 
-from ..errors import BackendError
-from ..models import ContainerSpec, ContainerStats, Status
-from .base import ContainerState
+from ..errors import BackendError, DockerUnavailableError, ForeignContainerError
+from ..models import IMAGE_RE, ContainerSpec, ContainerStats, Status, is_reserved_env_name
+from . import docker_errors
+from .base import ContainerState, DockerDiagnosis
 from .docker_stats import INSPECT_FORMAT, parse_inspect_lines, parse_stats_lines
 
-STOP_TIMEOUT_SECONDS = 60  # give game servers time to save on SIGTERM
-PULL_TIMEOUT_SECONDS = 3600  # game images can be many GB
+STOP_TIMEOUT_SECONDS = 60  # default grace period for game servers to save on SIGTERM
+PULL_TIMEOUT_SECONDS = 3600  # game images can be many GB; `docker create` also pulls a missing image
+QUICK_TIMEOUT_SECONDS = 20  # looking at things must never hang the web page
+STATS_TIMEOUT_SECONDS = 45
+START_TIMEOUT_SECONDS = 120
+LABEL_MANAGED = "gamedock.managed"
 
 Runner = Callable[..., subprocess.CompletedProcess]
 
 _STATUS_MAP = {
     "running": Status.RUNNING,
-    "restarting": Status.RUNNING,
+    "restarting": Status.RUNNING,  # still "running" so that Stop works on a crash-looping server
     "paused": Status.STOPPED,
     "created": Status.STOPPED,
     "exited": Status.STOPPED,
     "dead": Status.ERROR,
 }
 
+STATE_FORMAT = ("{{.State.Status}}|{{.State.ExitCode}}|{{.State.OOMKilled}}|"
+                '{{index .Config.Labels "' + LABEL_MANAGED + '"}}')
+
+
+@dataclass(frozen=True)
+class _Found:
+    raw: str
+    exit_code: int
+    oom: bool
+    managed: bool
+
+
+def foreign_message(name: str) -> str:
+    return (f"A container named '{name}' exists but was not created by GameDock, so GameDock will not touch it. "
+            "Rename or remove that container with the docker command, or give this server a different name.")
+
+
+def describe_state(f: _Found) -> str:
+    if f.raw == "exited" and (f.exit_code or f.oom):
+        why = "it ran out of memory" if f.oom else f"exit code {f.exit_code}"
+        return f"exited unexpectedly ({why}); check 'docker logs' for this container"
+    if f.raw == "restarting":
+        return "restarting (the game keeps stopping; check 'docker logs' for this container)"
+    return f.raw
+
+
+def _mount_arg(host: str, container: str) -> str:
+    """`--mount` value. Unlike -v it has no ':' ambiguity and Docker refuses to invent a missing host folder
+    (which it would create owned by root). Fields are CSV-quoted so a ',' in a path is safe."""
+    buf = io.StringIO()
+    csv.writer(buf, lineterminator="").writerow(["type=bind", f"source={host}", f"target={container}"])
+    return buf.getvalue()
+
 
 class DockerCliBackend:
-    def __init__(self, docker_bin: str = "docker", runner: Runner | None = None) -> None:
+    def __init__(self, docker_bin: str = "docker", runner: Runner | None = None,
+                 stop_timeout: int = STOP_TIMEOUT_SECONDS) -> None:
         self.docker_bin = docker_bin
         self._runner = runner or subprocess.run
+        self.stop_timeout = int(stop_timeout)
 
+    # ------------------------------------------------------------------ plumbing
     def _run(self, args: list[str], env: dict[str, str] | None = None, check: bool = True,
              timeout: int | None = None):
         full_env = {**os.environ, **env} if env else None
@@ -44,83 +94,142 @@ class DockerCliBackend:
                 [self.docker_bin, *args],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 env=full_env,
-                timeout=timeout or STOP_TIMEOUT_SECONDS + 30,
+                timeout=timeout or START_TIMEOUT_SECONDS,
             )
         except FileNotFoundError as e:
-            raise BackendError("docker command not found; is Docker installed and on PATH?") from e
+            raise DockerUnavailableError(docker_errors.NOT_INSTALLED, "not_installed") from e
+        except PermissionError as e:
+            raise DockerUnavailableError(
+                f"The docker command could not be run (permission denied for '{self.docker_bin}').",
+                "permission") from e
         except subprocess.TimeoutExpired as e:
-            raise BackendError(f"docker {args[0]} timed out") from e
+            raise BackendError(
+                f"docker {args[0]} did not finish in time. Docker may be overloaded or stuck; "
+                "check 'systemctl status docker'.") from e
         if check and proc.returncode != 0:
-            raise BackendError(f"docker {args[0]} failed: {(proc.stderr or proc.stdout).strip()}")
+            raise docker_errors.friendly(args[0], proc.stderr or proc.stdout)
         return proc
 
-    def get_state(self, name: str) -> ContainerState:
-        proc = self._run(["inspect", "--format", "{{.State.Status}}", name], check=False)
+    def _inspect(self, name: str) -> _Found | None:
+        """What we know about the named container, or None if it does not exist."""
+        proc = self._run(["container", "inspect", "--format", STATE_FORMAT, name], check=False,
+                         timeout=QUICK_TIMEOUT_SECONDS)
         if proc.returncode != 0:
-            err = (proc.stderr or "").lower()
-            if "no such" in err:
-                return ContainerState(Status.NOT_CREATED)
-            raise BackendError(f"docker inspect failed: {proc.stderr.strip()}")
-        raw = proc.stdout.strip()
-        return ContainerState(_STATUS_MAP.get(raw, Status.ERROR), detail=raw)
+            err = proc.stderr or ""
+            if "no such" in err.lower() and not docker_errors.classify(err):
+                return None
+            raise docker_errors.friendly("inspect", err or proc.stdout)
+        parts = proc.stdout.strip().split("|")
+        if len(parts) != 4:
+            raise BackendError(f"Unexpected answer from docker inspect: {proc.stdout.strip()!r}")
+        try:
+            code = int(parts[1])
+        except ValueError:
+            code = 0
+        return _Found(parts[0], code, parts[2] == "true", parts[3] == "true")
+
+    def _ours(self, name: str) -> _Found | None:
+        found = self._inspect(name)
+        if found is not None and not found.managed:
+            raise ForeignContainerError(foreign_message(name))
+        return found
+
+    # ------------------------------------------------------------------ interface
+    def get_state(self, name: str) -> ContainerState:
+        found = self._inspect(name)
+        if found is None:
+            return ContainerState(Status.NOT_CREATED)
+        if not found.managed:
+            return ContainerState(Status.ERROR, detail=foreign_message(name))
+        return ContainerState(_STATUS_MAP.get(found.raw, Status.ERROR), detail=describe_state(found))
 
     @staticmethod
-    def build_create_args(spec: ContainerSpec) -> list[str]:
-        args = ["create", "--name", spec.name, "--restart", "unless-stopped"]
+    def check_image_name(image: str) -> None:
+        if not IMAGE_RE.match(image or ""):
+            raise BackendError(f"'{image}' is not a valid image name")
+
+    @staticmethod
+    def build_create_args(spec: ContainerSpec, stop_timeout: int = STOP_TIMEOUT_SECONDS) -> list[str]:
+        DockerCliBackend.check_image_name(spec.image)
+        for k in spec.env:
+            if is_reserved_env_name(k):
+                raise BackendError(f"The setting name '{k}' is reserved and cannot be passed to a container")
+        # restart policy: come back after a crash or a reboot, but stay stopped once the user stopped it.
+        # stop-timeout: the same grace period applies when Docker itself stops the container (host shutdown).
+        args = ["create", "--name", spec.name, "--restart", "unless-stopped", "--stop-timeout", str(stop_timeout)]
         for k, v in spec.labels.items():
             args += ["--label", f"{k}={v}"]
         for p in spec.ports:
             args += ["-p", f"{p.host}:{p.container}/{p.protocol}"]
         for v in spec.volumes:
-            args += ["-v", f"{v.host}:{v.container}"]
+            args += ["--mount", _mount_arg(v.host, v.container)]
         for k in spec.env:
             args += ["-e", k]
-        args.append(spec.image)
+        args += ["--", spec.image]
         return args
 
     def create(self, spec: ContainerSpec) -> None:
-        if self.get_state(spec.name).status != Status.NOT_CREATED:
+        if self._ours(spec.name) is not None:
             return
-        self._run(self.build_create_args(spec), env=spec.env)
+        args = self.build_create_args(spec, self.stop_timeout)
+        self._run(args, env=spec.env, timeout=PULL_TIMEOUT_SECONDS)  # also downloads the image if it is missing
 
     def start(self, name: str) -> None:
-        self._run(["start", name])
+        found = self._ours(name)
+        if found is None:
+            raise BackendError(f"The container '{name}' does not exist. Deploy the server again or press Start to recreate it.")
+        if found.raw == "paused":
+            self._run(["unpause", name], timeout=QUICK_TIMEOUT_SECONDS)
+            return
+        self._run(["start", name], timeout=START_TIMEOUT_SECONDS)
 
     def stop(self, name: str) -> None:
-        self._run(["stop", "-t", str(STOP_TIMEOUT_SECONDS), name])
+        self._ours(name)
+        self._run(["stop", "-t", str(self.stop_timeout), name], timeout=self.stop_timeout + 30)
 
     def remove(self, name: str) -> None:
-        if self.get_state(name).status == Status.NOT_CREATED:
+        found = self._ours(name)
+        if found is None:
             return
-        self._run(["rm", "-f", name])
+        # No -f: a running container is refused instead of being killed. (Paused/dead ones need -f.)
+        force = ["-f"] if found.raw in ("paused", "dead") else []
+        self._run(["rm", *force, name], timeout=START_TIMEOUT_SECONDS)
 
     def pull_image(self, image: str) -> None:
-        self._run(["pull", image], timeout=PULL_TIMEOUT_SECONDS)
+        self.check_image_name(image)
+        self._run(["pull", "--", image], timeout=PULL_TIMEOUT_SECONDS)
 
     def get_image_id(self, image: str) -> str | None:
-        proc = self._run(["image", "inspect", "--format", "{{.Id}}", image], check=False)
+        self.check_image_name(image)
+        proc = self._run(["image", "inspect", "--format", "{{.Id}}", "--", image], check=False,
+                         timeout=QUICK_TIMEOUT_SECONDS)
         return proc.stdout.strip() or None if proc.returncode == 0 else None
 
     def get_container_image_id(self, name: str) -> str | None:
-        proc = self._run(["inspect", "--format", "{{.Image}}", name], check=False)
+        proc = self._run(["container", "inspect", "--format", "{{.Image}}", name], check=False,
+                         timeout=QUICK_TIMEOUT_SECONDS)
         return proc.stdout.strip() or None if proc.returncode == 0 else None
 
     def get_stats(self, names: list[str]) -> dict[str, ContainerStats]:
-        """One `docker inspect` for every name (state, start time, memory limit) and, only if something is
-        running, one `docker stats --no-stream` for the running ones. Two engine calls at most, however many
-        servers there are."""
+        """One `docker container inspect` for every name (state, start time, memory limit) and, only if
+        something is running, one `docker stats --no-stream` for the running ones. Two engine calls at most,
+        however many servers there are."""
         if not names:
             return {}
         # inspect exits non-zero if some name does not exist but still prints the others
-        proc = self._run(["inspect", "--format", INSPECT_FORMAT, *names], check=False)
+        proc = self._run(["container", "inspect", "--format", INSPECT_FORMAT, *names], check=False,
+                         timeout=STATS_TIMEOUT_SECONDS)
         info = parse_inspect_lines(proc.stdout)
         if not info and proc.returncode != 0 and "no such" not in (proc.stderr or "").lower():
-            raise BackendError(f"docker inspect failed: {(proc.stderr or '').strip()}")
+            raise docker_errors.friendly("inspect", proc.stderr or "")
         running = [n for n, (status, _, _) in info.items() if status in ("running", "restarting")]
         live: dict[str, ContainerStats] = {}
         if running:
-            sp = self._run(["stats", "--no-stream", "--format", "{{json .}}", *running])
+            sp = self._run(["stats", "--no-stream", "--format", "{{json .}}", *running],
+                           timeout=STATS_TIMEOUT_SECONDS)
             live = parse_stats_lines(sp.stdout)
         result: dict[str, ContainerStats] = {}
         for name, (status, started, limit) in info.items():
@@ -130,3 +239,24 @@ class DockerCliBackend:
             else:
                 result[name] = ContainerStats(running=False, mem_limit=limit)
         return result
+
+    # ------------------------------------------------------------------ health
+    def diagnose(self) -> DockerDiagnosis:
+        """Is Docker installed, is the daemon reachable, may this user use it? Never raises."""
+        path = shutil.which(self.docker_bin) if self._runner is subprocess.run else self.docker_bin
+        if path is None:
+            return DockerDiagnosis(False, None, None, False, None, "not_installed", docker_errors.NOT_INSTALLED, "")
+        client = None
+        try:
+            cp = self._run(["--version"], check=False, timeout=QUICK_TIMEOUT_SECONDS)
+            client = cp.stdout.strip() or None if cp.returncode == 0 else None
+            sp = self._run(["version", "--format", "{{.Server.Version}}"], check=False, timeout=QUICK_TIMEOUT_SECONDS)
+        except DockerUnavailableError as e:
+            return DockerDiagnosis(e.kind != "not_installed", path, client, False, None, e.kind, str(e), "")
+        except BackendError as e:
+            return DockerDiagnosis(True, path, client, False, None, "error", str(e), "")
+        if sp.returncode != 0:
+            err = docker_errors.friendly("version", sp.stderr or sp.stdout)
+            kind = getattr(err, "kind", "error")
+            return DockerDiagnosis(True, path, client, False, None, kind, str(err), "")
+        return DockerDiagnosis(True, path, client, True, sp.stdout.strip() or None, "ok", "Docker is running.", "")

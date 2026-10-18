@@ -8,7 +8,7 @@ from typing import Callable
 
 from ..errors import BackendError
 from ..models import ContainerSpec, ContainerStats, Status
-from .base import ContainerState
+from .base import ContainerState, DockerDiagnosis
 
 
 class FakeBackend:
@@ -25,6 +25,9 @@ class FakeBackend:
         self._lock = Lock()
         self.calls: list[tuple[str, str]] = []  # (action, name), handy in tests
         self.fail_next: str | None = None  # set to an action name to make it raise once
+
+    def diagnose(self) -> DockerDiagnosis:
+        return DockerDiagnosis(True, None, None, True, "fake", "fake", "Using the built-in pretend engine (no real containers).")
 
     def _maybe_fail(self, action: str) -> None:
         if self.fail_next == action:

@@ -90,7 +90,7 @@ def test_backend_two_calls_for_many_servers():
     r = Recorder([(0, inspect, ""), (0, stats, "")])
     out = DockerCliBackend(runner=r).get_stats(["gamedock-one", "gamedock-two", "gamedock-three"])
     assert len(r.calls) == 2
-    assert r.calls[0][0][:2] == ["docker", "inspect"] and r.calls[1][0][:3] == ["docker", "stats", "--no-stream"]
+    assert r.calls[0][0][:3] == ["docker", "container", "inspect"] and r.calls[1][0][:3] == ["docker", "stats", "--no-stream"]
     assert "gamedock-two" not in r.calls[1][0]  # stopped containers are not passed to `docker stats`
     assert out["gamedock-one"].running and out["gamedock-one"].started_at.year == 2026
     assert not out["gamedock-two"].running

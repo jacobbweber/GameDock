@@ -18,6 +18,19 @@ class BackendError(GameDockError):
     pass
 
 
+class DockerUnavailableError(BackendError):
+    """Docker is missing, not running, or this user may not use it. `kind` is one of
+    not_installed, daemon_down, permission."""
+
+    def __init__(self, message: str, kind: str = "daemon_down") -> None:
+        super().__init__(message)
+        self.kind = kind
+
+
+class ForeignContainerError(BackendError):
+    """A container with GameDock's name exists but GameDock did not create it; it is never touched."""
+
+
 class CatalogError(GameDockError):
     pass
 

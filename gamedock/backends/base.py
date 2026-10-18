@@ -17,6 +17,20 @@ class ContainerState:
     detail: str = ""
 
 
+@dataclass(frozen=True)
+class DockerDiagnosis:
+    """Answer to "can GameDock use the container engine?" (never raises; used by the doctor and the UI)."""
+
+    installed: bool
+    path: str | None
+    client_version: str | None
+    reachable: bool
+    server_version: str | None
+    kind: str  # ok | not_installed | daemon_down | permission | error | fake
+    message: str  # plain language, includes the fix
+    fix: str = ""
+
+
 class ContainerBackend(Protocol):
     def get_state(self, name: str) -> ContainerState:
         """State of the named container; NOT_CREATED if it does not exist."""
@@ -39,6 +53,9 @@ class ContainerBackend(Protocol):
 
     def get_container_image_id(self, name: str) -> str | None:
         """Id of the image the container was created from, or None if no such container."""
+
+    def diagnose(self) -> DockerDiagnosis:
+        """Check that the engine is installed and reachable. Must not raise."""
 
     def get_stats(self, names: list[str]) -> dict[str, ContainerStats]:
         """Resource numbers for the named containers, using as few engine calls as possible (not one per
