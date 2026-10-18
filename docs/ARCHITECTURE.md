@@ -22,6 +22,9 @@ flowchart LR
         Service --> Config["configfiles.py<br/>safe config editing"]
         Service --> Forms["configforms.py<br/>settings form <-> file text"]
         Service --> Ready["readiness.py<br/>Starting / Installing / Ready"]
+        Service --> Sched["schedule.py<br/>rules, next-run maths, schedules.json"]
+        Service --> Updates["updates.py<br/>GameDock version, GitHub check, git pull"]
+        Scheduler["scheduler.py<br/>30 s tick thread"] --> Service
         Service --> Backend{{"ContainerBackend"}}
         Sampler["sampler.py<br/>background stats thread"] --> Backend
         Web --> Sampler
@@ -59,6 +62,14 @@ flowchart LR
 - **Logs.** `ContainerBackend.get_logs(name, tail, since)` is implemented by `docker logs` (argument list, `since` validated, tail capped) and by the fake backend. The service cleans the text (ANSI, carriage-return progress lines), masks the server's secret values and reports whether it was cut.
 - **`configforms.py`** scans a config file into fields with character spans and rewrites only the spans of changed values, so untouched text is preserved exactly. It never writes anything: the web page asks the read-only `config/form` endpoint for the new text and saves it through `write_config_file`, which keeps all the safety rules (masking, `.bak`, path checks, `hot_edit`) in one place.
 
+## Schedules and updates
+
+- **`schedule.py`** holds the pure maths and the store. `next_run(rule, since, tz)` works in the machine's timezone with real wall-clock times: a time skipped by daylight saving runs just after the gap, a repeated hour runs once. `ScheduleStore` keeps `schedules.json` in memory, writes it atomically (0600) and validates strictly on read and write; a damaged file is set aside as `.broken-<time>` and reported, an invalid per-server entry is ignored and reported.
+- **`scheduler.py`** is a daemon thread that wakes every 30 s (first run after 5 s) and calls `service.process_schedules(now, spawn)`, which finds due jobs, runs each in its own thread and also refreshes due image checks. Jobs go through the same `_operation` lock as any click, so a busy server raises `BusyError` and the job is recorded as skipped. A backup that was missed (GameDock was off) runs once; a maintenance more than 6 hours late is skipped. `process_schedules` takes `spawn` and `now` so tests run it synchronously.
+- **Maintenance** (`_job_maintenance`) is a sequence over the existing building blocks (`_backup_locked`, `_update_image_locked`, restart), all under one lock acquisition, so nothing can interleave. The first failing step stops the run and is recorded with a plain message. Results go to the server's history (30 entries), the run state and the audit log (`audit_hook`).
+- **Image updates.** `check_image_update` asks the backend for the registry digest (`remote_image_digest`: `buildx imagetools inspect`, then `manifest inspect`) and compares it with the digests of the image the container runs (`local_image_digests`). Results are cached in memory (`update_available` on the server info).
+- **`updates.py`** (`UpdateChecker`) reads local git facts, asks `api.github.com` (only that host, short timeouts, an `http_get` function that tests replace) and applies updates: `git pull --ff-only` after refusing on a dirty tree, detached HEAD, non-fast-forward, changed dependencies or busy work; the service `freeze()`s new actions first and `unfreeze()`s after a failure. The restart is `systemctl [--user] restart --no-block`, else exit code 75, else `os.execv`.
+
 ## Where things are stored
 
 | What | Where |
@@ -66,7 +77,9 @@ flowchart LR
 | Deployed servers | `<data>/instances.json` (+ `.bak`) |
 | A server's game files | `<data>/<server id>/...` (bind-mounted into its container) |
 | Backups | `<data>/backups/<server id>/*.tar.gz`, deleted servers in `<data>/backups/_deleted/` |
-| MCP audit log | `<data>/mcp-audit.jsonl` |
+| Schedules, run states and run history | `<data>/schedules.json` (atomic, 0600) |
+| MCP audit log (also scheduled runs) | `<data>/mcp-audit.jsonl` |
+| Update check results (GameDock and images) | memory only |
 | Live stats history | memory only (gone on restart) |
 
 ## A request, step by step: "Start" on the dashboard

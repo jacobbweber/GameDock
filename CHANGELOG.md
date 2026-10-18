@@ -2,6 +2,40 @@
 
 All notable changes. Dates are 2026.
 
+## 0.3.0: schedules, update indicators and self-update
+
+Asked for: backups and maintenance on a schedule, an update indicator, and a version display with an update button.
+
+### Added
+
+- **Version and update indicator in the header.** `Version 0.3.0 (abc1234)` and, when GitHub is ahead of this copy, an **Update available** badge. The version dialog shows the commit, branch, install folder, when it last checked, and a **Check now** button. Checks read `api.github.com/repos/<GAMEDOCK_UPDATE_REPO>` at most every 6 hours (30 minutes after a failure), are cached, work offline (the dialog says it could not check) and are switched off by `GAMEDOCK_UPDATE_CHECK=false`.
+- **Update GameDock button** (web only, after a confirmation): `git pull --ff-only` in the install folder, then a restart of GameDock only (game servers keep running); the page reconnects and shows the new version. Refuses, changing nothing, when the folder is not a git checkout on a branch, has local changes, would not fast-forward, an action or scheduled job is running, or `pyproject.toml` changed (needs `pip install -e .` by hand). New actions are blocked for the few seconds of the update. Every refusal shows the exact manual commands. `GAMEDOCK_SELF_UPDATE=false` hides the button.
+- **Image update indicator per server.** The tile shows **Update available** and an **Update now** button (the existing safe update flow). Detection compares the registry digest (`docker buildx imagetools inspect`, falling back to `docker manifest inspect`) with the digest of the image the container runs, without pulling. Cached for hours, one registry question per server per 30 seconds, memory only. The Update dialog has a per-server **Check now**, plain help text for SteamCMD images, and the catalog `update_note`. `update_available` is in the API and the MCP status tools.
+- **Scheduled backups** per server: every N hours, daily, or weekly on chosen days at a time, with retention. Honour `save_command` and `backup_stop_first`. Shown as *scheduled* in the backups list; last run, next run and last result are shown; failures are visible. A missed backup runs once at the next start.
+- **Scheduled maintenance** per server: daily or weekly, with checkboxes for backup first (`pre-maintenance` backup), apply image update, and restart. **Run maintenance now** with a confirmation. "Only when nobody is playing" is shown as unavailable with the reason. One action per server at a time: a job that finds the server busy retries at the next check and is recorded as skipped after two hours.
+- **Schedules** page and a per-server panel (with the machine's timezone and recent runs), a schedule summary line on each tile ("Backups: daily at 03:00 | Maintenance: Sunday at 04:00 | next in 5 hours"), and a *Maintenance* activity label.
+- A small in-process scheduler thread (30 s tick). No cron, no new dependencies. Schedules persist in `data/schedules.json` (atomic write, 0600, strict validation, a damaged file is set aside and reported on the Schedules page). Daylight-saving aware.
+- **MCP:** `get_gamedock_version` (read-only and above), `list_schedules` (read-only and above), `set_backup_schedule` and `set_maintenance_schedule` (standard and full). Tool counts are now 13 (`read_only`), 23 (`standard`), 27 (`full`). Self-update is intentionally not an MCP tool. Scheduled runs and their results are written to the audit log; the guide resource describes updates and schedules.
+- Endpoints: `GET /api/version`, `POST /api/gamedock/update-check`, `POST /api/gamedock/update`, `GET /api/servers/{id}/image-update`, `POST /api/servers/{id}/image-update/check`, `GET /api/schedules`, `GET /api/servers/{id}/schedules`, `PUT .../schedules/backup`, `PUT .../schedules/maintenance`, `POST .../schedules/{kind}/run`.
+- Settings: `GAMEDOCK_SCHEDULER`, `GAMEDOCK_UPDATE_CHECK`, `GAMEDOCK_UPDATE_REPO`, `GAMEDOCK_SELF_UPDATE`.
+- Catalog: `update_note`, `save_command`, `backup_stop_first`.
+- Backend interface: `remote_image_digest`, `local_image_digests`, `exec_in` (a custom backend must add them).
+- Screenshots: `docs/gamedock-030-*.png`; `scripts/make_screenshots.py` now also exercises the update badges, schedules and maintenance dialog.
+
+### Changed
+
+- Version 0.3.0. Deleting a server also removes its schedules. The MCP page's activity heading now says "AI agents and scheduled runs".
+
+### Decisions and known gaps
+
+- **Systemd unit files are unchanged.** The restart uses `systemctl restart`, or exit code 75, which both `Restart=on-failure` (as shipped) and `Restart=always` act on. See docs/DEPLOYMENT.md. The first update to 0.3.0 has to be done by hand because 0.2.0 has no button.
+- A missed *maintenance* more than 6 hours late is skipped (so a restart never happens at a surprise time); a missed backup always runs once.
+- "Only when nobody is playing" is not available: there is no generic, game-agnostic way to count players.
+- The self-update does not install packages. If `pyproject.toml` changes it refuses and says to run `pip install -e .`.
+- With the hardened system unit (`ProtectSystem=strict`) the install folder is read-only, so the button will report the git error; update by hand there.
+- The real Docker paths for registry digests (`buildx imagetools`, `manifest inspect`) and `docker exec` are covered by fake-runner tests, not a real engine or registry. The `update_note` and `save_command` texts in the catalog are written from the images' documentation and are unverified.
+- Image update checks are kept in memory only and start empty after a restart.
+
 ## 0.2.0: progress, honest readiness, logs and a settings form
 
 Driven by the first real test (deploying Palworld): the deploy button greyed out with no feedback for 30 seconds, the dashboard said "Running" while the game was still downloading about 5 GB (so joining timed out), there was no way to see logs, and the config file was one huge line.

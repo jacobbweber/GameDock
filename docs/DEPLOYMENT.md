@@ -29,7 +29,36 @@ Either way:
 Good to know:
 
 - Restarting or updating GameDock does **not** stop game servers; they are separate containers with restart policy `unless-stopped`, and they come back by themselves after a reboot (Docker starts them).
-- To update GameDock: `git pull`, `pip install -e .` (or `pip install .`), restart the service.
+- To update GameDock by hand: `git pull --ff-only`, `pip install -e .` (only needed if the required packages changed), restart the service.
+- From 0.3.0 the page can do this itself: the header shows the version, an **Update available** badge, and an **Update GameDock** button.
+
+### Updating GameDock from the web page (0.3.0 and later)
+
+The button runs `git pull --ff-only` in the install folder, then restarts GameDock only. Game servers are separate containers and keep running. It needs:
+
+- the install folder to be a git checkout on a branch, with no local changes to tracked files, writable by the user GameDock runs as. That is true for the **user service** flavour. With the hardened **system service** (`ProtectSystem=strict`) the install folder is read-only for the service, so the button will report the git error: update by hand there (commands are shown in the dialog). The Docker image has no git checkout, so rebuild it instead (`git pull`, `docker compose up -d --build`).
+- a service manager that restarts GameDock. **The shipped units need no change.** GameDock first asks systemd to restart it (`systemctl --user restart gamedock`, or `systemctl restart gamedock` when allowed). If that is not possible it exits with status 75, which makes `Restart=on-failure` (what both example units use, with `RestartSec=5`) start it again; `Restart=always` works too. Outside systemd it starts itself again in place. A unit with `Restart=no` or `Restart=on-abnormal` will leave GameDock stopped after an update: do not use those.
+- GameDock finds its own systemd unit name when it restarts, so a different unit name works. The manual commands the dialog displays assume the name `gamedock`.
+
+It refuses (and changes nothing) while a backup, update, restore, deploy or scheduled job is running, with local changes, when the pull is not a fast-forward, and when the update changes the required packages (run `.venv/bin/pip install -e .` by hand, then restart). Turn the check off with `GAMEDOCK_UPDATE_CHECK=false` and only the button with `GAMEDOCK_SELF_UPDATE=false`.
+
+### Moving an existing install from 0.2.0 to 0.3.0
+
+0.2.0 has no button, so the first update is by hand (user service shown; for the system service add `sudo` and drop `--user`):
+
+```bash
+cd ~/GameDock
+git pull --ff-only
+.venv/bin/pip install -e .      # harmless; 0.3.0 adds no new packages
+systemctl --user restart gamedock
+journalctl --user -u gamedock -n 20 --no-pager     # should say it started
+```
+
+Your `data/` folder, servers and backups are untouched. Nothing else needs to change. The scheduler starts at once; there are no schedules until you create them on the **Schedules** page. After this, future updates can use the button.
+
+### Schedules and the host timezone
+
+Times of day follow the timezone of the machine (the `TZ` variable, or `/etc/localtime`); the Schedules page shows which. In a Docker image without timezone data they are UTC: set `TZ` and mount `/etc/localtime` read-only if you want local time. GameDock must be running at the scheduled time; a missed backup runs once at the next start, a missed maintenance only if it is under 6 hours late.
 
 ## B. Docker Compose (optional)
 

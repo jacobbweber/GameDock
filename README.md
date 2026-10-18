@@ -10,6 +10,10 @@ A server that is still downloading its game files shows **Installing 52%** inste
 
 ![Installing](docs/gamedock-020-installing.png)
 
+**New in 0.3.0:** the page header shows the GameDock version and says when a newer one is ready, with an **Update GameDock** button. Each server shows when a newer game image is available, and can back itself up and do its regular maintenance on a schedule.
+
+![Header with an update badge, and a server with an image update](docs/gamedock-030-header-update.png)
+
 **What you get**
 
 - A catalog of game templates; deploy several servers of the same game on different ports.
@@ -19,10 +23,12 @@ A server that is still downloading its game files shows **Installing 52%** inste
 - Backups and restore of each server's data folder (always a safety backup first).
 - An editor for the game's config files: a form with labelled fields, switches and hidden passwords, or the raw text. Changed fields are highlighted before you save.
 - Live CPU, memory and network per game, plus host totals. No database needed.
+- **Updates you can see:** the version and an "Update available" badge in the header (checks GitHub, works offline, one click to update GameDock itself), and an "Update available" badge on each server whose game image has a newer version.
+- **Schedules:** automatic backups (every few hours, daily, or on chosen weekdays, with how many to keep) and regular maintenance (back up, apply an image update, restart) for each server.
 - A **Health** page and a `doctor` command that tell you in plain language what is wrong and how to fix it.
 - An optional MCP endpoint for AI agents (read-only, standard or full mode, with two-step confirmation for anything destructive).
 
-**Version:** 0.2.0. See [CHANGELOG.md](CHANGELOG.md). How it is built: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+**Version:** 0.3.0. See [CHANGELOG.md](CHANGELOG.md). How it is built: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Quick start
 
@@ -69,6 +75,10 @@ Set these as environment variables or in a `.env` file in the folder you start G
 | `GAMEDOCK_STATS_HISTORY_SECONDS` | `3600` | History kept in memory (60 to 86400); at most 2000 points per server. |
 | `GAMEDOCK_METRICS_ENABLED` | `false` | Serve Prometheus text at `/metrics`. |
 | `GAMEDOCK_METRICS_ALLOW_REMOTE` | `false` | Let non-local clients read `/metrics`. |
+| `GAMEDOCK_SCHEDULER` | `true` | Run scheduled backups and maintenance. `false` keeps the settings but runs nothing (the Run now buttons still work). |
+| `GAMEDOCK_UPDATE_CHECK` | `true` | Look on GitHub (read-only, at most every 6 hours, plus the Check now button) for a newer GameDock. `false`: GameDock never contacts GitHub and the version box says so. |
+| `GAMEDOCK_UPDATE_REPO` | `jacobbweber/GameDock` | The GitHub repository to compare with, as `owner/name` or its URL. Only api.github.com is ever contacted. |
+| `GAMEDOCK_SELF_UPDATE` | `true` | `false` hides the **Update GameDock** button (the version and badge stay; the page shows the manual commands). |
 | `GAMEDOCK_MCP_MODE` | `standard` | `off`, `read_only`, `standard` or `full` (see [AI agents](#ai-agents-mcp)). Forced to `off` when `GAMEDOCK_HOST` is not localhost and no token is set. |
 | `GAMEDOCK_MCP_TOKEN` | *(empty)* | Optional bearer token clients must send to `/mcp`. |
 | `GAMEDOCK_MCP_ALLOWED_HOSTS` | *(empty)* | Extra `Host` values `/mcp` accepts, comma separated. |
@@ -183,6 +193,45 @@ Example Grafana queries: `gamedock_server_cpu_percent` (one line per game), `sum
 
 **Update** (dashboard card) pulls the newest version of the server's image and recreates the container, keeping data and settings. GameDock pulls first; if the image is already the newest, nothing else happens. Otherwise it stops the server if running (with the stop grace period, default 60 s), takes an automatic `...-pre-update` backup (if that fails the update is cancelled and the server is restarted), recreates the container and starts it again if it had been running. The image id before and after is shown. A catalog entry can set `update_method: none` for games that update themselves inside the container (the Update button then disappears).
 
+## Updates: GameDock and your game servers
+
+### GameDock itself
+
+The header shows `Version 0.3.0 (abc1234)`: the version and the short git commit. GameDock asks GitHub (`GAMEDOCK_UPDATE_REPO`) for the newest commit at most every 6 hours (a failed check is retried after 30 minutes) and when you press **Check now** in the version dialog. It only reads; nothing is sent. Offline is not an error: the dialog says it could not check and when it last did. When the repository is ahead of your copy, a blue **Update available** badge appears next to the version.
+
+![Version dialog](docs/gamedock-030-about.png)
+
+**Update GameDock** (after a confirmation) runs `git pull --ff-only` in the install folder and restarts GameDock only; your game servers keep running. The page waits, reconnects by itself and shows the new version. It refuses, changing nothing, when:
+
+- the install folder is not a git checkout on a branch (for example the Docker image), or has local changes to GameDock's own files;
+- a backup, update, restore, deploy or scheduled job is running (starting an update also blocks new actions for a few seconds);
+- the pull would not be a plain fast-forward (you have your own commits);
+- the update changes the packages GameDock needs (`pyproject.toml`); it then tells you to run `.venv/bin/pip install -e .` by hand first.
+
+In every refusal the dialog shows the exact commands to run by hand. The restart asks systemd (`systemctl --user restart gamedock`); if that is not possible it exits with code 75 so a unit with `Restart=on-failure` or `Restart=always` starts it again; outside systemd it starts itself again in place. Updating GameDock is web only: it is deliberately not an MCP tool, so an AI agent cannot replace the program it runs in. Agents can read the version with `get_gamedock_version`.
+
+### A game server's image
+
+A tile whose image has a newer version shows **Update available** and an **Update now** button (the existing safe update, with a backup first). GameDock compares the digest of the image the container was made from with the registry's digest for the same tag, without downloading anything. The answer is cached for hours (at most one registry question per server per 30 seconds; the **Update** dialog has a **Check now** button), and it is kept in memory only, so it resets when GameDock restarts. Many SteamCMD-based images download the newest *game* files every time the container starts; for those, restarting is what updates the game, and the badge only means the wrapper image changed. A catalog entry can say so in its own words with `update_note`.
+
+## Schedules: backups and maintenance
+
+Open **Schedules** (top menu) or the **Schedules** button on a server.
+
+![Schedules](docs/gamedock-030-schedules.png)
+
+- **Backups:** every N hours (1 to 168), every day at a time, or on chosen weekdays at a time, plus how many scheduled backups to keep (default: the usual `GAMEDOCK_BACKUP_RETENTION`). They are marked *scheduled* in the Backups list and are pruned separately from manual ones. A catalog `save_command` (for example `rcon-cli save`) is run in the container first, and `backup_stop_first: true` stops the game briefly for a consistent copy, as for manual backups.
+- **Maintenance:** daily or on chosen weekdays, with checkboxes: take a backup first, check for and apply a newer image, restart. *Only when nobody is playing* is shown but not available: GameDock has no generic way to count players, and the page says so. A step that does not apply (no image update for this game) is skipped and explained.
+- Every schedule shows its **last run**, **next run** and **last result**; failures are shown in red on the tile, in the panel and in the activity log. **Run maintenance now** asks for confirmation first.
+- Times of day are in the machine's timezone (shown on the page); daylight-saving changes are handled (a time that is skipped that day, such as 02:30 when the clocks jump forward, runs an hour later, and a repeated hour runs once).
+- If GameDock was off at the scheduled time, a missed **backup** runs once when it starts. A missed **maintenance** runs once if it is less than 6 hours late and is otherwise skipped (never a surprise restart), with a note.
+- GameDock never does two things to one server at once: a job that finds the server busy tries again at the next 30-second check, and is recorded as skipped if the server stays busy for two hours.
+- Schedules are stored in `<data>/schedules.json` (written atomically). A damaged file is set aside as `schedules.json.broken-<time>` and the Schedules page says so.
+- Runs started by a schedule are written to the same activity log as AI agent calls (`<data>/mcp-audit.jsonl`, shown on the AI agents page).
+- AI agents can read schedules (`list_schedules`) and, in `standard` and `full` modes, set them (`set_backup_schedule`, `set_maintenance_schedule`). Setting a schedule runs nothing and cannot lose data.
+
+![Maintenance confirmation](docs/gamedock-030-maintenance.png)
+
 ## Editing config files
 
 A catalog entry can declare config files; each server then gets a **Config** button with a text editor.
@@ -218,6 +267,9 @@ volumes:
 env:                     # fixed values, not editable in the deploy form
   SOME_FLAG: "1"
 update_method: pull_recreate   # default; or 'none' if the game updates itself
+update_note: "Shown in the Update dialog and Schedules: how this image updates the game."   # optional, plain words
+save_command: [rcon-cli, save]   # optional: run inside the container before a scheduled backup (list, or a quoted string)
+backup_stop_first: false         # true = stop the game briefly for scheduled and manual backups
 ready_log_pattern: "Server is ready"   # optional regex: when this appears in the log the server is Ready
 progress_log_pattern: "progress: *([0-9.]+)"   # optional regex with exactly ONE group: the download percentage
 config_files:            # files users may edit (relative to the server's data folder)
@@ -283,9 +335,9 @@ GameDock serves a [Model Context Protocol](https://modelcontextprotocol.io) endp
 | Mode | Tools served |
 |---|---|
 | `off` | none (`/mcp` answers 404 with an explanation) |
-| `read_only` | `list_catalog`, `get_catalog_entry`, `list_servers`, `get_server_status`, `get_server_stats`, `get_host_stats`, `get_stats_history`, `list_backups`, `list_config_files`, `read_config_file`, `get_server_logs` |
-| `standard` (default) | read-only tools plus `deploy_server`, `start_server`, `stop_server`, `restart_server`, `update_server_settings`, `update_server_image`, `create_backup`, `write_config_file` |
-| `full` | standard plus the destructive tools `delete_server`, `restore_backup`, `delete_backup`, `wipe_server_data` |
+| `read_only` | `list_catalog`, `get_catalog_entry`, `list_servers`, `get_server_status`, `get_server_stats`, `get_host_stats`, `get_stats_history`, `list_backups`, `list_config_files`, `read_config_file`, `get_server_logs`, `get_gamedock_version`, `list_schedules` (13 tools) |
+| `standard` (default) | read-only tools plus `deploy_server`, `start_server`, `stop_server`, `restart_server`, `update_server_settings`, `update_server_image`, `create_backup`, `write_config_file`, `set_backup_schedule`, `set_maintenance_schedule` (23 tools) |
+| `full` | standard plus the destructive tools `delete_server`, `restore_backup`, `delete_backup`, `wipe_server_data` (27 tools) |
 
 Tools outside the mode are not listed at all and cannot be called. If `GAMEDOCK_HOST` is not localhost and `GAMEDOCK_MCP_TOKEN` is empty, the mode is forced to `off` (a warning is logged and the web page explains why).
 
@@ -422,7 +474,16 @@ Start with `python -m gamedock doctor` (or the Health page). It names most of th
 | POST | `/api/servers/{id}/backups/{name}/restore?confirm=true` | restore |
 | DELETE | `/api/servers/{id}/backups/{name}?confirm=true` | delete a backup |
 | POST | `/api/servers/{id}/wipe-data?confirm=true` | empty the data folder (backup first) |
+| GET | `/api/version` | version, commit, whether a newer GameDock exists, and whether the Update button can work (never contacts GitHub) |
+| POST | `/api/gamedock/update-check` | the Check now button: ask GitHub (read-only) |
+| POST | `/api/gamedock/update?confirm=true` | pull the newest GameDock and restart it (web only, refuses when busy, dirty or not a git checkout) |
 | GET | `/api/servers/{id}/image` | image name and current image id |
+| GET | `/api/servers/{id}/image-update` | what is known about a newer image (cached) |
+| POST | `/api/servers/{id}/image-update/check` | ask the registry now (nothing is downloaded) |
+| GET | `/api/schedules` | every server's schedules, last and next runs, and the machine's timezone |
+| GET | `/api/servers/{id}/schedules` | one server's schedules and recent runs |
+| PUT | `/api/servers/{id}/schedules/backup`, `/schedules/maintenance` | set a schedule (strictly validated) |
+| POST | `/api/servers/{id}/schedules/{backup\|maintenance}/run?confirm=true` | run it now |
 | POST | `/api/servers/{id}/update-image?confirm=true` | update the image |
 | GET | `/api/servers/{id}/logs?lines=200` | end of the container log (ANSI removed, secrets masked; 1 to 1000 lines) |
 | GET | `/api/servers/{id}/config` | declared config files |
@@ -456,6 +517,9 @@ gamedock/
   hostcheck.py     port probe, free space, file-owner scan
   doctor.py        the health checks (CLI, API and UI share them)
   sampler.py       background thread feeding the in-memory history
+  schedule.py      schedule rules, next-run maths (timezone and DST aware), schedules.json store
+  scheduler.py     the small background thread that starts due backups and maintenance
+  updates.py       GameDock's own version, GitHub update check and git-pull self-update
   metrics.py       Prometheus text output
   service.py       all management logic (web and MCP both call this)
   serialize.py     result to JSON-friendly dicts, shared by web and MCP
