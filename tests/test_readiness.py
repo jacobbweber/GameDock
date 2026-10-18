@@ -421,3 +421,35 @@ def test_logs_mcp_tool_is_read_only_and_capped(svc, backend):
         assert not err and r["lines"] == 5 and "hunter2" not in r["text"] and "row 299" in r["text"]
         assert err2  # more than 500 lines is refused by the tool's schema
         assert not err3 and dflt["lines"] == 100
+
+
+def test_a_server_deployed_before_the_patterns_existed_uses_the_current_catalog_patterns(svc, backend, tmp_path):
+    svc.deploy("plain", "P", env={"ADMIN_PASSWORD": "secret1"})  # its template snapshot has no patterns
+    svc.start("p")
+    assert svc.get_status("p").phase == "ready"
+    (tmp_path / "cat" / "plain.yaml").write_text(PLAIN + 'ready_log_pattern: "Now joinable"\n'
+                                                 'progress_log_pattern: "dl ([0-9.]+)"\n')
+    svc._entries_cache = None  # the catalog is re-read at most every 30 s
+    backend.health["gamedock-p"] = "unhealthy"  # as Palworld's check does during a long download
+    backend.append_log("gamedock-p", "dl 40.0")
+    s = svc.get_status("p")
+    assert (s.phase, s.progress) == ("installing", 40.0)
+    backend.append_log("gamedock-p", "Now joinable")
+    assert svc.get_status("p").ready
+
+
+def test_the_catalog_fallback_ignores_a_game_that_left_the_catalog(svc, backend, tmp_path):
+    svc.deploy("plain", "P", env={"ADMIN_PASSWORD": "secret1"})
+    svc.start("p")
+    (tmp_path / "cat" / "plain.yaml").unlink()
+    svc._entries_cache = None
+    assert svc.get_status("p").phase == "ready"
+
+
+def test_version_is_consistent(svc):
+    import re
+    from pathlib import Path
+    import gamedock
+    pyproject = (Path(__file__).resolve().parent.parent / "pyproject.toml").read_text()
+    assert re.search(r'^version = "%s"$' % re.escape(gamedock.__version__), pyproject, re.M)
+    assert gamedock.__version__ == "0.2.0"

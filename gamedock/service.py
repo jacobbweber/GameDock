@@ -87,6 +87,7 @@ class GameDockService:
         self._pending: dict[str, ServerInfo] = {}         # deploys in progress (not stored yet)
         self._ready_seen: dict[str, str] = {}             # server id -> start time of the run that printed its ready line
         self._phase_cache: dict[str, tuple[float, tuple, rd.Readiness]] = {}
+        self._entries_cache: tuple[float, dict[str, CatalogEntry]] | None = None
         # monitoring (all in memory)
         self.stats_interval = float(stats_interval)
         self.stats_history_seconds = int(stats_history_seconds)
@@ -198,6 +199,30 @@ class GameDockService:
                           progress=r.progress if r else None, phase_detail=r.detail if r else "")
 
     # --------------------------------------------------------------- readiness
+    def _current_entries(self) -> dict[str, CatalogEntry]:
+        """The catalog, re-read at most every 30 s (this is on the polling path)."""
+        now = time.monotonic()
+        cached = self._entries_cache
+        if cached and now - cached[0] < 30.0:
+            return cached[1]
+        entries = self._catalog()
+        self._entries_cache = (now, entries)
+        return entries
+
+    def _with_current_patterns(self, inst: Instance, t: CatalogEntry) -> CatalogEntry:
+        """A server keeps a snapshot of its template, so one deployed before a catalog entry gained readiness patterns
+        has none. Those two fields only describe how to read the game's log (they change no container), so take them
+        from the current catalog entry of the same game when the snapshot has neither."""
+        if t.ready_log_pattern or t.progress_log_pattern:
+            return t
+        try:
+            cur = self._current_entries().get(inst.game_id)
+        except Exception:  # noqa: BLE001 - a broken catalog must never break the server list
+            return t
+        if cur is None or not (cur.ready_log_pattern or cur.progress_log_pattern):
+            return t
+        return replace(t, ready_log_pattern=cur.ready_log_pattern, progress_log_pattern=cur.progress_log_pattern)
+
     def _forget_readiness(self, server_id: str) -> None:
         self._ready_seen.pop(server_id, None)
         self._phase_cache.pop(server_id, None)
@@ -207,6 +232,7 @@ class GameDockService:
         has a health check that says healthy); otherwise at most one `docker logs` call every READINESS_TTL seconds."""
         if health == "healthy":
             return rd.decide(health, bool(t.ready_log_pattern), False, None)
+        t = self._with_current_patterns(inst, t)
         if self._ready_seen.get(inst.id) == started and t.ready_log_pattern:
             return rd.decide(health, True, True, None)  # the ready line was seen during this run; logs may have scrolled
         key = (health, started)
