@@ -40,3 +40,41 @@ button.stop:hover:not(:disabled) { background: #f85149; }
 .error { background: rgba(218,54,51,.15); border: 1px solid var(--red); color: #ffa198;
   padding: 10px 14px; border-radius: 8px; margin-bottom: 16px; }
 .empty { color: var(--muted); text-align: center; margin-top: 60px; }
+
+/* ---- navigation ---- */
+header nav { display: flex; gap: 6px; }
+header nav a { color: var(--muted); text-decoration: none; padding: 6px 14px; border-radius: 6px; font-weight: 600; }
+header nav a:hover { color: var(--text); }
+header nav a.active { color: var(--text); background: #232c38; }
+a { color: #79b8ff; }
+.intro { color: var(--muted); margin-top: 0; }
+.note { color: #e3b341; font-size: 12.5px; margin: 6px 0 0; }
+button.secondary { background: transparent; }
+button.danger { color: #ff7b72; border-color: #5a2a2a; background: transparent; }
+button.danger:hover:not(:disabled) { background: rgba(218,54,51,.18); }
+button.primary { background: var(--blue); border-color: var(--blue); }
+button.primary:hover:not(:disabled) { background: #388bfd; }
+.spacer { flex: 1; }
+
+/* ---- dialog / form ---- */
+dialog { background: var(--panel); color: var(--text); border: 1px solid var(--border);
+  border-radius: 12px; padding: 0; width: min(560px, 94vw); max-height: 92vh; }
+dialog::backdrop { background: rgba(0,0,0,.6); }
+dialog form { padding: 20px 22px; display: flex; flex-direction: column; gap: 12px; max-height: 90vh; overflow: auto; }
+dialog h3 { margin: 0; font-size: 18px; }
+dialog h4 { margin: 6px 0 0; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+label.field { display: flex; flex-direction: column; gap: 4px; font-size: 13.5px; }
+label.field span.hint { color: var(--muted); font-size: 12px; }
+label.field .req { color: #ff7b72; }
+input[type=text], input[type=password], input[type=number] { font: inherit; color: var(--text); background: var(--bg);
+  border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; width: 100%; }
+input:focus { outline: 2px solid var(--blue); outline-offset: -1px; }
+.portrow { display: flex; align-items: center; gap: 10px; }
+.portrow .lbl { flex: 1; color: var(--muted); font-size: 13.5px; }
+.portrow input { width: 110px; }
+label.check { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+.form-error { background: rgba(218,54,51,.15); border: 1px solid var(--red); color: #ffa198;
+  padding: 8px 12px; border-radius: 8px; font-size: 13.5px; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+.warn { color: #e3b341; font-size: 13.5px; }
+.card .actions { flex-wrap: wrap; }

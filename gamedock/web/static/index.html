@@ -9,13 +9,24 @@
 <body>
   <header>
     <div class="brand"><span class="logo">&#9875;</span> GameDock</div>
+    <nav>
+      <a href="#/" id="nav-dashboard">Dashboard</a>
+      <a href="#/catalog" id="nav-catalog">Catalog</a>
+    </nav>
     <div id="conn" class="conn" title="Connection to GameDock">connecting&hellip;</div>
   </header>
   <main>
     <div id="error" class="error" hidden></div>
-    <section id="servers" class="grid" aria-live="polite"></section>
-    <p id="empty" class="empty" hidden>No games defined yet. Add a <code>.yaml</code> file to the <code>catalog/</code> folder.</p>
+    <section id="page-dashboard">
+      <section id="servers" class="grid" aria-live="polite"></section>
+      <p id="empty" class="empty" hidden>No servers deployed yet. Pick a game from the <a href="#/catalog">catalog</a> to deploy one.</p>
+    </section>
+    <section id="page-catalog" hidden>
+      <p class="intro">Game templates you can deploy. Add your own by dropping a <code>.yaml</code> file in the <code>catalog/</code> folder.</p>
+      <section id="catalog" class="grid"></section>
+    </section>
   </main>
+  <dialog id="dialog"></dialog>
   <script src="/static/app.js"></script>
 </body>
 </html>
