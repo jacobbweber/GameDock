@@ -210,7 +210,59 @@ def make_tools(service: GameDockService, confirms: ConfirmationStore) -> list[To
         day are read in. Also lists recent runs (newest first) including failures."""
         return to_plain(service.list_schedules())
 
+    # ------------------------------------------------------------------ adding games (read-only helpers)
+    @tool(READ, _ann(read=True))
+    def get_add_game_guide() -> Result:
+        """START HERE to add a new game to the catalog. Returns the full written procedure (`procedure_markdown`, the
+        10 steps), the machine-readable `field_reference` (every catalog key with type, default and meaning), a
+        `template_yaml` to start from, the `limits` and the `rules`. Read-only. The same procedure is the resource
+        gamedock://add-a-game. Never invent an image, a port or a Steam app id: research them, and say in the entry's
+        notes what you could not confirm."""
+        return service.add_game_guide()
+
+    @tool(READ, _ann(read=True))
+    def validate_catalog_entry(yaml_text: Annotated[str, Field(
+            max_length=100_000, description="The complete catalog entry as YAML text (at most 20 KB)")]) -> Result:
+        """Dry run: check a catalog entry with exactly the checks add_catalog_entry uses, and save NOTHING. Returns
+        `valid`, `errors` (what must be fixed, in plain words), `warnings` (things to double check) and `notes`, a plain
+        `summary` of what the entry would do, and whether this id already exists (`exists`, `can_add`, `can_update`).
+        Call it repeatedly until `valid` is true."""
+        r = service.validate_catalog_entry(yaml_text)
+        r["_audit_detail"] = f"valid={r['valid']} id={r['id']} errors={len(r['errors'])} warnings={len(r['warnings'])}"
+        return r
+
+    @tool(READ, ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+    def inspect_image(image: Annotated[str, Field(
+            max_length=255, description="A Docker image reference such as 'someuser/some-server:1.2'")]) -> Result:
+        """Read-only look at a Docker image to help write a catalog entry. NEVER downloads or runs the image. If the
+        image is already stored on this machine it lists the ports it declares, its declared volumes, the user it runs
+        as, its environment variable NAMES (not values) and its health check. If it is not stored here it says so and how
+        to get it pulled (a person runs `docker pull`), and still shows what the registry says (digest, platforms).
+        Output is short and bounded."""
+        return service.inspect_image(image)
+
     # ------------------------------------------------------------------ standard (changes things, not destructive)
+    @tool(STANDARD, _ann())
+    def add_catalog_entry(yaml_text: Annotated[str, Field(
+            max_length=100_000, description="The complete catalog entry as YAML text (at most 20 KB)")]) -> Result:
+        """Add a NEW game to the catalog from YAML text. It is checked strictly (same as validate_catalog_entry), then
+        saved as catalog/<id>.yaml. It never overwrites anything: an id that already exists is refused. The new entry is
+        marked 'Added by AI, needs your review' and CANNOT be deployed (by deploy_server or the web page) until a person
+        approves it in the web page; there is no tool for approving. Tell the person it is waiting."""
+        r = service.add_catalog_entry(yaml_text)
+        r["_audit_detail"] = f"added id={r['id']} sha256={r['yaml_sha256'][:12]} reviewed=false"
+        return r
+
+    @tool(STANDARD, _ann(idempotent=True))
+    def update_catalog_entry(yaml_text: Annotated[str, Field(
+            max_length=100_000, description="The complete new catalog entry as YAML text (same id as before)")]) -> Result:
+        """Replace an entry that YOU added through add_catalog_entry (the id inside the text says which). Entries from
+        the repository are never changed. The change is checked strictly and the entry goes back to 'needs your review'
+        (reviewed: false) until a person approves it again. Servers already deployed from it are not affected."""
+        r = service.update_catalog_entry(yaml_text)
+        r["_audit_detail"] = f"updated id={r['id']} sha256={r['yaml_sha256'][:12]} reviewed=false"
+        return r
+
     @tool(STANDARD, _ann(idempotent=True))
     def set_backup_schedule(
         server_id: ServerId,
@@ -492,9 +544,10 @@ def wrap_with_audit(d: ToolDef, audit: AuditLog) -> Callable:
             log.exception("MCP tool %s failed unexpectedly", d.name)  # message only; arguments are not logged
             audit.record(d.name, kwargs, "crashed", "unexpected internal error (see the GameDock log)", client)
             raise
+        detail = result.pop("_audit_detail", "") if isinstance(result, dict) else ""
         status = result.get("status") if isinstance(result, dict) and result.get("status") in (
             "confirmation_required",) else "ok"
-        audit.record(d.name, kwargs, status, "", client)
+        audit.record(d.name, kwargs, status, detail, client)
         log.debug("MCP tool %s %s in %.0f ms", d.name, status, (time.monotonic() - started) * 1000)
         return result
 

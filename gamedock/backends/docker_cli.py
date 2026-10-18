@@ -26,6 +26,7 @@ from ..errors import BackendError, DockerUnavailableError, ForeignContainerError
 from ..models import IMAGE_RE, ContainerSpec, ContainerStats, Status, is_reserved_env_name
 from . import docker_errors
 from .base import ContainerState, DockerDiagnosis
+from .image_inspect import parse_imagetools, parse_local_inspect, parse_manifest
 from .docker_stats import INSPECT_FORMAT, parse_inspect_lines, parse_stats_lines
 
 STOP_TIMEOUT_SECONDS = 60  # default grace period for game servers to save on SIGTERM
@@ -272,6 +273,43 @@ class DockerCliBackend:
         first = (last.strip().splitlines() or ["no answer"])[0][:200]
         raise BackendError(f"Could not ask the registry about {image} ({first}). Are you online, and is the image "
                            "name right?")
+
+    def inspect_image(self, image: str) -> dict:
+        """Read-only look at an image, for people (and AI agents) writing a catalog entry. NEVER pulls or runs the
+        image: `docker image inspect` only reads images that are already stored here, and the registry is asked
+        with `buildx imagetools inspect` (then `manifest inspect`), which read metadata only.
+        Returns {"image", "local", "local_details", "remote", "remote_error"}."""
+        self.check_image_name(image)
+        out: dict = {"image": image, "local": False, "local_details": None, "remote": None, "remote_error": ""}
+        proc = self._run(["image", "inspect", "--", image], check=False, timeout=QUICK_TIMEOUT_SECONDS)
+        if proc.returncode == 0:
+            details = parse_local_inspect(proc.stdout)
+            if details is not None:
+                out["local"], out["local_details"] = True, details
+        else:
+            err = proc.stderr or proc.stdout or ""
+            kind = docker_errors.classify(err)
+            if kind:  # docker itself is unusable: say so instead of "not local"
+                raise docker_errors.friendly("inspect", err)
+        last = ""
+        proc = self._run(["buildx", "imagetools", "inspect", image], check=False, timeout=QUICK_TIMEOUT_SECONDS * 2)
+        if proc.returncode == 0:
+            r = parse_imagetools(proc.stdout)
+            if r["digest"] or r["platforms"]:
+                out["remote"] = r
+        else:
+            last = proc.stderr or proc.stdout or ""
+        if out["remote"] is None:
+            proc = self._run(["manifest", "inspect", image], check=False, timeout=QUICK_TIMEOUT_SECONDS * 2)
+            if proc.returncode == 0:
+                out["remote"] = parse_manifest(proc.stdout)
+            else:
+                last = proc.stderr or proc.stdout or last
+            if out["remote"] is None:
+                first = (last.strip().splitlines() or ["no answer"])[0][:200]
+                out["remote_error"] = (f"The registry could not be asked ({first}). Is the machine online and is the "
+                                       "image name right?")
+        return out
 
     def local_image_digests(self, ref: str) -> tuple[str, ...]:
         self.check_image_name(ref)

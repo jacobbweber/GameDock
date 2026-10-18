@@ -68,6 +68,11 @@ class ContainerBackend(Protocol):
         """Registry digests recorded for a locally stored image (`ref` is an image name or an image id). Empty if
         none are known (for example an image built on this machine)."""
 
+    def inspect_image(self, image: str) -> dict:
+        """Read-only facts about an image: {"image", "local" (is it stored here), "local_details" (ports, volumes, user,
+        environment names, health check; only when local), "remote" (digest and platforms from the registry, or None),
+        "remote_error"}. Must NEVER pull or run the image."""
+
     def exec_in(self, name: str, argv: list[str], timeout: int = 60) -> str:
         """Run a command (no shell) inside the running container and return what it printed. Raises BackendError."""
 

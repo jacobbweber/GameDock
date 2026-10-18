@@ -362,3 +362,21 @@ header nav a { white-space: nowrap; }
 table.game-facts { border-collapse: collapse; }
 table.game-facts th { padding-top: 2px; padding-bottom: 2px; }
 table.game-facts td { padding: 2px 0; overflow-wrap: anywhere; }
+
+/* ---- entries added by an AI agent (review) ---- */
+.card-buttons { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.card.needs-review { border-color: #6b5316; }
+.badge.review-badge { display: inline-block; margin-top: 8px; background: rgba(210,153,34,.22); color: #e3b341; }
+.badge.review-ok { display: inline-block; margin-top: 8px; background: rgba(46,160,67,.2); color: #56d364; }
+.review-reason { color: var(--muted); font-size: 12.5px; margin: 6px 0 0; }
+.review-lines, .review-flags, .review-notes { margin: 4px 0 0; padding-left: 20px; font-size: 13.5px; }
+.review-lines li, .review-flags li, .review-notes li { margin-bottom: 4px; }
+dialog form.catalog-review > * { flex-shrink: 0; }
+.review-flags li.warn { color: #e3b341; }
+.review-notes li { color: var(--muted); }
+.review-lead { margin: 0; color: var(--muted); }
+.yaml-view { max-height: 320px; overflow: auto; }
+.confirm-text { text-align: right; align-self: center; color: #ff9b9b; }
+.banner.info { background: rgba(31,111,235,.14); border-color: #1f4f9a; color: #cfe1ff; }
+dialog form.catalog-review .dialog-actions { position: sticky; bottom: -1px; background: var(--panel); padding: 12px 0 2px; margin-top: 0; border-top: 1px solid var(--border); }
+.yaml-view { max-height: 230px; }

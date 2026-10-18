@@ -24,6 +24,7 @@ from pathlib import Path
 from threading import Lock, RLock
 from typing import Callable, Iterable, Iterator, Mapping
 
+from . import authoring as au
 from . import backups as bk
 from . import configfiles as cfg
 from . import configforms as forms
@@ -34,6 +35,7 @@ from .backends.base import ContainerBackend, DockerDiagnosis
 from .catalog import entry_to_dict, load_catalog, parse_definition
 from .hoststats import HostMeter
 from .hostcheck import foreign_owners
+from .authoring_service import AuthoringMixin
 from .game_updates import GameUpdateMixin
 from .errors import BackendError, BusyError, ConflictError, GameDockError, NotFoundError, ValidationError
 from .models import (
@@ -92,7 +94,7 @@ def slugify(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:40].strip("-")
 
 
-class GameDockService(GameUpdateMixin):
+class GameDockService(GameUpdateMixin, AuthoringMixin):
     def __init__(self, backend: ContainerBackend, catalog_dir: Path, data_dir: Path,
                  backup_retention: int = 10, clock: Callable[[], datetime] | None = None,
                  stats_interval: float = 10.0, stats_history_seconds: int = 3600,
@@ -115,6 +117,7 @@ class GameDockService(GameUpdateMixin):
         self.schedules = sch.ScheduleStore(self.data_dir / "schedules.json")
         self.updater = updater or UpdateChecker(enabled=False, self_update=False)
         self._init_game_updates(steam_info, game_update_wait, game_update_poll, game_update_settle)
+        self._init_authoring()
         self.audit_hook: Callable[[str, dict, str, str], None] | None = None  # set by the web app (writes the audit file)
         self._frozen = ""                                  # non-empty while GameDock is about to restart for an update
         self._image_checks: dict[str, ImageCheck] = {}
@@ -170,7 +173,10 @@ class GameDockService(GameUpdateMixin):
         # Reloaded on each call so catalog edits show up without a restart. A broken file is skipped (and
         # remembered in catalog_problems) so one typo does not hide every other game.
         problems: list[tuple[str, str]] = []
-        entries = load_catalog(self.catalog_dir, errors=problems)
+        records = self.authoring.records()
+        if self.authoring.store.problem:
+            problems.append((au.REVIEW_FILENAME, self.authoring.store.problem))
+        entries = load_catalog(self.catalog_dir, errors=problems, added_by_ai=records)
         self.catalog_problems = problems
         return entries
 
@@ -427,6 +433,7 @@ class GameDockService(GameUpdateMixin):
     def _deploy(self, game_id: str, name: str, ports: Iterable[PortMapping] | None,
                 env: Mapping[str, str] | None, start: bool) -> ServerInfo:
         t = self.get_catalog_entry(game_id)
+        self.require_reviewed(t)
         name = self._check_name(name)
         resolved = self._resolve_ports(t, ports)
         self._check_port_conflicts(resolved)

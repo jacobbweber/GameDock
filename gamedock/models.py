@@ -107,6 +107,12 @@ class CatalogEntry:
     game_update_method: str = "none"  # "restart" = the image updates the game when the container starts; "none" = GameDock cannot update it
     installed_build_file: str = ""   # file (relative to the server's data folder) whose text is the installed version/build, for images that keep no Steam appmanifest
     stop_timeout: int = 0            # seconds this game gets to save when stopped; 0 = GameDock's default (GAMEDOCK_STOP_TIMEOUT)
+    # Where the entry came from. NOT catalog keys: they are filled in by the loader (see gamedock/authoring.py) and
+    # are not part of the entry's YAML form or of the snapshot a deployed server keeps.
+    origin: str = "repo"             # "repo" (a file a person put in the catalog folder) | "mcp" (added by an AI agent)
+    reviewed: bool = True            # False = added by an AI agent and not yet approved by a person: it cannot be deployed
+    source_file: str = ""            # file name inside the catalog folder
+    file_sha256: str = ""            # SHA-256 of that file's bytes when it was loaded
 
 
 @dataclass

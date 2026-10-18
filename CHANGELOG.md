@@ -2,6 +2,42 @@
 
 All notable changes. Dates are 2026.
 
+## 0.5.0: adding a game is now a repeatable procedure, also for AI agents
+
+Asked for: make adding new games (the first is ASKA) easy to repeat, by a written procedure in the repository and through the MCP endpoint, so a local AI harness can research a game and add it, while Jacob keeps control.
+
+### Added
+
+- **`docs/ADDING_A_GAME.md`**: what a catalog entry is, the ten steps (image, ports and protocols, save and settings folders, environment variables and secrets, Steam app id and update behaviour, log lines for ready, version and progress, writing, validating, a test copy on spare ports, verifying), a complete field reference of every catalog key (generated from the code and kept equal to it by a test; `scripts/update_docs.py` rewrites it), the **common traps** learned from Palworld and Enshrouded, a verification checklist and the MCP section.
+- **`catalog/_template.yaml`**: a commented starting point. Files whose name starts with `_` (or `.`) are now ignored by the catalog loader.
+- **`docs/PROMPT_ADD_A_GAME.md`**: a ready-to-paste task for an AI harness (how to connect to `http://192.168.1.29:8100/mcp` with the bearer token without ever printing it, how to research, inspect, validate, add, test on spare ports and report in a fixed structure). The game is a placeholder.
+- **MCP tools** `get_add_game_guide`, `validate_catalog_entry` and `inspect_image` (all modes except off), and `add_catalog_entry` and `update_catalog_entry` (standard and full). Tool counts: read_only 17, standard 30, full 34. New resource `gamedock://add-a-game` and prompt `add_a_game`; `gamedock://guide` now explains the authoring tools and the review rule.
+  - `validate_catalog_entry` is a dry run with exactly the checks of adding; it returns errors, warnings, notes, a plain summary and whether the id exists. `inspect_image` never pulls or runs an image (see Safety below).
+  - `add_catalog_entry` writes `catalog/<id>.yaml` atomically, only in the catalog folder, with a file name from the validated id, and never overwrites. `update_catalog_entry` only replaces entries that MCP added, never entries from the repository (also refused when git tracks the file).
+- **Review step in the web page.** Entries added through MCP are recorded in `<data>/catalog-review.json` (not in the repository) as `reviewed: false` with the file's SHA-256. The Catalog page shows **Added by AI, needs your review**, disables Deploy with the reason, and the dashboard shows a banner. The **Review** dialog shows a plain summary (image, ports, folders it will mount, secret fields, anything unusual flagged) and the full YAML. **Approve** records the reviewed fingerprint; **Reject** deletes the file and record after a confirmation. `POST /api/servers` and `deploy_server` both refuse an unreviewed entry. If the file changes after approval, by anyone, it is unreviewed again. Approve and reject are web only.
+- **Audit.** Every authoring call is in the audit log (the YAML text is never logged, only its size, and for add and update a short fingerprint); approvals and rejections in the web page are logged with client `web`.
+
+### Safety rules (validation)
+
+- For **every** entry: privileged mode, host networking, device mappings, extra capabilities, `security_opt`, shared process or memory spaces, a mount of the Docker socket, a malformed image reference (`..`, `//`, spaces) and non-list `ports`, `volumes`, `fields`, `config_files` are refused with a plain message; description, notes and update note are limited to 2000 characters.
+- For entries **added by an AI agent**, additionally: unknown keys (also inside ports, volumes, fields and config files), absolute or `~` or `$` host folders, host ports below 1024, host ports listed twice, YAML anchors and aliases, duplicated keys, ids starting with `_`, and text over 20 KB.
+- `validate_catalog_entry` also warns about unusual but legal things: no fixed image version, a registry other than Docker Hub, no ports or folders, password-like values written in the file, a password field not marked secret, no ready pattern, no notes.
+
+### Changed
+
+- Version 0.5.0 (only the version lines of `pyproject.toml` and `gamedock/__init__.py`; dependency lines are unchanged, so the header update button accepts it).
+- The catalog API (`/api/catalog`, MCP `list_catalog`) now also returns `origin`, `reviewed`, `deployable` and `review_note`. `/api/status` returns `catalog_review_pending`.
+- Existing catalog entries are unaffected (they are repository entries and load as before). A new test loads the bundled ones.
+
+### Decisions and known gaps
+
+- **Approval is a convention for MCP, not a login.** GameDock has no login (LAN trust, by Jacob's choice), so anything that can reach the web port can press Approve through `POST /api/catalog/<id>/approve`. An agent that only speaks MCP cannot, and the harness prompt tells it never to use the web API. Adding a login later would close this.
+- `catalog-review.json` is the record of which entries came from an AI. If it is deleted or damaged, those entries are treated as repository entries (GameDock reports a damaged file on the Health page and refuses to add entries while it is unreadable). Keep the data folder backed up.
+- `inspect_image` can only list ports, folders and settings for an image that is already on the machine; otherwise a person must run `docker pull`. It trusts what the image declares: many images declare nothing, so the documentation remains the main source.
+- An AI-added entry is an untracked file in the git checkout's `catalog/` folder. It does not block the Update GameDock button (untracked files are ignored by its clean-tree check), but a later `git pull` that brings a tracked file of the same name would stop until the untracked one is removed. Commit approved entries you want to keep.
+- A hand-edit of an approved AI entry makes it unreviewed (by design): approve it again.
+- The harness's own judgement decides the image, ports and app id; GameDock checks the shape, not the truth. That is why the review dialog and the first test deploy exist.
+
 ## 0.4.1: Enshrouded fixes from the first real test
 
 Found by deploying the bundled Enshrouded entry on a real host: the game asked for a password although the password box was empty, and the Config editor had no file to open.

@@ -22,7 +22,7 @@ from ..service import GameDockService
 from .audit import AuditLog
 from .confirm import ConfirmationStore
 from .guard import McpGuard
-from .guide import GUIDE_URI, guide_text
+from .guide import ADD_GAME_URI, GUIDE_URI, guide_text
 from .tools import MODE_TIERS, AuditedMCPServer, make_tools, register_tools
 
 log = logging.getLogger("gamedock.mcp")
@@ -104,6 +104,7 @@ class McpIntegration:
             "tools": self.tool_names,
             "confirmation_ttl_seconds": int(self.confirms.ttl),
             "guide_resource": GUIDE_URI,
+            "add_game_resource": ADD_GAME_URI,
             "audit_available": True,
         }
 
@@ -130,6 +131,31 @@ def build_mcp(service: GameDockService, config: McpConfig | None = None,
                          mime_type="text/markdown")
         def guide() -> str:
             return guide_text(config.mode, names, ttl)
+
+        @server.resource(ADD_GAME_URI, name="gamedock_add_a_game", title="How to add a game to GameDock",
+                         description="The written procedure for adding a new game to the catalog (10 steps, common "
+                                     "traps, verification checklist)",
+                         mime_type="text/markdown")
+        def add_a_game_resource() -> str:
+            return service.add_game_procedure()
+
+        @server.prompt(name="add_a_game", title="Add a new game to the catalog",
+                       description="Step-by-step instructions for researching and adding a game's dedicated server")
+        def add_a_game(game_name: str) -> str:
+            can_add = "add_catalog_entry" in names
+            return (f"Add the game '{game_name}' to GameDock's catalog:\n"
+                    "1. Call get_add_game_guide (or read the resource gamedock://add-a-game) and follow its 10 steps.\n"
+                    "2. Research a maintained Docker image for the dedicated server, its ports and protocols, the save and "
+                    "settings folders, the environment variables and the Steam app id of the dedicated server. NEVER invent "
+                    "any of these; write what you could not confirm in the entry's notes.\n"
+                    "3. Call inspect_image on the image (it never downloads or runs it).\n"
+                    "4. Write the entry from the template and call validate_catalog_entry until valid is true.\n"
+                    + ("5. Call add_catalog_entry, then tell the person the entry is waiting for their approval in the web "
+                       "page (Catalog -> Review). You cannot approve it and it cannot be deployed before.\n"
+                       if can_add else
+                       "5. This connection is read-only: give the validated entry to the person to add.\n")
+                    + "6. After approval, with the person's agreement, deploy a test copy on spare ports and verify "
+                    "joining, config editing, backup and restore. Report the result.")
 
         @server.prompt(name="gamedock_overview", title="GameDock overview",
                        description="How GameDock works and how to use its tools safely")

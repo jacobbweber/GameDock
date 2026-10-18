@@ -31,6 +31,8 @@ class FakeBackend:
         self.offline = False                # True = the pretend registry cannot be reached
         self.exec_log: list[tuple[str, list[str]]] = []  # (container, command) of every exec_in
         self.delays: dict[str, float] = {}  # action name -> seconds to wait (demos: make create/stop look slow)
+        self.image_facts: dict[str, dict] = {}   # image name -> what `docker image inspect` would show (only for local images)
+        self.remote_facts: dict[str, dict] = {}  # image name -> {"digest", "platforms"} the pretend registry shows
         self._start_hooks: dict[str, Callable[[], None]] = {}  # container name -> called each time it starts
 
     def _pause(self, action: str) -> None:
@@ -165,6 +167,19 @@ class FakeBackend:
             if self.offline:
                 raise BackendError(f"Could not ask the registry about {image} (no internet). Are you online?")
             return self.registry.get(image)
+
+    def inspect_image(self, image: str) -> dict:
+        with self._lock:
+            self.calls.append(("inspect_image", image))   # note: never "pull" or "create"
+            local = image in self.local_images
+            remote = self.remote_facts.get(image)
+            out = {"image": image, "local": local, "local_details": self.image_facts.get(image) if local else None,
+                   "remote": None if self.offline else remote, "remote_error": ""}
+            if remote is None or self.offline:
+                out["remote"] = None
+                out["remote_error"] = ("The registry could not be asked (no internet)." if self.offline else
+                                       "The registry could not be asked (the image was not found there).")
+            return out
 
     def local_image_digests(self, ref: str) -> tuple[str, ...]:
         with self._lock:

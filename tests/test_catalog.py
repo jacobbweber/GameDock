@@ -20,7 +20,7 @@ def test_shipped_catalog_loads():
 def test_entry_roundtrip():
     from gamedock.catalog import entry_to_dict
     for e in load_catalog(Path(__file__).parent.parent / "catalog").values():
-        assert parse_definition(entry_to_dict(e)) == e
+        assert entry_to_dict(parse_definition(entry_to_dict(e))) == entry_to_dict(e)
 
 
 def test_missing_catalog_dir_is_empty(tmp_path):

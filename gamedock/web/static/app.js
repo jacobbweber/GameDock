@@ -335,14 +335,79 @@ async function act(id, action) {
 
 // -------------------------------------------------------------------- catalog
 function catalogCard(e) {
-  return el("article", { class: "card", id: `catalog-${e.id}` },
+  const review = e.origin === "mcp";
+  const blocked = review && !e.reviewed;
+  return el("article", { class: `card${blocked ? " needs-review" : ""}`, id: `catalog-${e.id}` },
     el("div", { class: "card-head" },
       el("h2", { textContent: e.name }),
-      el("button", { class: "primary", type: "button", textContent: "Deploy", "aria-label": `Deploy ${e.name}`, onclick: () => openDeploy(e) })),
+      el("div", { class: "card-buttons" },
+        review ? el("button", { type: "button", class: blocked ? "primary" : "secondary", textContent: blocked ? "Review" : "View",
+          "aria-label": `${blocked ? "Review" : "View"} ${e.name}`, onclick: () => openReview(e.id) }) : null,
+        el("button", { class: blocked ? "secondary" : "primary", type: "button", textContent: "Deploy", disabled: blocked,
+          title: blocked ? "Added by AI: review and approve it first" : "", "aria-label": `Deploy ${e.name}`, onclick: () => openDeploy(e) }))),
+    blocked ? el("div", { class: "badge review-badge", textContent: "Added by AI, needs your review" })
+      : (review ? el("div", { class: "badge review-ok", textContent: "Added by AI, reviewed by you" }) : null),
+    blocked ? el("p", { class: "review-reason", textContent: "Deploy is switched off until you open Review, read what this entry will do and press Approve." }) : null,
     el("p", { class: "desc", textContent: e.description }),
     el("div", { class: "meta" }, "Image: ", el("code", { textContent: e.image })),
     el("div", { class: "meta", textContent: `Default ports: ${portText(e.ports)}` }),
     e.notes ? el("p", { class: "note", textContent: e.notes }) : null);
+}
+
+// The Review dialog for an entry that an AI agent added: plain summary, anything unusual, the full text, Approve / Reject.
+async function openReview(id) {
+  let r;
+  try { r = await api(`/api/catalog/${encodeURIComponent(id)}/review`); }
+  catch (e) { showError(e.message); return; }
+  const err = el("div", { class: "form-error", hidden: true });
+  const fail = (e) => { err.textContent = e.message; err.hidden = false; };
+  const flags = r.flags.filter((f) => f.level === "warn");
+  const notes = r.flags.filter((f) => f.level === "info");
+  const actions = el("div", { class: "dialog-actions" });
+  const close = el("button", { type: "button", class: "secondary", textContent: "Close", onclick: closeDialog });
+  if (r.can_reject) {
+    const reject = el("button", { type: "button", class: "danger", textContent: "Reject" });
+    reject.addEventListener("click", () => {
+      actions.replaceChildren(
+        el("span", { class: "spacer confirm-text", textContent: "Delete this entry's file for good?" }),
+        el("button", { type: "button", class: "secondary", textContent: "No, keep it", onclick: () => openReview(id) }),
+        (() => {
+          const yes = el("button", { type: "button", class: "danger", textContent: "Yes, delete the entry" });
+          yes.addEventListener("click", async () => {
+            yes.disabled = true;
+            try { await api(`/api/catalog/${encodeURIComponent(id)}/reject?confirm=true`, "POST"); closeDialog(); await loadCatalog(); refreshStatus(); }
+            catch (e) { yes.disabled = false; fail(e); }
+          });
+          return yes;
+        })());
+    });
+    actions.append(reject);
+  }
+  actions.append(el("span", { class: "spacer" }), close);
+  if (r.can_approve) {
+    const approve = el("button", { type: "button", class: "primary", textContent: "Approve" });
+    approve.addEventListener("click", async () => {
+      approve.disabled = true;
+      try { await api(`/api/catalog/${encodeURIComponent(id)}/approve`, "POST", { yaml_sha256: r.yaml_sha256 }); closeDialog(); await loadCatalog(); refreshStatus(); }
+      catch (e) { approve.disabled = false; fail(e); }
+    });
+    actions.append(approve);
+  }
+  const state = r.reviewed ? `Approved${r.reviewed_at ? " on " + r.reviewed_at : ""}.`
+    : (r.changed_after_review ? "This file was changed after it was approved, so it needs approving again." : "Not approved yet: it cannot be deployed.");
+  openWide(el("form", { method: "dialog", class: "catalog-review" },
+    el("h3", { textContent: `Review: ${r.name}` }),
+    el("p", { class: "review-lead", textContent: `An AI agent added this game${r.added_at ? " on " + r.added_at : ""}. ${state} Read what it will do before you approve it.` }),
+    el("h4", { textContent: "What it will do" }),
+    el("ul", { class: "review-lines" }, ...r.summary.lines.map((l) => el("li", { textContent: l }))),
+    flags.length ? el("h4", { textContent: "Look at these" }) : null,
+    flags.length ? el("ul", { class: "review-flags" }, ...flags.map((f) => el("li", { class: "warn", textContent: f.text }))) : null,
+    notes.length ? el("details", {}, el("summary", { textContent: `${notes.length} smaller note${notes.length > 1 ? "s" : ""}` }),
+      el("ul", { class: "review-notes" }, ...notes.map((f) => el("li", { textContent: f.text })))) : null,
+    el("h4", { textContent: `The full file (${r.file})` }),
+    el("pre", { class: "logbox yaml-view", tabIndex: 0, textContent: r.yaml }),
+    el("p", { class: "hint", textContent: `Fingerprint (SHA-256): ${r.yaml_sha256}. Approving records exactly this text; if the file changes later it needs approving again.` }),
+    err, actions));
 }
 
 function renderCatalog() {
@@ -1367,6 +1432,9 @@ async function refreshMcp() {
 async function refreshStatus() {
   try { appStatus = await api("/api/status"); } catch (_) { /* the connection banner covers this */ }
   renderBanners();
+  // An AI agent may have added (or you approved) a game since the catalog was loaded: reload it when the counts differ.
+  const waiting = appStatus && appStatus.catalog_review_pending ? appStatus.catalog_review_pending.length : 0;
+  if (appStatus && waiting !== catalog.filter((c) => !c.reviewed).length) loadCatalog();
 }
 
 function renderBanners() {
@@ -1377,6 +1445,11 @@ function renderBanners() {
   if (appStatus && !connLost) {
     if (!appStatus.docker.ok && !appStatus.docker.fake) {
       notes.push(banner("error", "Docker is not available, so servers cannot be started or changed.", appStatus.docker.message, "#/health", "See how to fix this"));
+    }
+    const waiting = appStatus.catalog_review_pending || [];
+    if (waiting.length) {
+      notes.push(banner("info", `${waiting.length} game${waiting.length > 1 ? "s were" : " was"} added by an AI agent and ${waiting.length > 1 ? "wait" : "waits"} for your review:`,
+        waiting.map((w) => w.name).join(", ") + ".", "#/catalog", "Open the catalog"));
     }
     if (appStatus.catalog_problems.length) {
       const n = appStatus.catalog_problems.length;

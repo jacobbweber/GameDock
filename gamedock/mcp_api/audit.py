@@ -15,7 +15,7 @@ from typing import Any, Callable, Iterable
 
 MASK = "***"
 SECRET_NAME_RE = re.compile(r"pass|secret|token|key|pwd|auth|credential|private", re.I)
-BULKY = {"content"}  # file contents are never logged, only their size
+BULKY = {"content", "yaml_text"}  # file contents are never logged, only their size
 MAX_FILE_BYTES = 5 * 1024 * 1024
 MAX_STR = 300
 

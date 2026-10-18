@@ -1,0 +1,65 @@
+# TEMPLATE for a new GameDock catalog entry. Files whose name starts with an underscore are ignored by GameDock, so
+# this file never shows up as a game. To add a game: copy it to <id>.yaml (or send the text to the MCP tool
+# add_catalog_entry), then replace every value marked REPLACE. The full procedure and the meaning of every key are in
+# docs/ADDING_A_GAME.md.
+#
+# GOLDEN RULES
+#   * Never invent an image name, a port or a Steam app id. Take them from the image's own documentation.
+#   * Never write a password in this file. Make it a field with secret: true.
+#   * Say in "notes" what you have NOT verified yet.
+
+id: replace-me                 # REPLACE: lowercase letters, digits, - and _ ; also the file name (replace-me.yaml)
+name: REPLACE Game Dedicated Server
+image: example/replace-me-game-server:1.0   # REPLACE: a maintained image; prefer a pinned tag over "latest"
+description: One line for the card.         # REPLACE
+notes: >-
+  REPLACE: where the image information came from (link) and what has NOT been verified yet. The first start may
+  download many GB; say how long it takes and what the tile will show.
+
+# ---- ports: every port the image's documentation lists, with the right protocol (UDP and TCP are different ports)
+ports:
+  - { protocol: udp, host: 27015, container: 27015 }     # REPLACE. Host ports must be 1024 or higher for AI-added entries.
+  # - { protocol: tcp, host: 27016, container: 27016 }   # e.g. a query or remote-control port
+
+# ---- volumes: folders that must survive. A relative host folder is kept under <data folder>/<server id>/
+volumes:
+  - { host: ./saves, container: /saves }                 # REPLACE: the folder where the game writes saves
+  # - { host: ./game, container: /opt/game }             # the install folder, if the game downloads many GB (avoids re-downloads)
+
+# ---- env: fixed values that are always set (not shown in the form). Quote every value. NEVER passwords.
+# env:
+#   PUID: "1000"                 # if the image runs as a chosen user id, match the user GameDock runs as
+#   PGID: "1000"
+
+# ---- fields: what the person deploying fills in. Each becomes an environment variable of the same name.
+fields:
+  - { name: SERVER_NAME, label: Server name, default: "My Game Server", required: true }
+  - name: SERVER_PASSWORD
+    label: Server password
+    secret: true                 # a password box, never shown again, never logged
+    description: Leave empty for no password.   # say what an empty value does; check that the image really means that
+
+# ---- config_files: settings files people may edit with the Config button (path is relative to the server's data folder)
+# config_files:
+#   - path: saves/settings.ini   # starts with the volume's host folder
+#     label: Game settings
+#     format: ini                # ini | json | yaml | text
+#     sensitive_keys: [AdminPassword]
+#     hot_edit: false            # false = stop the server before saving
+#     note: "Say here if the image rewrites this file on every start."
+
+# ---- readiness: log lines that tell "container is up" from "players can join" (read them with the Logs button)
+# ready_log_pattern: "Server is ready"                     # a regular expression
+# progress_log_pattern: "progress: *([0-9]+(?:[.][0-9]+)?)"   # exactly ONE group: the percentage
+
+# ---- Steam games (SteamCMD): version tracking and updates
+# steam_app_id: 123456                  # the DEDICATED SERVER's app id (not the game you play)
+# game_update_method: restart           # restart = the image updates the game when the container starts
+# version_log_pattern: "Game version is (v?[0-9.]+)"   # a log line showing the game's own version (one group)
+# installed_build_file: game/version.txt   # only if the image keeps no appmanifest_<id>.acf file
+# stop_timeout: 90                      # seconds the game gets to save when stopped (default 60)
+# update_note: "How this image updates the game, in plain words."
+
+# ---- backups
+# save_command: [rcon-cli, save]        # run inside the container before a backup of a running server
+# backup_stop_first: false              # true = stop the game briefly for every backup

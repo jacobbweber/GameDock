@@ -46,6 +46,10 @@ class DeployIn(BaseModel):
     start: bool = False
 
 
+class ApproveIn(BaseModel):
+    yaml_sha256: str   # the fingerprint of the text the person was shown (the review dialog sends it back)
+
+
 class BackupIn(BaseModel):
     live: bool = False  # back up a running server without stopping it (may be inconsistent)
 
@@ -227,6 +231,7 @@ def create_app(service: GameDockService, sampler=None, metrics_enabled: bool = F
         fake = settings is not None and settings.backend == "fake"
         service.list_catalog()  # refreshes service.catalog_problems
         return {"version": __version__, "update_available": service.updater.status()["update_available"],
+                "catalog_review_pending": [{"id": e.id, "name": e.name} for e in service.list_catalog() if not e.reviewed],
                 "docker": {"ok": d.reachable, "kind": d.kind, "message": d.message,
                                                    "version": d.server_version, "fake": fake},
                 "catalog_problems": [{"file": f, "problem": p} for f, p in service.catalog_problems]}
@@ -247,6 +252,19 @@ def create_app(service: GameDockService, sampler=None, metrics_enabled: bool = F
     @app.get("/api/catalog/{game_id}")
     def get_catalog_entry(game_id: str):
         return catalog_to_dict(service.get_catalog_entry(game_id))
+
+    # Reviewing entries that an AI agent added through MCP. These actions exist only here (never as MCP tools).
+    @app.get("/api/catalog/{game_id}/review")
+    def catalog_review(game_id: str):
+        return service.catalog_review(game_id)
+
+    @app.post("/api/catalog/{game_id}/approve")
+    def catalog_approve(game_id: str, body: ApproveIn):
+        return service.approve_catalog_entry(game_id, body.yaml_sha256)
+
+    @app.post("/api/catalog/{game_id}/reject")
+    def catalog_reject(game_id: str, confirm: bool = False):
+        return service.reject_catalog_entry(game_id, confirm)
 
     @app.post("/api/servers", status_code=201)
     def deploy_server(body: DeployIn):

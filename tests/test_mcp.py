@@ -14,10 +14,11 @@ from tests.mcp_helpers import call, make_app, run
 
 READ = {"list_catalog", "get_catalog_entry", "list_servers", "get_server_status", "get_server_stats",
         "get_host_stats", "get_stats_history", "list_backups", "list_config_files", "read_config_file", "get_server_logs",
-        "get_gamedock_version", "list_schedules", "check_game_update"}
+        "get_gamedock_version", "list_schedules", "check_game_update", "get_add_game_guide", "validate_catalog_entry",
+        "inspect_image"}
 STANDARD = {"deploy_server", "start_server", "stop_server", "restart_server", "update_server_settings",
             "update_server_image", "create_backup", "write_config_file", "set_backup_schedule",
-            "set_maintenance_schedule", "update_game"}
+            "set_maintenance_schedule", "update_game", "add_catalog_entry", "update_catalog_entry"}
 DESTRUCTIVE = {"delete_server", "restore_backup", "delete_backup", "wipe_server_data"}
 SECRET = "sup3r-s3cret-pw"
 RPC = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
@@ -444,11 +445,11 @@ def test_end_to_end_with_fake_backend(service, tmp_path):
     async def go(c):
         # guide resource + prompts
         res = await c.list_resources()
-        assert [str(r.uri) for r in res.resources] == ["gamedock://guide"]
+        assert sorted(str(r.uri) for r in res.resources) == ["gamedock://add-a-game", "gamedock://guide"]
         guide = (await c.read_resource("gamedock://guide")).contents[0].text
         assert "two-step" in guide and "delete_server" in guide and "Current mode: full" in guide
         pr = {p.name for p in (await c.list_prompts()).prompts}
-        assert pr == {"gamedock_overview", "deploy_game_server"}
+        assert pr == {"gamedock_overview", "deploy_game_server", "add_a_game"}
         p = await c.get_prompt("deploy_game_server", {"game_id": "sample"})
         assert "get_catalog_entry" in p.messages[0].content.text
 

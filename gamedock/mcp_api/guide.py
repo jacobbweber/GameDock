@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 GUIDE_URI = "gamedock://guide"
+ADD_GAME_URI = "gamedock://add-a-game"
 
 MODE_TEXT = {
     "read_only": "Read-only: you can look at things (catalog, servers, stats, backups, schedules, config files, "
                  "GameDock's version) but not change them.",
     "standard": "Standard: you can deploy, start, stop, restart, change settings, update images, make backups, "
-                "change backup and maintenance schedules and edit config files. Destructive tools (delete, restore, "
-                "wipe, delete backup) are NOT available.",
+                "change backup and maintenance schedules, edit config files and add games to the catalog (which a person "
+                "must approve). Destructive tools (delete, restore, wipe, delete backup) are NOT available.",
     "full": "Full: everything in Standard, plus the destructive tools, each behind a two-step confirmation.",
 }
 
@@ -47,6 +48,14 @@ and GameDock works for any game: a game is just an entry in the catalog.
   of day are in the machine's timezone, shown by `list_schedules`. A run missed while GameDock was off runs once at the
   next start (a missed maintenance is skipped if it is more than 6 hours late). "Only when nobody is playing" does not
   exist: GameDock cannot see player counts.
+- **Adding games (the catalog)**: you can help add a new game. Read the resource `gamedock://add-a-game` (or call
+  `get_add_game_guide`: the 10-step procedure, the field reference and a template). `inspect_image` looks at a Docker
+  image without downloading or running it, `validate_catalog_entry` checks an entry without saving anything, and (Standard
+  and Full modes) `add_catalog_entry` saves a new one and `update_catalog_entry` changes one you added earlier. **The review
+  rule:** every entry you add is marked "Added by AI, needs your review" and cannot be deployed, by you or in the web page,
+  until a person approves it there (there is no tool for that). Entries that came from the repository are never changed.
+  Never invent an image, a port or a Steam app id: research them and write in the entry's `notes` what you could not
+  confirm. Never put a password in an entry.
 - **Config files**: only files listed by `list_config_files` can be read or written. Sensitive values appear
   as placeholders; writing the placeholder back keeps the existing value.
 
@@ -62,6 +71,9 @@ Tools you have: {", ".join(tool_names)}.
 - Is the game out of date? `check_game_update`, then (with the human's agreement, it disconnects players) `update_game`.
 - Regular safety: `set_backup_schedule` (for example daily at 03:00, keep 7), and for a weekly restart with updates
   `set_maintenance_schedule` (for example weekly on sun at 04:00). Check results with `list_schedules`.
+- Add a game: `get_add_game_guide` -> research the image -> `inspect_image` -> write the entry -> `validate_catalog_entry`
+  until valid -> `add_catalog_entry` -> tell the person to approve it in the web page -> (after approval, with their
+  agreement) `deploy_server` a test copy on spare ports -> verify -> report.
 - Port conflicts and other problems come back as plain error messages: read them and adjust.
 
 ## Destructive tools: the two-step confirmation (full mode only)

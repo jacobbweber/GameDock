@@ -1,9 +1,12 @@
 """Load catalog entries (game templates) from YAML/JSON files in the catalog directory."""
 from __future__ import annotations
 
+import hashlib
 import re
 import shlex
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
+from typing import Mapping
 
 import yaml
 
@@ -145,13 +148,128 @@ def _parse_steam(data: dict, source: str) -> tuple[str, str, str, str]:
     return app_id, branch, mdir, method
 
 
-def parse_definition(data: object, source: str = "<definition>") -> CatalogEntry:
+# ------------------------------------------------------------------ the schema (single source of truth for the keys)
+# Every key a catalog file may contain. docs/ADDING_A_GAME.md and the `get_add_game_guide` tool are generated from
+# gamedock/authoring.py, and a test checks that its field reference names exactly these keys.
+ENTRY_KEYS = ("id", "name", "image", "description", "notes", "ports", "volumes", "env", "fields", "config_files",
+              "update_method", "update_note", "backup_stop_first", "save_command", "ready_log_pattern",
+              "progress_log_pattern", "steam_app_id", "steam_branch", "steam_manifest_dir", "version_log_pattern",
+              "game_update_method", "installed_build_file", "stop_timeout")
+PORT_KEYS = ("protocol", "host", "container")
+VOLUME_KEYS = ("host", "container")
+FIELD_KEYS = ("name", "label", "default", "secret", "required", "description")
+CONFIG_FILE_KEYS = ("path", "label", "format", "sensitive_keys", "hot_edit", "note")
+
+# Things a catalog file must never ask for. GameDock always creates plain, unprivileged containers on Docker's
+# default network, so these keys do nothing; they are rejected (for every entry, not only AI-added ones) so nobody
+# believes they work and so a copied docker-compose file cannot quietly ask for more power than it gets.
+FORBIDDEN_KEYS = {
+    "privileged": "privileged mode",
+    "network_mode": "a special network mode (such as host networking)",
+    "network": "a special network mode",
+    "networks": "a special network mode",
+    "devices": "device mappings",
+    "device": "device mappings",
+    "cap_add": "extra capabilities",
+    "cap_drop": "capability changes",
+    "capabilities": "extra capabilities",
+    "security_opt": "security option changes",
+    "pid": "sharing the host's process space",
+    "ipc": "sharing the host's memory space",
+    "userns_mode": "user namespace changes",
+    "sysctls": "kernel setting changes",
+}
+MAX_DESCRIPTION = 2000
+LIST_KEYS = ("ports", "volumes", "fields", "config_files")
+DOCKER_SOCKET_RE = re.compile(r"docker\.sock", re.I)
+
+
+def unknown_keys(data: Mapping) -> list[str]:
+    return sorted(str(k) for k in data if k not in ENTRY_KEYS)
+
+
+def _bad_sub_keys(data: Mapping) -> list[str]:
+    """Unknown keys inside ports / volumes / fields / config_files items (plain words, for strict checking)."""
+    out = []
+    for key, allowed in (("ports", PORT_KEYS), ("volumes", VOLUME_KEYS), ("fields", FIELD_KEYS),
+                         ("config_files", CONFIG_FILE_KEYS)):
+        items = data.get(key)
+        if not isinstance(items, list):
+            continue
+        for i, item in enumerate(items, 1):
+            if isinstance(item, dict):
+                extra = sorted(str(k) for k in item if k not in allowed)
+                if extra:
+                    out.append(f"'{key}' item {i} has keys GameDock does not know: {', '.join(extra)} "
+                               f"(allowed: {', '.join(allowed)})")
+    return out
+
+
+def _absolute_like(path: str) -> bool:
+    p = path.strip()
+    return p.startswith(("/", "~", "\\")) or bool(re.match(r"^[A-Za-z]:", p)) or "$" in p
+
+
+def safety_problems(data: Mapping, origin: str = "repo") -> list[str]:
+    """Every safety rule problem in a catalog definition, in plain words (empty list = fine).
+
+    For every entry: no privileged mode, host networking, device mappings, extra capabilities or similar keys; no
+    Docker socket mount. For entries added by an AI agent (origin 'mcp') also: only the keys GameDock knows, host
+    folders must be relative (kept under the server's own data folder) and host ports must be 1024 or higher."""
+    out: list[str] = []
+    for k in data:
+        if str(k) in FORBIDDEN_KEYS:
+            out.append(f"'{k}' asks for {FORBIDDEN_KEYS[str(k)]}. GameDock always creates plain, unprivileged "
+                       "containers and does not support this; remove the key.")
+    strict = origin == "mcp"
+    volumes = data.get("volumes") if isinstance(data.get("volumes"), list) else []
+    for v in volumes:
+        if not isinstance(v, dict):
+            continue
+        host, cont = str(v.get("host", "")), str(v.get("container", ""))
+        if DOCKER_SOCKET_RE.search(host) or DOCKER_SOCKET_RE.search(cont):
+            out.append("A volume mounts the Docker socket (docker.sock). That would give the game full control of the "
+                       "machine, so it is never allowed.")
+        elif strict and _absolute_like(host):
+            out.append(f"Volume host folder {host!r} is not relative. Entries added by an AI agent may only use "
+                       "relative folders such as ./saves, which are kept inside the server's own data folder.")
+    if strict:
+        extra = unknown_keys(data)
+        if extra:
+            out.append("The entry has keys GameDock does not know: " + ", ".join(extra)
+                       + ". Only the documented keys are accepted (see get_add_game_guide).")
+        out.extend(_bad_sub_keys(data))
+        ports = data.get("ports") if isinstance(data.get("ports"), list) else []
+        for p in ports:
+            try:
+                host = int(p["host"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if 0 < host < 1024:
+                out.append(f"Host port {host} is below 1024. Entries added by an AI agent must use host ports "
+                           "1024 or higher.")
+    return out
+
+
+def parse_definition(data: object, source: str = "<definition>", origin: str = "repo") -> CatalogEntry:
     if not isinstance(data, dict):
         raise CatalogError(f"{source}: expected a mapping at top level")
+    problems = safety_problems(data, origin)
+    if problems:
+        raise CatalogError(f"{source}: " + " ".join(problems))
+    for key in LIST_KEYS:
+        if data.get(key) not in (None, "") and not isinstance(data[key], list):
+            raise CatalogError(f"{source}: '{key}' must be a list")
+    for key in ("name", "image", "description", "notes", "update_note"):
+        if data.get(key) is not None and not isinstance(data[key], (str, int, float)):
+            raise CatalogError(f"{source}: '{key}' must be text")
+    for key in ("name", "description", "notes", "update_note"):
+        if len(str(data.get(key) or "")) > MAX_DESCRIPTION:
+            raise CatalogError(f"{source}: '{key}' is longer than {MAX_DESCRIPTION} characters")
     for key in ("id", "name", "image"):
         if not data.get(key) or not isinstance(data[key], str):
             raise CatalogError(f"{source}: missing or invalid '{key}'")
-    if not IMAGE_RE.match(data["image"]):
+    if not IMAGE_RE.match(data["image"]) or ".." in data["image"] or "//" in data["image"]:
         raise CatalogError(f"{source}: image {data['image']!r} is not a valid image name "
                            "(letters, digits and . _ - / : @ only, no spaces)")
     gid = data["id"]
@@ -245,6 +363,7 @@ def parse_definition(data: object, source: str = "<definition>") -> CatalogEntry
         game_update_method=game_update_method,
         installed_build_file=installed_file,
         stop_timeout=stop_timeout,
+        origin=origin,
     )
 
 
@@ -285,26 +404,41 @@ def entry_to_dict(e: CatalogEntry) -> dict:
     }
 
 
-def load_catalog(directory: Path, errors: list[tuple[str, str]] | None = None) -> dict[str, CatalogEntry]:
-    """Return {id: entry} for every *.yaml/*.yml/*.json file in directory.
+def load_catalog(directory: Path, errors: list[tuple[str, str]] | None = None,
+                 added_by_ai: Mapping[str, Mapping] | None = None) -> dict[str, CatalogEntry]:
+    """Return {id: entry} for every *.yaml/*.yml/*.json file in directory. Files whose name starts with '_' (such as
+    the _template.yaml starting point) are ignored.
 
     By default the first bad file raises CatalogError. If `errors` is given, bad files are skipped and
     (file name, problem) is appended to it instead, so one typo cannot hide every game.
+
+    `added_by_ai` is the review record (see gamedock/authoring.py): {entry id: record}. An entry whose id is in it was
+    added by an AI agent, so it is held to the stricter rules (origin 'mcp') and counts as `reviewed` only when a
+    person approved exactly the bytes that are in the file now.
     """
     defs: dict[str, CatalogEntry] = {}
     directory = Path(directory)
     if not directory.is_dir():
         return defs
-    files = sorted([*directory.glob("*.yaml"), *directory.glob("*.yml"), *directory.glob("*.json")])
+    records = added_by_ai or {}
+    files = sorted(f for f in [*directory.glob("*.yaml"), *directory.glob("*.yml"), *directory.glob("*.json")]
+                   if not f.name.startswith("_") and not f.name.startswith("."))
     for f in files:
         try:
             try:
-                data = yaml.safe_load(f.read_text(encoding="utf-8"))  # JSON is valid YAML
+                raw = f.read_bytes()
+                data = yaml.safe_load(raw.decode("utf-8"))  # JSON is valid YAML
             except yaml.YAMLError as e:
                 raise CatalogError(f"{f.name}: invalid YAML/JSON: {e}") from e
             except (UnicodeDecodeError, OSError) as e:
                 raise CatalogError(f"{f.name}: cannot read the file as UTF-8 text: {e}") from e
-            d = parse_definition(data, f.name)
+            rec = records.get(str(data.get("id"))) if isinstance(data, dict) else None
+            d = parse_definition(data, f.name, origin="mcp" if rec else "repo")
+            digest = hashlib.sha256(raw).hexdigest()
+            reviewed = True
+            if rec:
+                reviewed = bool(rec.get("reviewed")) and rec.get("reviewed_sha256") == digest
+            d = replace(d, reviewed=reviewed, source_file=f.name, file_sha256=digest)
             if d.id in defs:
                 raise CatalogError(f"{f.name}: duplicate game id '{d.id}'")
         except CatalogError as e:

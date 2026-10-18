@@ -27,6 +27,10 @@ def catalog_to_dict(e: CatalogEntry) -> dict:
         "config_files": [{"path": c.path, "label": c.label, "format": c.format, "hot_edit": c.hot_edit,
                           "note": c.note} for c in e.config_files],
         "fields": [asdict(f) for f in e.fields],  # defaults of secret fields are not secret values
+        # Where the entry came from. "mcp" = added by an AI agent; those cannot be deployed until a person approves.
+        "origin": e.origin, "reviewed": e.reviewed, "deployable": e.reviewed,
+        "review_note": "" if e.reviewed else "Added by AI, needs your review. It cannot be deployed until you approve it.",
+        "source_file": e.source_file,
     }
 
 

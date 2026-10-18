@@ -16,7 +16,8 @@ flowchart LR
         Web --> Service
         MCP --> Service
         Doctor --> Service
-        Service --> Catalog["catalog.py<br/>YAML templates"]
+        Service --> Catalog["catalog.py<br/>YAML templates, safety rules"]
+        Service --> Authoring["authoring.py<br/>add-a-game checks, review record"]
         Service --> Store["store.py<br/>instances.json (atomic, 0600, .bak)"]
         Service --> Backups["backups.py<br/>tar.gz archives"]
         Service --> Config["configfiles.py<br/>safe config editing"]
@@ -71,6 +72,14 @@ flowchart LR
 - **Game versions (0.4.0).** `steam.py` is I/O-light and pure where it can be: `parse_manifest` (Valve KeyValues text), `find_manifest` (bounded search of a server's volumes, or the catalog's `steam_manifest_dir`), `SteamInfo` (newest public build per `(app id, branch)` from `GAMEDOCK_STEAM_INFO_URL`, cached an hour in memory and in `<data>/steam-latest.json`, failures cached ten minutes, never raises) and `compute_status`. `game_updates.py` is a mixin of the service: `_game_report` builds the per-server report from the manifest (read each time, it is small), the cached newest build and the game's version text (`version_log_pattern` applied to the log, stored with the build id it was seen on in `<data>/game-versions.json`). The dashboard path never touches the network; the scheduler tick refreshes one stale game per tick (`check_game_updates_due`) and the **Check now** button forces a lookup. `update_game` runs under the server's `_operation` lock: stop, safety backup, start, then `_wait_for_game_build` polls the manifest until the build changes (changed), the game reports ready on the old build (unchanged), the container stops (stopped) or the wait runs out (timeout); the result states which. Maintenance with *apply updates* uses the same pieces and records the before and after build ids in the run message. The fake backend can pretend a self-updating game (`simulate_steam_game`) so all of this is tested and screenshotted without Docker.
 - **`updates.py`** (`UpdateChecker`) reads local git facts, asks `api.github.com` (only that host, short timeouts, an `http_get` function that tests replace) and applies updates: `git pull --ff-only` after refusing on a dirty tree, detached HEAD, non-fast-forward, changed dependencies or busy work; the service `freeze()`s new actions first and `unfreeze()`s after a failure. The restart is `systemctl [--user] restart --no-block`, else exit code 75, else `os.execv`.
 
+## Adding games, and the review step
+
+- **One schema.** `catalog.py` holds the list of keys an entry may have (`ENTRY_KEYS` and the keys of ports, volumes, fields and config files) and `safety_problems()`. `authoring.py` holds `FIELD_REFERENCE`, one row per key. A test checks that the two name exactly the same keys and that the table inside `docs/ADDING_A_GAME.md` equals the generated one (`scripts/update_docs.py` rewrites it), so the documentation cannot drift from the code.
+- **Two origins.** An entry has `origin` `repo` (a file a person put in `catalog/`, trusted) or `mcp` (written by `add_catalog_entry`). The loader learns which from `<data>/catalog-review.json` (`added_by_ai` argument): ids listed there are parsed with the strict rules (known keys only, relative host folders, host ports 1024 or higher). The dangerous things (privileged, host network, devices, capabilities, Docker socket) are refused for both origins. Files starting with `_` or `.` are not loaded.
+- **Review record.** `catalog-review.json` maps entry id to `{added_by, added_at, reviewed, yaml_sha256, file, reviewed_sha256, reviewed_at}`. An entry is `reviewed` only if the record says so **and** `reviewed_sha256` equals the SHA-256 of the file as loaded now, so any later edit by anyone makes it unreviewed again. Approve and reject are web routes only. `add_catalog_entry` writes the record first and the file second (a file without a record would look like a trusted repository entry), the file atomically (temporary file, then a hard link so an existing file can never be replaced), only at `<catalog dir>/<id>.yaml` after the id matched the id pattern. `update_catalog_entry` and reject refuse files that git tracks.
+- **The gate.** `GameDockService._deploy` calls `require_reviewed`, so the web API, the dashboard, MCP `deploy_server` and anything else that deploys are all stopped at one place.
+- **`inspect_image`.** A backend method (`ContainerBackend.inspect_image`) that runs only `docker image inspect`, `docker buildx imagetools inspect` and `docker manifest inspect`; parsing is in `backends/image_inspect.py` (bounded lists, environment variable names only). It never pulls or runs; a test checks every command it issues.
+
 ## Where things are stored
 
 | What | Where |
@@ -79,7 +88,8 @@ flowchart LR
 | A server's game files | `<data>/<server id>/...` (bind-mounted into its container) |
 | Backups | `<data>/backups/<server id>/*.tar.gz`, deleted servers in `<data>/backups/_deleted/` |
 | Schedules, run states and run history | `<data>/schedules.json` (atomic, 0600) |
-| MCP audit log (also scheduled runs) | `<data>/mcp-audit.jsonl` |
+| MCP audit log (also scheduled runs, approvals in the web page) | `<data>/mcp-audit.jsonl` |
+| Which catalog entries an AI added, and whether you approved them | `<data>/catalog-review.json` (atomic, 0600; not in the repository) |
 | Newest Steam build per game (cache, 1 hour) | `<data>/steam-latest.json` |
 | The game's own version text, with the build it belongs to | `<data>/game-versions.json` |
 | Update check results (GameDock, images) | memory only |
@@ -95,6 +105,6 @@ flowchart LR
 
 ## Testing
 
-`scripts/make_screenshots.py` starts the real app on the fake backend and drives it with a headless browser (Playwright, not part of the normal test run); it doubles as a browser smoke test for the progress UI, log viewer and config form.
+`scripts/make_screenshots.py` (and `make_screenshots_authoring.py` for the review step) start the real app on the fake backend and drives it with a headless browser (Playwright, not part of the normal test run); it doubles as a browser smoke test for the progress UI, log viewer and config form.
 
 `tests/` runs without Docker. The engine is the in-memory fake; the Docker command is checked by recording the exact argument lists it would run, and by tiny fake `docker` shell scripts that simulate "daemon down" and "permission denied". The real engine is exercised for the first time in [NIMO_FIRST_TEST.md](NIMO_FIRST_TEST.md).

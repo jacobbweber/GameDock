@@ -10,6 +10,12 @@ A server that is still downloading its game files shows **Installing 52%** inste
 
 ![Installing](docs/gamedock-020-installing.png)
 
+**New in 0.5.0:** adding a game is now a written, repeatable procedure ([docs/ADDING_A_GAME.md](docs/ADDING_A_GAME.md)), and your AI agent can do much of the work through MCP: it reads the guide, inspects the Docker image (without downloading it), validates and adds a catalog entry. An entry an AI added is marked **Added by AI, needs your review** and cannot be deployed until you read it and press **Approve**.
+
+![A catalog entry added by an AI, waiting for review, with Deploy switched off](docs/gamedock-050-catalog-unreviewed.png)
+
+![The Review dialog](docs/gamedock-050-review-dialog.png)
+
 **New in 0.4.0:** each Steam-based server shows its own **game version** and whether a newer one is out, with an **Update game now** button (safe backup, restart, then a check that the game really changed). Scheduled maintenance applies game updates too.
 
 ![A Palworld tile showing a newer game version](docs/gamedock-040-tile-update.png)
@@ -31,9 +37,10 @@ A server that is still downloading its game files shows **Installing 52%** inste
 - **Game versions:** for SteamCMD games, the installed game version and Steam build, whether a newer public build exists, and **Update game now** (see [A game's own version](#a-games-own-version-steamcmd-games)).
 - **Schedules:** automatic backups (every few hours, daily, or on chosen weekdays, with how many to keep) and regular maintenance (back up, apply updates to the game and its image, restart) for each server.
 - A **Health** page and a `doctor` command that tell you in plain language what is wrong and how to fix it.
+- A step-by-step guide for adding new games ([docs/ADDING_A_GAME.md](docs/ADDING_A_GAME.md)), a template (`catalog/_template.yaml`), and MCP tools so an AI agent can research, validate and add an entry that you then review and approve.
 - An optional MCP endpoint for AI agents (read-only, standard or full mode, with two-step confirmation for anything destructive).
 
-**Version:** 0.4.0. See [CHANGELOG.md](CHANGELOG.md). How it is built: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+**Version:** 0.5.0. See [CHANGELOG.md](CHANGELOG.md). How it is built: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Quick start
 
@@ -272,6 +279,8 @@ A catalog entry can declare config files; each server then gets a **Config** but
 
 ## Adding a game to the catalog
 
+**The full, step-by-step procedure (for people and for AI agents) is [docs/ADDING_A_GAME.md](docs/ADDING_A_GAME.md):** the ten steps, a table of every catalog key, the traps learned from Palworld and Enshrouded, and a verification checklist. Start from `catalog/_template.yaml` (files starting with `_` are ignored by the catalog). To let an AI agent do it, give it [docs/PROMPT_ADD_A_GAME.md](docs/PROMPT_ADD_A_GAME.md) and see [Adding a game through MCP](#adding-a-game-through-mcp) below. The short version follows.
+
 Drop a `.yaml` file in `catalog/`. It shows up on the Catalog page after a reload, no restart needed. A file that cannot be read is skipped and named on the Health page and in the banner, so one typo never hides your other games.
 
 All options:
@@ -351,6 +360,8 @@ fields:                              # the form the user fills in; each becomes 
 4. Open the Catalog page (or run `python -m gamedock doctor`): a mistake in the file is reported in plain words.
 5. Deploy it with the fake engine first (`GAMEDOCK_BACKEND=fake`), then for real.
 
+Rules every entry must follow (checked when the file loads): no privileged mode, host networking, device mappings, extra capabilities or Docker socket mount, a normal image name, valid ports and patterns. Entries **added by an AI agent** are held to stricter rules (only documented keys, relative host folders, host ports 1024 and up, at most 20 KB) and need your approval; see below.
+
 Never put real passwords in catalog files (they are committed to git); users type them into the form. A server keeps a snapshot of its template from deploy time, so changes to a catalog entry (fixed `env`, `fields`, `volumes`, `ports`, `stop_timeout`) only affect servers deployed afterwards; only the read-only hints (update note, Steam and version settings, `installed_build_file`) are taken from the current entry for older servers. Every setting's value is passed to the container, an **empty value too** (as `NAME=`, "present but empty"); some images, such as Enshrouded's, treat that differently from a missing variable.
 
 **The bundled games (Enshrouded, Palworld, Valheim, Minecraft Java, Satisfactory) are examples.** Their images, ports and variables were written from general knowledge of popular community images and have not been run here. Check each against the image's own documentation before real use.
@@ -364,11 +375,17 @@ GameDock serves a [Model Context Protocol](https://modelcontextprotocol.io) endp
 | Mode | Tools served |
 |---|---|
 | `off` | none (`/mcp` answers 404 with an explanation) |
-| `read_only` | `list_catalog`, `get_catalog_entry`, `list_servers`, `get_server_status`, `get_server_stats`, `get_host_stats`, `get_stats_history`, `list_backups`, `list_config_files`, `read_config_file`, `get_server_logs`, `get_gamedock_version`, `list_schedules`, `check_game_update` (14 tools) |
-| `standard` (default) | read-only tools plus `deploy_server`, `start_server`, `stop_server`, `restart_server`, `update_server_settings`, `update_server_image`, `create_backup`, `write_config_file`, `set_backup_schedule`, `set_maintenance_schedule`, `update_game` (25 tools) |
-| `full` | standard plus the destructive tools `delete_server`, `restore_backup`, `delete_backup`, `wipe_server_data` (29 tools) |
+| `read_only` | `list_catalog`, `get_catalog_entry`, `list_servers`, `get_server_status`, `get_server_stats`, `get_host_stats`, `get_stats_history`, `list_backups`, `list_config_files`, `read_config_file`, `get_server_logs`, `get_gamedock_version`, `list_schedules`, `check_game_update`, and for adding games `get_add_game_guide`, `validate_catalog_entry`, `inspect_image` (17 tools) |
+| `standard` (default) | read-only tools plus `deploy_server`, `start_server`, `stop_server`, `restart_server`, `update_server_settings`, `update_server_image`, `create_backup`, `write_config_file`, `set_backup_schedule`, `set_maintenance_schedule`, `update_game`, `add_catalog_entry`, `update_catalog_entry` (30 tools) |
+| `full` | standard plus the destructive tools `delete_server`, `restore_backup`, `delete_backup`, `wipe_server_data` (34 tools) |
 
 Tools outside the mode are not listed at all and cannot be called. If `GAMEDOCK_HOST` is not localhost and `GAMEDOCK_MCP_TOKEN` is empty, the mode is forced to `off` (a warning is logged and the web page explains why).
+
+### Adding a game through MCP
+
+An agent can help add a new game. The tools are `get_add_game_guide` (the procedure, a field reference and a template), `inspect_image` (read-only: it never downloads or runs an image; for an image already on the machine it shows the declared ports, volumes, user, environment variable names and health check, otherwise it says so and how to pull it, and it shows what the registry says), `validate_catalog_entry` (a dry run with exactly the checks of adding; saves nothing) and, in `standard` and `full` modes, `add_catalog_entry` and `update_catalog_entry`. The procedure is also the resource `gamedock://add-a-game` and the prompt `add_a_game`.
+
+**The review rule.** `add_catalog_entry` validates strictly, then writes `catalog/<id>.yaml` (the file name comes from the validated id; nothing outside the catalog folder is ever written; an id that exists is refused, so nothing is overwritten) and records it in `<data>/catalog-review.json` (not in the repository) as added by MCP, **not reviewed**, with the file's SHA-256. Until a person approves it, the Catalog page shows **Added by AI, needs your review**, the Deploy button is off, and both the web API and `deploy_server` refuse it. **Review** shows a plain summary (image, ports, folders it will mount, secret fields, anything unusual) and the whole file; **Approve** records the fingerprint of exactly what was shown (if the file is changed afterwards by anyone it is unreviewed again); **Reject** deletes the file after a confirmation. These buttons exist only in the web page; there is no MCP tool for approving. `update_catalog_entry` works only on entries the agent itself added, never on entries from the repository (git-tracked files), and sends the entry back to "needs review". Every authoring call is in the audit log (the YAML itself is not logged, only a size and fingerprint).
 
 ### Destructive tools need two steps
 
@@ -433,7 +450,7 @@ asyncio.run(main())
 
 ### Guide resource and prompts
 
-`gamedock://guide` (a read-only resource) explains how GameDock works, which tools the current mode has and the confirmation flow. The prompts `gamedock_overview` and `deploy_game_server` give the same guidance as ready-made messages.
+`gamedock://guide` (a read-only resource) explains how GameDock works, which tools the current mode has, the confirmation flow, and the add-a-game tools and review rule. `gamedock://add-a-game` is the written procedure for adding a game. The prompts `gamedock_overview`, `deploy_game_server` and `add_a_game` give the same guidance as ready-made messages.
 
 ## Security model
 
@@ -494,6 +511,9 @@ Start with `python -m gamedock doctor` (or the Health page). It names most of th
 | Method | Path | |
 |---|---|---|
 | GET | `/api/catalog`, `/api/catalog/{id}` | game templates |
+| GET | `/api/catalog/{id}/review` | an entry's full YAML, fingerprint, plain summary and flags (for the Review dialog) |
+| POST | `/api/catalog/{id}/approve` | approve an AI-added entry: `{yaml_sha256}` must be the fingerprint that was shown (web only, never MCP) |
+| POST | `/api/catalog/{id}/reject?confirm=true` | delete an AI-added entry's file and review record (web only, never MCP) |
 | GET | `/api/servers`, `/api/servers/{id}` | deployed servers with status |
 | POST | `/api/servers` | deploy: `{game_id, name, ports:[{protocol,container,host}], env:{}, start}` |
 | PATCH | `/api/servers/{id}` | edit `name`, `ports`, `env` (stopped servers only) |
@@ -529,7 +549,7 @@ Start with `python -m gamedock doctor` (or the Health page). It names most of th
 | GET | `/api/mcp/info`, `/api/mcp/audit?limit=50` | MCP status for the UI (never includes the token) and the audit log, newest first |
 | POST | `/mcp` | the MCP endpoint (see [AI agents](#ai-agents-mcp)) |
 | GET | `/api/health` | liveness |
-| GET | `/api/status` | small summary for the banner: is Docker reachable, which catalog files are broken |
+| GET | `/api/status` | small summary for the banner: is Docker reachable, which catalog files are broken, which AI-added games wait for review |
 | GET | `/api/doctor` | the full health check (same as `python -m gamedock doctor`) |
 
 Errors are `{"error": "..."}` with 400 (invalid or missing confirmation), 403 (file permission problem), 404 (unknown), 409 (conflict: port in use, server running, or another operation in progress), 413 (file too large), 422 (malformed request), 500 (operation failed, e.g. disk full) or 502 (Docker problem). Interactive docs at `/api/docs`.
@@ -539,7 +559,9 @@ Errors are `{"error": "..."}` with 400 (invalid or missing confirmation), 403 (f
 ```
 gamedock/
   models.py        plain data types (catalog entry vs server instance)
-  catalog.py       YAML template loader + validation
+  catalog.py       YAML template loader + validation (schema keys, safety rules; skips files starting with _)
+  authoring.py     adding games: field reference, strict text checking, review record, approve / reject
+  authoring_service.py  the service methods behind the add-a-game tools and the Review dialog
   store.py         persistent JSON store of deployed servers (atomic, fsync, .bak)
   backups.py       backup archives: create, list, restore, prune
   configfiles.py   safe config file read/write, masking, .bak copies
@@ -557,14 +579,14 @@ gamedock/
   metrics.py       Prometheus text output
   service.py       all management logic (web and MCP both call this)
   serialize.py     result to JSON-friendly dicts, shared by web and MCP
-  mcp_api/         MCP endpoint: tools.py, guard.py, confirm.py, audit.py, guide.py
+  mcp_api/         MCP endpoint: tools.py, guard.py, confirm.py, audit.py, guide.py (+ the add-a-game resource and prompt)
   backends/        container engine interface: docker_cli.py (real), docker_errors.py, fake.py (in-memory), docker_stats.py
   web/             FastAPI app + static dashboard (vanilla JS, no build step)
 catalog/           game templates (examples plus the smoke test)
 deploy/            example systemd units and settings file (not installed anywhere)
 docs/              architecture, deployment, first-test checklist, screenshots
 tests/             pytest suite (no Docker needed)
-scripts/           make_screenshots.py, make_screenshots_game.py: browser smoke tests + screenshots on the fake backend (need Playwright)
+scripts/           update_docs.py (regenerates the field table in docs/ADDING_A_GAME.md), make_screenshots*.py: browser smoke tests + screenshots on the fake backend (need Playwright)
 ```
 
 ## Tests
