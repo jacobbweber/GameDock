@@ -1,0 +1,17 @@
+# EXAMPLE VALUES: verify the image, ports and variables before real use.
+id: valheim
+name: Valheim Dedicated Server
+image: lloesche/valheim-server:latest
+description: Valheim dedicated server using a popular community image.
+notes: Example values. Check the image documentation before real use. The server password must be at least 5 characters.
+ports:
+  - { protocol: udp, host: 2456, container: 2456 }
+  - { protocol: udp, host: 2457, container: 2457 }
+volumes:
+  - { host: ./config, container: /config }
+  - { host: ./server, container: /opt/valheim }
+fields:
+  - { name: SERVER_NAME, label: Server name, default: "My Valheim Server", required: true }
+  - { name: WORLD_NAME, label: World name, default: "Dedicated", required: true }
+  - { name: SERVER_PASS, label: Server password, secret: true, required: true,
+      description: At least 5 characters. }

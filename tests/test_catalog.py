@@ -8,8 +8,19 @@ from gamedock.errors import CatalogError
 
 def test_shipped_catalog_loads():
     defs = load_catalog(Path(__file__).parent.parent / "catalog")
-    assert "enshrouded" in defs
+    assert {"enshrouded", "palworld", "valheim", "minecraft-java", "satisfactory"} <= set(defs)
     assert defs["enshrouded"].ports[0].protocol == "udp"
+    for e in defs.values():
+        assert e.notes, f"{e.id} should carry an 'verify before use' note"
+        for f in e.fields:
+            if "PASS" in f.name:
+                assert f.secret, f"{e.id}.{f.name} should be secret"
+
+
+def test_entry_roundtrip():
+    from gamedock.catalog import entry_to_dict
+    for e in load_catalog(Path(__file__).parent.parent / "catalog").values():
+        assert parse_definition(entry_to_dict(e)) == e
 
 
 def test_missing_catalog_dir_is_empty(tmp_path):
@@ -24,6 +35,10 @@ def test_missing_catalog_dir_is_empty(tmp_path):
         {"id": "a", "name": "x", "image": "y", "ports": [{"protocol": "icmp", "host": 1, "container": 1}]},
         {"id": "a", "name": "x", "image": "y", "ports": [{"protocol": "tcp", "host": 70000, "container": 1}]},
         {"id": "a", "name": "x", "image": "y", "volumes": [{"host": "../etc", "container": "/x"}]},
+        {"id": "a", "name": "x", "image": "y", "fields": [{"name": "bad name"}]},
+        {"id": "a", "name": "x", "image": "y", "env": {"A": "1"}, "fields": [{"name": "A"}]},
+        {"id": "a", "name": "x", "image": "y",
+         "ports": [{"protocol": "udp", "host": 1, "container": 5}, {"protocol": "udp", "host": 2, "container": 5}]},
         "not a mapping",
     ],
 )

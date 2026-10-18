@@ -15,7 +15,12 @@ SAMPLE = textwrap.dedent(
     volumes:
       - { host: ./saves, container: /saves }
     env:
-      FOO: bar
+      FIXED: value
+    fields:
+      - { name: SERVER_NAME, label: Server name, default: "Sample", required: true }
+      - { name: MAX, default: "8" }
+      - { name: SERVER_PASSWORD, label: Password, secret: true }
+      - { name: ADMIN_PASSWORD, label: Admin password, secret: true, required: true }
     """
 )
 
@@ -33,6 +38,16 @@ def catalog_dir(tmp_path):
     return d
 
 
+ADMIN = {"ADMIN_PASSWORD": "adminpw"}
+
+
 @pytest.fixture
 def service(backend, catalog_dir, tmp_path):
     return GameDockService(backend, catalog_dir, tmp_path / "data")
+
+
+@pytest.fixture
+def deployed(service):
+    """A deployed (stopped) server with id 'one'."""
+    service.deploy("sample", "One", env=ADMIN)
+    return "one"

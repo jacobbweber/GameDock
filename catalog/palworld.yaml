@@ -1,0 +1,20 @@
+# EXAMPLE VALUES: verify the image, ports and variables before real use.
+id: palworld
+name: Palworld Dedicated Server
+image: thijsvanloef/palworld-server-docker:latest
+description: Palworld dedicated server using a popular community image.
+notes: Example values. Check the image documentation before real use.
+ports:
+  - { protocol: udp, host: 8211, container: 8211 }
+  - { protocol: udp, host: 27015, container: 27015 }
+volumes:
+  - { host: ./palworld, container: /palworld }
+env:
+  PORT: "8211"
+  QUERY_PORT: "27015"
+fields:
+  - { name: SERVER_NAME, label: Server name, default: "My Palworld Server", required: true }
+  - { name: PLAYERS, label: Max players, default: "16" }
+  - { name: SERVER_PASSWORD, label: Server password, secret: true,
+      description: Leave empty for no password. }
+  - { name: ADMIN_PASSWORD, label: Admin password, secret: true, required: true }

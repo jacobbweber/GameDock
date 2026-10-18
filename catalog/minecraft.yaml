@@ -1,0 +1,15 @@
+# EXAMPLE VALUES: verify the image, ports and variables before real use.
+id: minecraft-java
+name: Minecraft (Java) Server
+image: itzg/minecraft-server:latest
+description: Minecraft Java Edition server using a popular community image.
+notes: Example values. You must accept the Minecraft EULA (https://aka.ms/MinecraftEULA) by setting EULA to TRUE.
+ports:
+  - { protocol: tcp, host: 25565, container: 25565 }
+volumes:
+  - { host: ./data, container: /data }
+fields:
+  - { name: EULA, label: Accept Minecraft EULA (TRUE or FALSE), default: "FALSE", required: true }
+  - { name: VERSION, label: Minecraft version, default: LATEST }
+  - { name: MEMORY, label: Java memory, default: 2G }
+  - { name: MOTD, label: Message of the day, default: "A GameDock server" }

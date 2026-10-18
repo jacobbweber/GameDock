@@ -1,0 +1,13 @@
+# EXAMPLE VALUES: verify the image, ports and variables before real use.
+id: satisfactory
+name: Satisfactory Dedicated Server
+image: wolveix/satisfactory-server:latest
+description: Satisfactory dedicated server using a popular community image.
+notes: Example values. Check the image documentation before real use.
+ports:
+  - { protocol: udp, host: 7777, container: 7777 }
+  - { protocol: tcp, host: 7777, container: 7777 }
+volumes:
+  - { host: ./config, container: /config }
+fields:
+  - { name: MAXPLAYERS, label: Max players, default: "4" }

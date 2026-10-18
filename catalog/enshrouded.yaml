@@ -1,18 +1,21 @@
-# Example game definition. Copy this file to add another game.
-# This one is only an example; GameDock is not tied to any particular game.
+# Example catalog entry (a game template). Copy this file to add another game.
+# EXAMPLE VALUES: verify the image, ports and variables against the image's own
+# documentation before real use. GameDock is not tied to any particular game.
 id: enshrouded
 name: Enshrouded Dedicated Server
 image: mornedhels/enshrouded-server:stable-wine
 description: Enshrouded dedicated server (Wine-based image).
-ports:
+notes: Example values. Check the image documentation before real use.
+ports:                       # default host ports; each instance can choose its own
   - { protocol: udp, host: 15637, container: 15637 }
 volumes:
-  # A relative host path is stored under <DATA_DIR>/<id>/.
+  # A relative host path is stored under <DATA_DIR>/<instance id>/.
   - { host: ./savegame, container: /home/steam/enshrouded/savegame }
   - { host: ./logs, container: /home/steam/enshrouded/logs }
-env:
-  SERVER_NAME: "My Enshrouded Server"
-  SERVER_SLOT_COUNT: "16"
+env:                         # fixed values, not shown in the deploy form
   UPDATE_CRON: "0 3 * * *"
-  # Do not put real passwords in the catalog; use a .env file or an
-  # environment override (planned for a later step).
+fields:                      # values the user can set when deploying or editing
+  - { name: SERVER_NAME, label: Server name, default: "My Enshrouded Server", required: true }
+  - { name: SERVER_SLOT_COUNT, label: Player slots, default: "16" }
+  - { name: SERVER_PASSWORD, label: Server password, secret: true,
+      description: Leave empty for no password. }
