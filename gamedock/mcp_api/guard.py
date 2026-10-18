@@ -44,7 +44,7 @@ def allowed_host_patterns(bind_host: str, extra: tuple[str, ...]) -> list[str] |
     return pats
 
 
-def _host_ok(host: str, patterns: list[str] | None) -> bool:
+def host_allowed(host: str, patterns: list[str] | None) -> bool:
     if patterns is None:
         return True
     host = host.lower()
@@ -108,7 +108,7 @@ class McpGuard:
         h = Headers(scope=scope)
         host = h.get("host", "")
         resp = None
-        if not _host_ok(host, self.host_patterns):
+        if not host_allowed(host, self.host_patterns):
             resp = self._deny(scope, 421, "host header not allowed", "Host header not allowed for /mcp. "
                               "Set GAMEDOCK_MCP_ALLOWED_HOSTS if you reach GameDock by another name.")
         elif (origin := h.get("origin")) is not None and not self._origin_ok(origin, host):

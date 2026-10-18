@@ -290,3 +290,27 @@ def test_cross_origin_destructive_requests_refused(client, seeded):
     assert client.post("/api/servers/one/update-image?confirm=true", headers=evil).status_code == 403
     assert client.put("/api/servers/one/config/file", json={"path": "conf/hot.txt", "content": "x"},
                       headers=evil).status_code == 403
+
+
+# ------------------------------------------------------------------ review pass: browser safety
+def test_dns_rebinding_host_is_refused(service):
+    from gamedock.mcp_api.guard import allowed_host_patterns
+    app = create_app(service, allowed_host_patterns=allowed_host_patterns("127.0.0.1", ()))
+    for host, code in (("127.0.0.1:8080", 200), ("localhost:9999", 200), ("[::1]:8080", 200),
+                       ("evil.example:8080", 421), ("127.0.0.1.evil.example", 421)):
+        with TestClient(app, base_url=f"http://{host}") as c:
+            assert c.get("/api/health").status_code == code, host
+    # a rebinding page passes the same-origin check (Origin == Host), so the Host check must stop it
+    with TestClient(app, base_url="http://evil.example:8080") as c:
+        r = c.post("/api/servers", json=DEPLOY, headers={"Origin": "http://evil.example:8080"})
+        assert r.status_code == 421
+    app = create_app(service, allowed_host_patterns=allowed_host_patterns("127.0.0.1", ("gamedock.lan:8080",)))
+    with TestClient(app, base_url="http://gamedock.lan:8080") as c:
+        assert c.get("/api/health").status_code == 200
+
+
+def test_security_headers(client):
+    r = client.get("/")
+    assert r.headers["x-frame-options"] == "DENY" and r.headers["x-content-type-options"] == "nosniff"
+    assert "frame-ancestors 'none'" in r.headers["content-security-policy"]
+    assert "content-security-policy" not in client.get("/api/health").headers

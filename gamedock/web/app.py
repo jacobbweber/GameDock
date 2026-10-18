@@ -21,6 +21,7 @@ from ..errors import (
 from ..models import PortMapping
 from ..serialize import catalog_to_dict, delete_result_to_dict, server_to_dict
 from ..mcp_api import McpConfig, build_mcp
+from ..mcp_api.guard import host_allowed
 from ..mcp_api.confirm import ConfirmationStore
 from ..metrics import render_metrics
 from ..service import GameDockService
@@ -69,9 +70,12 @@ def _is_loopback(host: str | None) -> bool:
 
 def create_app(service: GameDockService, sampler=None, metrics_enabled: bool = False,
                metrics_allow_remote: bool = False, mcp_config: McpConfig | None = None,
-               mcp_confirmations: ConfirmationStore | None = None) -> FastAPI:
+               mcp_confirmations: ConfirmationStore | None = None,
+               allowed_host_patterns: list[str] | None = None) -> FastAPI:
     """`sampler` (optional) is started and stopped with the app. /metrics exists only if metrics_enabled.
-    /mcp is served only if mcp_config asks for a mode other than "off"."""
+    /mcp is served only if mcp_config asks for a mode other than "off".
+    `allowed_host_patterns` (optional) restricts the Host header of web/API requests, which stops DNS-rebinding
+    attacks from web pages (None = no restriction; /mcp has its own check)."""
     mcp = build_mcp(service, mcp_config, mcp_confirmations)
 
     @asynccontextmanager
@@ -87,6 +91,25 @@ def create_app(service: GameDockService, sampler=None, metrics_enabled: bool = F
 
     app = FastAPI(title="GameDock", version=__version__, docs_url="/api/docs", openapi_url="/api/openapi.json",
                   lifespan=lifespan)
+
+    @app.middleware("http")
+    async def browser_safety(request: Request, call_next):
+        # DNS rebinding: a web page can make its own name point at 127.0.0.1 and then pass the Origin check
+        # below (Origin == Host). Refusing unknown Host names closes that hole.
+        if (allowed_host_patterns is not None and not request.url.path.startswith("/mcp")
+                and not host_allowed(request.headers.get("host", ""), allowed_host_patterns)):
+            return JSONResponse({"error": "This Host name is not allowed. If you reach GameDock by another name, "
+                                          "add it to GAMEDOCK_ALLOWED_HOSTS."}, status_code=421)
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")  # nobody can frame the UI to trick a click
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        if request.url.path in ("/", "/index.html") or request.url.path.startswith("/static/"):
+            response.headers.setdefault(
+                "Content-Security-Policy",
+                "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+                "frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+        return response
 
     @app.middleware("http")
     async def same_origin_for_writes(request: Request, call_next):

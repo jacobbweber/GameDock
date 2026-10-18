@@ -52,6 +52,7 @@ class Settings:
     stats_history_seconds: int = 3600  # how much history to keep in memory
     metrics_enabled: bool = False  # serve Prometheus text at /metrics
     metrics_allow_remote: bool = False  # /metrics answers only loopback clients unless this is true
+    allowed_hosts: tuple[str, ...] = ()  # extra Host header values the web UI accepts (DNS-rebinding guard)
     mcp_mode: str = "standard"  # off | read_only | standard | full (see effective_mcp_mode)
     mcp_token: str | None = field(default=None, repr=False)  # optional bearer token for /mcp; never logged
     mcp_allowed_hosts: tuple[str, ...] = ()  # extra Host header values accepted by /mcp (host or host:port)
@@ -83,6 +84,7 @@ class Settings:
             stats_history_seconds=min(86400, max(60, int(env.get("GAMEDOCK_STATS_HISTORY_SECONDS", "3600")))),
             metrics_enabled=_bool(env.get("GAMEDOCK_METRICS_ENABLED", "false")),
             metrics_allow_remote=_bool(env.get("GAMEDOCK_METRICS_ALLOW_REMOTE", "false")),
+            allowed_hosts=_csv(env.get("GAMEDOCK_ALLOWED_HOSTS", "")),
             mcp_mode=_mcp_mode(env.get("GAMEDOCK_MCP_MODE", "standard")),
             mcp_token=(env.get("GAMEDOCK_MCP_TOKEN") or "").strip() or None,
             mcp_allowed_hosts=_csv(env.get("GAMEDOCK_MCP_ALLOWED_HOSTS", "")),

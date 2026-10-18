@@ -9,6 +9,7 @@ from .backends import make_backend
 from .config import Settings, load_dotenv
 from .hostcheck import port_free
 from .mcp_api import McpConfig
+from .mcp_api.guard import allowed_host_patterns
 from .sampler import Sampler
 from .service import GameDockService
 from .web.app import create_app
@@ -27,7 +28,9 @@ def build_app(settings: Settings | None = None):
     sampler = Sampler(service) if settings.stats_enabled else None
     return create_app(service, sampler=sampler, metrics_enabled=settings.metrics_enabled,
                       metrics_allow_remote=settings.metrics_allow_remote,
-                      mcp_config=McpConfig.from_settings(settings))
+                      mcp_config=McpConfig.from_settings(settings),
+                      allowed_host_patterns=allowed_host_patterns(
+                          settings.host, (*settings.allowed_hosts, *settings.mcp_allowed_hosts)))
 
 
 def main() -> None:
