@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from ..models import ContainerSpec, Status
+from ..models import ContainerSpec, ContainerStats, Status
 
 
 @dataclass(frozen=True)
@@ -39,3 +39,7 @@ class ContainerBackend(Protocol):
 
     def get_container_image_id(self, name: str) -> str | None:
         """Id of the image the container was created from, or None if no such container."""
+
+    def get_stats(self, names: list[str]) -> dict[str, ContainerStats]:
+        """Resource numbers for the named containers, using as few engine calls as possible (not one per
+        container). Containers that do not exist are left out; stopped ones come back with running=False."""

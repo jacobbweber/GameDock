@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -222,3 +223,84 @@ class ConfigSaveResult:
     note: str
 
 
+
+
+# ----------------------------------------------------------------------- monitoring
+@dataclass(frozen=True)
+class ContainerStats:
+    """Raw numbers for one container as reported by the container engine."""
+
+    running: bool
+    started_at: "datetime | None" = None
+    cpu_percent: float = 0.0  # Docker style: 100 = one full CPU core
+    mem_used: int = 0
+    mem_limit: int = 0
+    net_rx: int = 0  # cumulative bytes
+    net_tx: int = 0
+    block_read: int = 0  # cumulative bytes
+    block_write: int = 0
+    pids: int = 0
+
+
+@dataclass(frozen=True)
+class HostStats:
+    cpu_percent: float | None  # whole machine, 0-100
+    cpu_count: int
+    mem_total: int | None
+    mem_used: int | None
+    mem_available: int | None
+    load1: float | None
+    load5: float | None
+    load15: float | None
+    disk_total: int
+    disk_used: int
+    disk_free: int  # for the volume holding the data folder
+    uptime_seconds: float | None
+
+
+@dataclass(frozen=True)
+class ServerStats:
+    server_id: str
+    name: str
+    game_id: str
+    running: bool
+    cpu_percent: float  # Docker style, 100 = one core
+    cpu_of_host_percent: float  # share of the whole machine's CPU, 0-100
+    mem_used: int
+    mem_limit: int
+    mem_of_host_percent: float  # share of the host's memory, 0-100
+    net_rx: int
+    net_tx: int
+    net_rx_rate: float  # bytes/second since the previous sample
+    net_tx_rate: float
+    block_read: int
+    block_write: int
+    pids: int
+    uptime_seconds: float | None
+    started_at: str | None
+
+
+@dataclass(frozen=True)
+class StatsSnapshot:
+    sampled_at: str  # ISO 8601 UTC
+    interval: float
+    host: HostStats
+    servers: tuple[ServerStats, ...]
+    error: str = ""  # set if the container engine could not be queried
+
+
+@dataclass(frozen=True)
+class StatsPoint:
+    t: float  # unix seconds
+    cpu: float
+    mem: int
+    rx_rate: float
+    tx_rate: float
+
+
+@dataclass(frozen=True)
+class StatsHistory:
+    server_id: str
+    interval: float
+    window: int
+    points: tuple[StatsPoint, ...]

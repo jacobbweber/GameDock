@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import os
 import subprocess
+from dataclasses import replace
 from typing import Callable
 
 from ..errors import BackendError
-from ..models import ContainerSpec, Status
+from ..models import ContainerSpec, ContainerStats, Status
 from .base import ContainerState
+from .docker_stats import INSPECT_FORMAT, parse_inspect_lines, parse_stats_lines
 
 STOP_TIMEOUT_SECONDS = 60  # give game servers time to save on SIGTERM
 PULL_TIMEOUT_SECONDS = 3600  # game images can be many GB
@@ -103,3 +105,28 @@ class DockerCliBackend:
     def get_container_image_id(self, name: str) -> str | None:
         proc = self._run(["inspect", "--format", "{{.Image}}", name], check=False)
         return proc.stdout.strip() or None if proc.returncode == 0 else None
+
+    def get_stats(self, names: list[str]) -> dict[str, ContainerStats]:
+        """One `docker inspect` for every name (state, start time, memory limit) and, only if something is
+        running, one `docker stats --no-stream` for the running ones. Two engine calls at most, however many
+        servers there are."""
+        if not names:
+            return {}
+        # inspect exits non-zero if some name does not exist but still prints the others
+        proc = self._run(["inspect", "--format", INSPECT_FORMAT, *names], check=False)
+        info = parse_inspect_lines(proc.stdout)
+        if not info and proc.returncode != 0 and "no such" not in (proc.stderr or "").lower():
+            raise BackendError(f"docker inspect failed: {(proc.stderr or '').strip()}")
+        running = [n for n, (status, _, _) in info.items() if status in ("running", "restarting")]
+        live: dict[str, ContainerStats] = {}
+        if running:
+            sp = self._run(["stats", "--no-stream", "--format", "{{json .}}", *running])
+            live = parse_stats_lines(sp.stdout)
+        result: dict[str, ContainerStats] = {}
+        for name, (status, started, limit) in info.items():
+            if name in running:
+                s = live.get(name, ContainerStats(running=True))
+                result[name] = replace(s, started_at=started, mem_limit=limit or s.mem_limit)
+            else:
+                result[name] = ContainerStats(running=False, mem_limit=limit)
+        return result
