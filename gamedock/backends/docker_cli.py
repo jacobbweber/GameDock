@@ -15,6 +15,7 @@ from __future__ import annotations
 import csv
 import io
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, replace
@@ -45,7 +46,10 @@ _STATUS_MAP = {
 }
 
 STATE_FORMAT = ("{{.State.Status}}|{{.State.ExitCode}}|{{.State.OOMKilled}}|"
-                '{{index .Config.Labels "' + LABEL_MANAGED + '"}}')
+                '{{index .Config.Labels "' + LABEL_MANAGED + '"}}|'
+                "{{if .State.Health}}{{.State.Health.Status}}{{end}}|{{.State.StartedAt}}")
+MAX_LOG_LINES = 5000
+SINCE_RE = re.compile(r"^[0-9T:.+\-Z]{10,48}$")  # an RFC 3339 time; never anything that could look like an option
 
 
 @dataclass(frozen=True)
@@ -54,6 +58,8 @@ class _Found:
     exit_code: int
     oom: bool
     managed: bool
+    health: str = ""
+    started_at: str = ""
 
 
 def foreign_message(name: str) -> str:
@@ -87,12 +93,15 @@ class DockerCliBackend:
 
     # ------------------------------------------------------------------ plumbing
     def _run(self, args: list[str], env: dict[str, str] | None = None, check: bool = True,
-             timeout: int | None = None):
+             timeout: int | None = None, merge_stderr: bool = False):
         full_env = {**os.environ, **env} if env else None
+        # merge_stderr: one stream with stdout and stderr interleaved in the order the game wrote them (logs)
+        streams = ({"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT} if merge_stderr
+                   else {"capture_output": True})
         try:
             proc = self._runner(
                 [self.docker_bin, *args],
-                capture_output=True,
+                **streams,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
@@ -123,13 +132,14 @@ class DockerCliBackend:
                 return None
             raise docker_errors.friendly("inspect", err or proc.stdout)
         parts = proc.stdout.strip().split("|")
-        if len(parts) != 4:
+        if len(parts) not in (4, 6):  # older/newer answers without the health and start time are still understood
             raise BackendError(f"Unexpected answer from docker inspect: {proc.stdout.strip()!r}")
         try:
             code = int(parts[1])
         except ValueError:
             code = 0
-        return _Found(parts[0], code, parts[2] == "true", parts[3] == "true")
+        health, started = (parts[4], parts[5]) if len(parts) == 6 else ("", "")
+        return _Found(parts[0], code, parts[2] == "true", parts[3] == "true", health, started)
 
     def _ours(self, name: str) -> _Found | None:
         found = self._inspect(name)
@@ -144,7 +154,22 @@ class DockerCliBackend:
             return ContainerState(Status.NOT_CREATED)
         if not found.managed:
             return ContainerState(Status.ERROR, detail=foreign_message(name))
-        return ContainerState(_STATUS_MAP.get(found.raw, Status.ERROR), detail=describe_state(found))
+        status = _STATUS_MAP.get(found.raw, Status.ERROR)
+        running = found.raw in ("running", "restarting")
+        return ContainerState(status, detail=describe_state(found), health=found.health if running else "",
+                              started_at=found.started_at if running else "")
+
+    def get_logs(self, name: str, tail: int = 200, since: str | None = None) -> str:
+        found = self._ours(name)
+        if found is None:
+            raise BackendError(f"The container '{name}' does not exist yet, so there are no logs.")
+        args = ["logs", "--tail", str(max(1, min(int(tail), MAX_LOG_LINES)))]
+        if since:
+            if not SINCE_RE.match(since):
+                raise BackendError("Invalid 'since' time for the log request")
+            args += ["--since", since]
+        proc = self._run([*args, name], timeout=QUICK_TIMEOUT_SECONDS, merge_stderr=True)
+        return proc.stdout or ""
 
     @staticmethod
     def check_image_name(image: str) -> None:

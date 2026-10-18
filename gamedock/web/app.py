@@ -54,6 +54,12 @@ class ConfigWriteIn(BaseModel):
     content: str
 
 
+class ConfigFormIn(BaseModel):
+    path: str
+    content: str | None = None            # the text the editor holds (default: the file on disk)
+    changes: dict[str, str] | None = None  # {field id: new value}
+
+
 class UpdateIn(BaseModel):
     name: str | None = None
     ports: list[PortIn] | None = None
@@ -239,10 +245,20 @@ def create_app(service: GameDockService, sampler=None, metrics_enabled: bool = F
     def update_image(server_id: str, confirm: bool = False):
         return asdict(service.update_server_image(server_id, confirm))
 
+    # ---- logs
+    @app.get("/api/servers/{server_id}/logs")
+    def server_logs(server_id: str, lines: int = 200):
+        return asdict(service.get_logs(server_id, lines))
+
     # ---- config files
     @app.get("/api/servers/{server_id}/config")
     def list_config(server_id: str):
         return [asdict(c) for c in service.list_config_files(server_id)]
+
+    @app.post("/api/servers/{server_id}/config/form")
+    def config_form(server_id: str, body: ConfigFormIn):
+        """Structured view helper: parse text into fields and/or apply field changes to it. Writes nothing."""
+        return asdict(service.config_form(server_id, body.path, body.content, body.changes))
 
     @app.get("/api/servers/{server_id}/config/file")
     def read_config(server_id: str, path: str):

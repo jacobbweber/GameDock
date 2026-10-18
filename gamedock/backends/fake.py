@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import time
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Callable
@@ -25,6 +26,30 @@ class FakeBackend:
         self._lock = Lock()
         self.calls: list[tuple[str, str]] = []  # (action, name), handy in tests
         self.fail_next: str | None = None  # set to an action name to make it raise once
+        self.health: dict[str, str] = {}   # container name -> "" | starting | healthy | unhealthy (pretend health check)
+        self._logs: dict[str, list[str]] = {}
+        self.delays: dict[str, float] = {}  # action name -> seconds to wait (demos: make create/stop look slow)
+
+    def _pause(self, action: str) -> None:
+        d = self.delays.get(action, 0)
+        if d:
+            time.sleep(d)  # outside the lock so other requests keep working, like a real slow docker call
+
+    # -- logs (pretend) ----------------------------------------------------
+    def set_logs(self, name: str, text: str) -> None:
+        self._logs[name] = text.splitlines()
+
+    def append_log(self, name: str, *lines: str) -> None:
+        self._logs.setdefault(name, []).extend(lines)
+
+    def get_logs(self, name: str, tail: int = 200, since: str | None = None) -> str:
+        with self._lock:
+            self.calls.append(("logs", name))
+            self._maybe_fail("logs")
+            if name not in self._containers:
+                raise BackendError(f"The container '{name}' does not exist yet, so there are no logs.")
+            lines = self._logs.get(name, [])
+            return "\n".join(lines[-max(1, tail):]) + ("\n" if lines else "")
 
     def diagnose(self) -> DockerDiagnosis:
         return DockerDiagnosis(True, None, None, True, "fake", "fake", "Using the built-in pretend engine (no real containers).")
@@ -37,9 +62,15 @@ class FakeBackend:
     def get_state(self, name: str) -> ContainerState:
         with self._lock:
             entry = self._containers.get(name)
-            return ContainerState(entry[1] if entry else Status.NOT_CREATED)
+            if entry is None:
+                return ContainerState(Status.NOT_CREATED)
+            running = entry[1] == Status.RUNNING
+            started = self._started.get(name)
+            return ContainerState(entry[1], health=self.health.get(name, "") if running else "",
+                                  started_at=started.isoformat() if running and started else "")
 
     def create(self, spec: ContainerSpec) -> None:
+        self._pause("create")
         with self._lock:
             self.calls.append(("create", spec.name))
             self._maybe_fail("create")
@@ -49,6 +80,7 @@ class FakeBackend:
                     spec.image, self.registry.setdefault(spec.image, self._new_id()))
 
     def start(self, name: str) -> None:
+        self._pause("start")
         with self._lock:
             self.calls.append(("start", name))
             self._maybe_fail("start")
@@ -56,9 +88,11 @@ class FakeBackend:
                 raise BackendError(f"no such container: {name}")
             if self._containers[name][1] != Status.RUNNING:
                 self._started[name] = self.clock()
+                self._logs.setdefault(name, []).append("[fake engine] container started")
             self._containers[name] = (self._containers[name][0], Status.RUNNING)
 
     def stop(self, name: str) -> None:
+        self._pause("stop")
         with self._lock:
             self.calls.append(("stop", name))
             self._maybe_fail("stop")
@@ -73,6 +107,8 @@ class FakeBackend:
             self._containers.pop(name, None)
             self._container_image.pop(name, None)
             self._started.pop(name, None)
+            self._logs.pop(name, None)
+            self.health.pop(name, None)
 
     # -- image simulation ------------------------------------------------
     def _new_id(self) -> str:
@@ -85,6 +121,7 @@ class FakeBackend:
         return self.registry[image]
 
     def pull_image(self, image: str) -> None:
+        self._pause("pull")
         with self._lock:
             self.calls.append(("pull", image))
             self._maybe_fail("pull")

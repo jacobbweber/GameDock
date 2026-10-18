@@ -103,12 +103,16 @@ def make_tools(service: GameDockService, confirms: ConfirmationStore) -> list[To
     @tool(READ, _ann(read=True))
     def list_servers() -> Result:
         """List deployed servers with their status (running, stopped, not_created, error), ports and
-        settings. Secret settings are never shown, only whether they are set."""
+        settings. Secret settings are never shown, only whether they are set. `status: running` only means the
+        container is up: check `ready` (true = the game can be joined) and `phase` (starting, installing with
+        `progress` percent, ready, unhealthy). `activity` shows what GameDock is doing right now (e.g. deploying)."""
         return {"servers": [server_to_dict(s) for s in service.list_servers()]}
 
     @tool(READ, _ann(read=True))
     def get_server_status(server_id: ServerId) -> Result:
-        """Current status and settings of one server."""
+        """Current status and settings of one server. `status: running` only means the container is up; the game can
+        be joined when `ready` is true. `phase` is starting, installing (with `progress` percent), ready or
+        unhealthy; `phase_detail` explains it in plain words. `activity` is what GameDock is doing right now."""
         return server_to_dict(service.get_status(server_id))
 
     @tool(READ, _ann(read=True))
@@ -156,8 +160,20 @@ def make_tools(service: GameDockService, confirms: ConfirmationStore) -> list[To
     @tool(READ, _ann(read=True))
     def read_config_file(server_id: ServerId,
                          path: Annotated[str, Field(description="Path exactly as listed by list_config_files")]) -> Result:
-        """Read one config file. Values of sensitive keys are replaced by a placeholder."""
-        return to_plain(service.read_config_file(server_id, path))
+        """Read one config file. Values of sensitive keys are replaced by a placeholder. If the game has not
+        created the file yet (first start not finished) `info.exists` is false and `content` is empty."""
+        d = to_plain(service.read_config_file(server_id, path))
+        d.pop("form", None)  # the structured view is for the web page; agents work with the text
+        return d
+
+    @tool(READ, _ann(read=True))
+    def get_server_logs(
+        server_id: ServerId,
+        lines: Annotated[int, Field(ge=1, le=500, description="How many of the newest lines to return")] = 100,
+    ) -> Result:
+        """The newest lines of the game's console output (colour codes removed, passwords hidden). Use it to see
+        why a server is not ready, what it is downloading, or why it stopped. Read-only."""
+        return to_plain(service.get_logs(server_id, lines, max_chars=40_000))
 
     # ------------------------------------------------------------------ standard (changes things, not destructive)
     @tool(STANDARD, _ann())

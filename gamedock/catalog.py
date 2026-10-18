@@ -59,7 +59,30 @@ def _parse_config_file(c: object, source: str) -> ConfigFile:
     if not isinstance(keys, list) or not all(isinstance(k, str) and KEY_RE.match(k) for k in keys):
         raise CatalogError(f"{source}: bad sensitive_keys in config file {path!r}")
     return ConfigFile(path=str(pp), label=str(c.get("label") or path), format=fmt,
-                      sensitive_keys=tuple(keys), hot_edit=bool(c.get("hot_edit", False)))
+                      sensitive_keys=tuple(keys), hot_edit=bool(c.get("hot_edit", False)),
+                      note=str(c.get("note") or "").strip())
+
+
+MAX_PATTERN_LEN = 300
+
+
+def _parse_pattern(value: object, name: str, source: str, groups: int | None) -> str:
+    """A regular expression from a catalog file. Checked now so a typo is reported when the file is loaded,
+    not when someone first starts the game. `groups` = exact number of capture groups required (None = any)."""
+    if value is None or value == "":
+        return ""
+    if not isinstance(value, str):
+        raise CatalogError(f"{source}: {name} must be text")
+    if len(value) > MAX_PATTERN_LEN or "\n" in value or "\0" in value:
+        raise CatalogError(f"{source}: {name} must be one line of at most {MAX_PATTERN_LEN} characters")
+    try:
+        rx = re.compile(value)
+    except re.error as e:
+        raise CatalogError(f"{source}: {name} is not a valid regular expression: {e}") from e
+    if groups is not None and rx.groups != groups:
+        raise CatalogError(f"{source}: {name} must contain exactly {groups} capture group, for example "
+                           "'progress: *([0-9.]+)' (the part in brackets is the percentage)")
+    return value
 
 
 def parse_definition(data: object, source: str = "<definition>") -> CatalogEntry:
@@ -121,6 +144,9 @@ def parse_definition(data: object, source: str = "<definition>") -> CatalogEntry
     if len({c.path for c in config_files}) != len(config_files):
         raise CatalogError(f"{source}: duplicate config file path")
 
+    ready_pattern = _parse_pattern(data.get("ready_log_pattern"), "ready_log_pattern", source, groups=None)
+    progress_pattern = _parse_pattern(data.get("progress_log_pattern"), "progress_log_pattern", source, groups=1)
+
     return CatalogEntry(
         id=gid,
         name=data["name"],
@@ -133,6 +159,8 @@ def parse_definition(data: object, source: str = "<definition>") -> CatalogEntry
         notes=str(data.get("notes", "")),
         update_method=update_method,
         config_files=tuple(config_files),
+        ready_log_pattern=ready_pattern,
+        progress_log_pattern=progress_pattern,
     )
 
 
@@ -145,9 +173,11 @@ def entry_to_dict(e: CatalogEntry) -> dict:
         "description": e.description,
         "notes": e.notes,
         "update_method": e.update_method,
+        "ready_log_pattern": e.ready_log_pattern,
+        "progress_log_pattern": e.progress_log_pattern,
         "config_files": [
             {"path": c.path, "label": c.label, "format": c.format,
-             "sensitive_keys": list(c.sensitive_keys), "hot_edit": c.hot_edit}
+             "sensitive_keys": list(c.sensitive_keys), "hot_edit": c.hot_edit, "note": c.note}
             for c in e.config_files
         ],
         "ports": [{"protocol": p.protocol, "host": p.host, "container": p.container} for p in e.ports],

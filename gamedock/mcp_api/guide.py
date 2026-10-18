@@ -21,6 +21,9 @@ and GameDock works for any game: a game is just an entry in the catalog.
 - **Catalog entry**: a template for a game (image, default ports, settings). See `list_catalog`.
 - **Server**: something deployed from a catalog entry. It has an id (use it in every tool), a name, ports,
   settings and a status: `running`, `stopped`, `not_created` or `error`.
+- **Ready vs running**: `running` only means the container is up. A game that downloads files on first start
+  (several GB) cannot be joined yet. `ready` is true once the game can be joined; `phase` says `starting`,
+  `installing` (with a `progress` percent) or `ready`. Wait for `ready` before telling anyone to connect.
 - **Settings (env)**: values you fill in when deploying (see `get_catalog_entry`). Settings marked `secret`
   (passwords) are accepted but never shown back: you only see whether they are set. Never ask for or repeat them.
 - **Backups**: archives of a server's data. GameDock makes automatic safety backups before risky actions
@@ -35,6 +38,7 @@ Tools you have: {", ".join(tool_names)}.
 ## Typical flows
 - Deploy: `list_catalog` -> `get_catalog_entry` -> `deploy_server` (give required settings, `start=true` to start).
 - Check on things: `list_servers`, `get_server_status`, `get_server_stats`, `get_stats_history`, `get_host_stats`.
+- Something wrong or slow to start? `get_server_logs` shows the newest console lines.
 - Before risky changes: `create_backup`.
 - Port conflicts and other problems come back as plain error messages: read them and adjust.
 

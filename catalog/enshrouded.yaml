@@ -6,6 +6,10 @@ name: Enshrouded Dedicated Server
 image: mornedhels/enshrouded-server:stable-wine
 description: Enshrouded dedicated server (Wine-based image).
 notes: Example values. Check the image documentation before real use.
+# Optional readiness hints: the game is joinable once it logs  [Session] 'HostOnline' (up)!   and the first start
+# downloads the server through SteamCMD (progress shown as a percentage).
+ready_log_pattern: "'HostOnline' \\(up\\)!"
+progress_log_pattern: "progress: *([0-9]+(?:[.][0-9]+)?)"
 # update_method: pull_recreate   (default) pull the newest image and recreate the container; "none" disables it
 ports:                       # default host ports; each instance can choose its own
   - { protocol: udp, host: 15637, container: 15637 }

@@ -15,6 +15,8 @@ from ..models import ContainerSpec, ContainerStats, Status
 class ContainerState:
     status: Status
     detail: str = ""
+    health: str = ""      # Docker health check result: healthy | unhealthy | starting | "" (image has no health check)
+    started_at: str = ""  # when the current run began (RFC 3339 text); changes on every restart
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,10 @@ class ContainerBackend(Protocol):
 
     def get_container_image_id(self, name: str) -> str | None:
         """Id of the image the container was created from, or None if no such container."""
+
+    def get_logs(self, name: str, tail: int = 200, since: str | None = None) -> str:
+        """The last `tail` lines the container wrote (stdout and stderr merged, oldest first), optionally only those
+        since `since` (an RFC 3339 time as in ContainerState.started_at). Empty text if there is nothing yet."""
 
     def diagnose(self) -> DockerDiagnosis:
         """Check that the engine is installed and reachable. Must not raise."""

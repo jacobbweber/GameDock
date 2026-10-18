@@ -74,6 +74,7 @@ class ConfigFile:
     format: str = "text"  # hint for the editor; "json" files are validated on save
     sensitive_keys: tuple[str, ...] = ()  # values of these keys are masked in the editor
     hot_edit: bool = False  # True = safe to edit while the server runs
+    note: str = ""  # optional warning shown above the editor (for example "the image regenerates this file")
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,10 @@ class CatalogEntry:
     notes: str = ""
     update_method: str = "pull_recreate"  # or "none" (the game updates itself inside the container)
     config_files: tuple[ConfigFile, ...] = ()
+    # Optional readiness hints (regular expressions matched against the container log). Used to tell "the container
+    # is up" from "the game can be joined": see gamedock/readiness.py.
+    ready_log_pattern: str = ""      # a log line that appears once the game accepts players
+    progress_log_pattern: str = ""   # regex with ONE capture group giving a percentage (first-start downloads)
 
 
 @dataclass
@@ -145,6 +150,13 @@ class ServerInfo:
     created_at: str = ""
     update_method: str = "pull_recreate"
     config_file_count: int = 0
+    # Live state (see gamedock/readiness.py). `status` says whether the container runs; these say whether the game
+    # can be joined. `ready` is True only when status is running AND the game reported ready (or gives no signal).
+    activity: str = ""        # what GameDock itself is doing right now ("deploying", "stopping", ...), else ""
+    phase: str = ""           # "" (not running) | starting | installing | ready | unhealthy
+    ready: bool = False
+    progress: float | None = None   # 0-100 while phase is "installing" and the log shows a percentage
+    phase_detail: str = ""    # plain-language sentence for the phase
 
 
 # ----------------------------------------------------------------------- operation results
@@ -222,6 +234,26 @@ class ConfigFileInfo:
     exists: bool
     size: int
     backups: tuple[str, ...] = ()  # names of automatic .bak copies, newest first
+    note: str = ""
+
+
+@dataclass(frozen=True)
+class FormField:
+    """One setting shown in the structured editor. `id` identifies it when sending changes back."""
+
+    id: str
+    key: str
+    label: str
+    value: str        # for sensitive keys this is the placeholder (or "" when nothing is set)
+    type: str         # text | number | bool | json
+    sensitive: bool = False
+    group: str = ""   # ini section, if any
+
+
+@dataclass(frozen=True)
+class ConfigForm:
+    kind: str                       # optionsettings | keyvalue | json
+    fields: tuple[FormField, ...]
 
 
 @dataclass(frozen=True)
@@ -232,6 +264,24 @@ class ConfigContent:
     running: bool
     editable_now: bool
     note: str
+    form: "ConfigForm | None" = None  # None: this file's format has no structured view (use the raw text)
+
+
+@dataclass(frozen=True)
+class ConfigFormResult:
+    form: "ConfigForm | None"
+    content: str          # the text with the requested changes applied (sensitive values still masked)
+    changed: tuple[str, ...]  # ids of the fields that differ from the text that was sent
+
+
+@dataclass(frozen=True)
+class LogsResult:
+    server_id: str
+    state: str            # container state: running | stopped | not_created | error
+    lines: int            # number of lines in `text`
+    truncated: bool       # True if older lines were cut to respect the line or size limit
+    text: str             # ANSI colour codes removed, secret setting values hidden
+    note: str = ""
 
 
 @dataclass(frozen=True)

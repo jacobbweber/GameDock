@@ -263,3 +263,65 @@ def test_diagnose_not_installed():
     assert not d.installed and d.kind == "not_installed" and "Install Docker" in d.message
     d = DockerCliBackend(runner=runner).diagnose()
     assert d.kind == "not_installed"
+
+
+# ------------------------------------------------------------------ health check and logs
+HEALTHY = "running|0|false|true|healthy|2026-10-18T04:11:02.123456789Z\n"
+
+
+def test_state_includes_docker_health_and_start_time():
+    st = DockerCliBackend(runner=Recorder([(0, HEALTHY, "")])).get_state("x")
+    assert st.status == Status.RUNNING and st.health == "healthy"
+    assert st.started_at == "2026-10-18T04:11:02.123456789Z"
+    starting = "running|0|false|true|starting|2026-10-18T04:11:02Z\n"
+    assert DockerCliBackend(runner=Recorder([(0, starting, "")])).get_state("x").health == "starting"
+
+
+def test_image_without_a_health_check_has_empty_health():
+    st = DockerCliBackend(runner=Recorder([(0, "running|0|false|true||2026-10-18T04:11:02Z\n", "")])).get_state("x")
+    assert st.health == "" and st.status == Status.RUNNING
+
+
+def test_stopped_container_reports_no_health():
+    out = "exited|0|false|true|unhealthy|2026-10-18T04:11:02Z\n"
+    st = DockerCliBackend(runner=Recorder([(0, out, "")])).get_state("x")
+    assert st.health == "" and st.started_at == ""
+
+
+def test_inspect_asks_for_health_and_start_time_in_the_same_call():
+    r = Recorder([(0, HEALTHY, "")])
+    DockerCliBackend(runner=r).get_state("x")
+    fmt = r.calls[0][0][r.calls[0][0].index("--format") + 1]
+    assert ".State.Health.Status" in fmt and ".State.StartedAt" in fmt and len(r.calls) == 1
+
+
+def test_logs_command_merges_stderr_and_limits_lines():
+    r = Recorder([(0, HEALTHY, ""), (0, "line one\nline two\n", "")])
+    out = DockerCliBackend(runner=r).get_logs("gamedock-x", 150)
+    assert out == "line one\nline two\n"
+    argv, kw = r.calls[1]
+    assert argv == ["docker", "logs", "--tail", "150", "gamedock-x"]
+    assert kw["stderr"] == subprocess.STDOUT and "capture_output" not in kw  # one stream, in the order written
+    assert kw["timeout"] <= 30
+
+
+def test_logs_since_is_passed_and_validated():
+    r = Recorder([(0, HEALTHY, ""), (0, "x\n", "")])
+    DockerCliBackend(runner=r).get_logs("gamedock-x", 10, since="2026-10-18T04:11:02.5Z")
+    assert r.argvs()[1] == ["docker", "logs", "--tail", "10", "--since", "2026-10-18T04:11:02.5Z", "gamedock-x"]
+    for bad in ("--follow", "now; rm", "-1h", "x"):
+        with pytest.raises(BackendError, match="Invalid"):
+            DockerCliBackend(runner=Recorder([(0, HEALTHY, "")])).get_logs("gamedock-x", 10, since=bad)
+
+
+def test_logs_tail_is_capped():
+    r = Recorder([(0, HEALTHY, ""), (0, "", "")])
+    DockerCliBackend(runner=r).get_logs("gamedock-x", 10**9)
+    assert r.argvs()[1][3] == "5000"
+
+
+def test_logs_of_foreign_or_missing_containers():
+    with pytest.raises(ForeignContainerError):
+        DockerCliBackend(runner=Recorder([FOREIGN])).get_logs("gamedock-x", 10)
+    with pytest.raises(BackendError, match="no logs"):
+        DockerCliBackend(runner=Recorder([MISSING])).get_logs("gamedock-x", 10)

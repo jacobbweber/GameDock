@@ -13,8 +13,10 @@ from __future__ import annotations
 import math
 import re
 import shlex
+import time
 from collections import deque
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock, RLock
@@ -22,13 +24,16 @@ from typing import Callable, Iterable, Iterator, Mapping
 
 from . import backups as bk
 from . import configfiles as cfg
+from . import configforms as forms
+from . import readiness as rd
 from .backends.base import ContainerBackend, DockerDiagnosis
 from .catalog import entry_to_dict, load_catalog, parse_definition
 from .hoststats import HostMeter
 from .hostcheck import foreign_owners
 from .errors import BackendError, ConflictError, GameDockError, NotFoundError, ValidationError
 from .models import (
-    BackupResult, CatalogEntry, ConfigContent, ConfigFile, ConfigFileInfo, ConfigSaveResult, ContainerSpec,
+    BackupResult, CatalogEntry, ConfigContent, ConfigFile, ConfigFileInfo, ConfigForm, ConfigFormResult, ConfigSaveResult,
+    ContainerSpec, FormField, LogsResult,
     DataSummary, DeleteResult, EnvValue, HostStats, ImageInfo, Instance, PortMapping, RestoreResult, ServerInfo, ServerStats,
     StatsHistory, StatsPoint, StatsSnapshot, Status, UpdateResult, VolumeMapping, WipeResult,
 )
@@ -43,6 +48,12 @@ BACKUPS_DIRNAME = "backups"          # <data>/backups/<server id>/ ; also reserv
 DELETED_DIRNAME = "_deleted"         # <data>/backups/_deleted/ holds backups taken when data was deleted
 RESERVED_IDS = {BACKUPS_DIRNAME}
 MAX_HISTORY_POINTS = 2000            # hard cap per series, whatever the interval/history settings
+READINESS_LOG_LINES = 400            # how much log is read to find the "ready" line or a download percentage
+READINESS_TTL = 2.0                  # seconds a readiness answer is reused (the page polls every 3 s)
+MAX_LOG_LINES = 1000                 # most lines one log request may return
+DEFAULT_LOG_LINES = 200
+MAX_LOG_CHARS = 200_000              # cap on the text of one log answer (the newest part is kept)
+MIN_SECRET_LEN = 3                   # secret setting values shorter than this are not searched for in logs
 
 
 def container_name(server_id: str) -> str:
@@ -72,6 +83,10 @@ class GameDockService:
         self._docker_cache: tuple[float, DockerDiagnosis] | None = None
         self._locks: dict[str, Lock] = {}
         self._locks_guard = Lock()
+        self._activity: dict[str, str] = {}               # server id -> what GameDock is doing to it right now
+        self._pending: dict[str, ServerInfo] = {}         # deploys in progress (not stored yet)
+        self._ready_seen: dict[str, str] = {}             # server id -> start time of the run that printed its ready line
+        self._phase_cache: dict[str, tuple[float, tuple, rd.Readiness]] = {}
         # monitoring (all in memory)
         self.stats_interval = float(stats_interval)
         self.stats_history_seconds = int(stats_history_seconds)
@@ -86,15 +101,19 @@ class GameDockService:
         self._prev_net: dict[str, tuple[float, int, int]] = {}
 
     @contextmanager
-    def _operation(self, server_id: str) -> Iterator[None]:
-        """Only one state-changing operation per server at a time (e.g. no start during a backup)."""
+    def _operation(self, server_id: str, activity: str = "") -> Iterator[None]:
+        """Only one state-changing operation per server at a time (e.g. no start during a backup).
+        `activity` is shown to everyone who looks at the server meanwhile ("stopping", "backing up", ...)."""
         with self._locks_guard:
             lock = self._locks.setdefault(server_id, Lock())
         if not lock.acquire(blocking=False):
             raise ConflictError("Another operation is already running on this server; wait for it to finish")
+        if activity:
+            self._activity[server_id] = activity
         try:
             yield
         finally:
+            self._activity.pop(server_id, None)
             lock.release()
             self._latest_ts = None  # state may have changed: the next stats request reads fresh numbers
 
@@ -149,13 +168,20 @@ class GameDockService:
         for v in spec.volumes:
             Path(v.host).mkdir(parents=True, exist_ok=True)
 
-    def _info(self, inst: Instance) -> ServerInfo:
+    def _info(self, inst: Instance, show_activity: bool = False) -> ServerInfo:
+        """`show_activity`: include what GameDock is doing to the server right now. Left off for the answer to an
+        action itself (which is returned when the action is already over)."""
         t = self._template(inst)
+        health, started = "", ""
         try:
             state = self.backend.get_state(container_name(inst.id))
             status, detail = state.status, state.detail
+            health, started = state.health, state.started_at
         except BackendError as e:
             status, detail = Status.ERROR, str(e)
+        r = self._readiness(inst, t, health, started) if status == Status.RUNNING else None
+        if status != Status.RUNNING:
+            self._forget_readiness(inst.id)
         env = tuple(
             EnvValue(
                 name=f.name, label=f.label, secret=f.secret, required=f.required,
@@ -166,7 +192,40 @@ class GameDockService:
             for f in t.fields
         )
         return ServerInfo(inst.id, inst.name, inst.game_id, t.name, t.image, t.description,
-                          status, inst.ports, env, detail, inst.created_at, t.update_method, len(t.config_files))
+                          status, inst.ports, env, detail, inst.created_at, t.update_method, len(t.config_files),
+                          activity=self._activity.get(inst.id, "") if show_activity else "",
+                          phase=r.phase if r else "", ready=bool(r and r.ready),
+                          progress=r.progress if r else None, phase_detail=r.detail if r else "")
+
+    # --------------------------------------------------------------- readiness
+    def _forget_readiness(self, server_id: str) -> None:
+        self._ready_seen.pop(server_id, None)
+        self._phase_cache.pop(server_id, None)
+
+    def _readiness(self, inst: Instance, t: CatalogEntry, health: str, started: str) -> rd.Readiness:
+        """Is the running game joinable? Cheap: no extra engine call once the answer is "ready" (or when the image
+        has a health check that says healthy); otherwise at most one `docker logs` call every READINESS_TTL seconds."""
+        if health == "healthy":
+            return rd.decide(health, bool(t.ready_log_pattern), False, None)
+        if self._ready_seen.get(inst.id) == started and t.ready_log_pattern:
+            return rd.decide(health, True, True, None)  # the ready line was seen during this run; logs may have scrolled
+        key = (health, started)
+        cached = self._phase_cache.get(inst.id)
+        now = time.monotonic()
+        if cached and cached[1] == key and now - cached[0] < READINESS_TTL:
+            return cached[2]
+        text = ""
+        if t.ready_log_pattern or t.progress_log_pattern:
+            try:
+                text = self.backend.get_logs(container_name(inst.id), READINESS_LOG_LINES, started or None)
+            except BackendError:
+                text = ""  # logs are only a hint; never break the server list because of them
+        seen = rd.pattern_seen(text, t.ready_log_pattern)
+        if seen:
+            self._ready_seen[inst.id] = started
+        result = rd.decide(health, bool(t.ready_log_pattern), seen, rd.last_progress(text, t.progress_log_pattern))
+        self._phase_cache[inst.id] = (now, key, result)
+        return result
 
     # --------------------------------------------------------------- validation
     @staticmethod
@@ -246,10 +305,13 @@ class GameDockService:
 
     # --------------------------------------------------------------- public API
     def list_servers(self) -> list[ServerInfo]:
-        return [self._info(i) for i in self.store.all()]
+        return [self._info(i, True) for i in self.store.all()] + list(self._pending.values())
 
     def get_status(self, server_id: str) -> ServerInfo:
-        return self._info(self._instance(server_id))
+        pending = self._pending.get(server_id)
+        if pending is not None:
+            return pending
+        return self._info(self._instance(server_id), True)
 
     def deploy(self, game_id: str, name: str, ports: Iterable[PortMapping] | None = None,
                env: Mapping[str, str] | None = None, start: bool = False) -> ServerInfo:
@@ -271,22 +333,33 @@ class GameDockService:
         )
         spec = self._spec(inst)
         self._prepare_dirs(spec)
-        self.backend.create(spec)  # if this fails nothing is stored
-        self.store.put(inst)
-        if start:
-            try:
-                self._check_host_ports(inst)
-                self.backend.start(spec.name)
-            except ConflictError as e:
-                raise ConflictError(f"Server '{name}' was deployed but could not be started: {e}") from e
-            except BackendError as e:
-                raise BackendError(f"Server '{name}' was deployed but could not be started: {e}") from e
+        # While the image downloads and the container is created (can take minutes) the server is visible as a
+        # "deploying" entry to the web page and to MCP clients. Only one deploy runs at a time (see deploy()).
+        self._pending[inst.id] = ServerInfo(
+            inst.id, inst.name, inst.game_id, t.name, t.image, t.description, Status.NOT_CREATED, resolved,
+            created_at=inst.created_at, update_method=t.update_method, config_file_count=len(t.config_files),
+            activity="deploying",
+            phase_detail="Downloading the game image and creating the server. This can take a few minutes.")
+        try:
+            self.backend.create(spec)  # if this fails nothing is stored
+            self.store.put(inst)
+            if start:
+                self._pending[inst.id] = replace(self._pending[inst.id], activity="starting")
+                try:
+                    self._check_host_ports(inst)
+                    self.backend.start(spec.name)
+                except ConflictError as e:
+                    raise ConflictError(f"Server '{name}' was deployed but could not be started: {e}") from e
+                except BackendError as e:
+                    raise BackendError(f"Server '{name}' was deployed but could not be started: {e}") from e
+        finally:
+            self._pending.pop(inst.id, None)
         return self._info(inst)
 
     def update(self, server_id: str, name: str | None = None, ports: Iterable[PortMapping] | None = None,
                env: Mapping[str, str] | None = None) -> ServerInfo:
         """Change a stopped server's name, host ports or settings (its container is recreated)."""
-        with self._operation(server_id):
+        with self._operation(server_id, "saving settings"):
             inst = self._instance(server_id)
             t = self._template(inst)
             cname = container_name(inst.id)
@@ -346,19 +419,19 @@ class GameDockService:
 
     def start(self, server_id: str) -> ServerInfo:
         """Start a server (re-creating its container if it is missing)."""
-        with self._operation(server_id):
+        with self._operation(server_id, "starting"):
             inst = self._instance(server_id)
             self._start(inst)
             return self._info(inst)
 
     def stop(self, server_id: str) -> ServerInfo:
-        with self._operation(server_id):
+        with self._operation(server_id, "stopping"):
             inst = self._instance(server_id)
             self._stop(inst)
             return self._info(inst)
 
     def restart(self, server_id: str) -> ServerInfo:
-        with self._operation(server_id):
+        with self._operation(server_id, "restarting"):
             inst = self._instance(server_id)
             self._stop(inst)
             self._start(inst)
@@ -421,7 +494,7 @@ class GameDockService:
         Safe by default: a running server is stopped, backed up, and started again so the files are
         consistent. With live=True a running server is backed up as it runs (files may be mid-write).
         """
-        with self._operation(server_id):
+        with self._operation(server_id, "backing up"):
             inst = self._instance(server_id)
             was_running = self._is_running(inst)
             stop_first = was_running and not live
@@ -460,7 +533,7 @@ class GameDockService:
 
     def restore_backup(self, server_id: str, name: str, confirm: bool = False) -> RestoreResult:
         """Replace a stopped server's data with a backup, after taking a safety backup of the current data."""
-        with self._operation(server_id):
+        with self._operation(server_id, "restoring"):
             inst = self._instance(server_id)
             if not confirm:
                 raise ValidationError("Restoring replaces the current data and needs explicit confirmation (confirm=true)")
@@ -494,7 +567,7 @@ class GameDockService:
 
     def wipe_data(self, server_id: str, confirm: bool = False) -> WipeResult:
         """Empty a stopped server's data folder (a safety backup is taken first; if it fails, nothing is wiped)."""
-        with self._operation(server_id):
+        with self._operation(server_id, "wiping data"):
             inst = self._instance(server_id)
             if not confirm:
                 raise ValidationError("Wiping data needs explicit confirmation (confirm=true)")
@@ -512,7 +585,7 @@ class GameDockService:
         By default the data folder is kept. With delete_data (plus confirm_delete_data) the data folder is
         deleted too, but only after a backup has been saved outside it; if that backup fails nothing is deleted.
         """
-        with self._operation(server_id):
+        with self._operation(server_id, "deleting"):
             inst = self._instance(server_id)
             if not confirm:
                 raise ValidationError(f"Deleting '{inst.name}' needs explicit confirmation (confirm=true)")
@@ -552,7 +625,7 @@ class GameDockService:
         the server if it runs (with the usual grace period), back up its data, recreate the container from the new
         image, and start it again if it had been running.
         """
-        with self._operation(server_id):
+        with self._operation(server_id, "updating"):
             inst = self._instance(server_id)
             t = self._template(inst)
             if not confirm:
@@ -611,7 +684,7 @@ class GameDockService:
             baks = tuple(cfg.list_baks(p))
         except GameDockError:
             exists, size, baks = False, 0, ()
-        return ConfigFileInfo(c.path, c.label, c.format, c.sensitive_keys, c.hot_edit, exists, size, baks)
+        return ConfigFileInfo(c.path, c.label, c.format, c.sensitive_keys, c.hot_edit, exists, size, baks, c.note)
 
     def list_config_files(self, server_id: str) -> list[ConfigFileInfo]:
         inst = self._instance(server_id)
@@ -624,7 +697,7 @@ class GameDockService:
         running = self._is_running(inst)
         editable = c.hot_edit or not running
         if not r.exists:
-            note = "This file does not exist yet (the game usually creates it on first start). Saving creates it."
+            note = "This game has not created its settings file yet; it appears after the first full start."
         elif c.hot_edit:
             note = "This file is safe to edit while the server runs, but the game may need a restart to notice."
         else:
@@ -633,10 +706,33 @@ class GameDockService:
             note = "Stop the server to edit this file. " + note
         if r.masked:
             note += f" Values for {', '.join(c.sensitive_keys)} are hidden; leave the placeholder to keep them."
-        return ConfigContent(self._config_info(inst, c), r.content, r.masked, running, editable, note)
+        form = None
+        if r.exists:
+            try:
+                form = forms.build_form(r.content, c)
+            except Exception:  # the structured view is a convenience; the raw text must always be readable
+                form = None
+        return ConfigContent(self._config_info(inst, c), r.content, r.masked, running, editable, note, form)
+
+    def config_form(self, server_id: str, path: str, content: str | None = None,
+                    changes: dict[str, str] | None = None) -> ConfigFormResult:
+        """Structured view helper (read-only, writes nothing). Parses `content` (the masked text the editor holds;
+        default: the file as it is on disk), applies `changes` ({field id: new value}) to it and returns the fields
+        plus the resulting text. Used to switch between the form and the raw text, and to prepare a save."""
+        inst = self._instance(server_id)
+        c = self._config_file(inst, path)
+        if content is None:
+            r = cfg.read_config(self._data_dir_of(inst), c)
+            if not r.exists:
+                raise ValidationError("This game has not created its settings file yet; it appears after the first full start.")
+            content = r.content
+        if len(content.encode("utf-8")) > cfg.MAX_CONFIG_BYTES:
+            raise ValidationError(f"Content is larger than the editor limit of {cfg.MAX_CONFIG_BYTES} bytes")
+        text, changed = forms.apply_changes(content, c, changes) if changes else (content, [])
+        return ConfigFormResult(forms.build_form(text, c), text, tuple(changed))
 
     def write_config_file(self, server_id: str, path: str, content: str) -> ConfigSaveResult:
-        with self._operation(server_id):
+        with self._operation(server_id, "saving config"):
             inst = self._instance(server_id)
             c = self._config_file(inst, path)
             running = self._is_running(inst)
@@ -647,6 +743,44 @@ class GameDockService:
             note += (" Restart the server for the change to take effect." if running
                      else " The change applies the next time the server starts.")
             return ConfigSaveResult(c.path, w.size, w.backup, running, note)
+
+    # ------------------------------------------------------------ logs
+    def get_logs(self, server_id: str, lines: int | None = None, max_chars: int = MAX_LOG_CHARS) -> LogsResult:
+        """The newest `lines` lines of the game's console output. Colour codes are removed and the values of the
+        server's secret settings (passwords) are replaced by a placeholder in case the game prints them."""
+        inst = self._instance(server_id)
+        n = DEFAULT_LOG_LINES if lines is None else int(lines)
+        if not 1 <= n <= MAX_LOG_LINES:
+            raise ValidationError(f"lines must be between 1 and {MAX_LOG_LINES}")
+        cname = container_name(inst.id)
+        state = self.backend.get_state(cname)
+        if state.status == Status.NOT_CREATED:
+            return LogsResult(server_id, state.status.value, 0, False, "",
+                              "This server has no container yet, so there are no logs. Start it first.")
+        raw = self.backend.get_logs(cname, n + 1)  # one extra line tells us whether older lines were cut
+        text = self._redact(inst, rd.clean_log_text(raw)).rstrip("\n")
+        all_lines = text.split("\n") if text else []
+        truncated = len(all_lines) > n
+        all_lines = all_lines[-n:]
+        text = "\n".join(all_lines)
+        if len(text) > max_chars:
+            text = text[-max_chars:]
+            text = text[text.find("\n") + 1:] if "\n" in text else text  # do not start in the middle of a line
+            truncated = True
+        count = len(text.split("\n")) if text else 0
+        note = "" if text else "The game has not written anything yet."
+        return LogsResult(server_id, state.status.value, count, truncated, text, note)
+
+    def _redact(self, inst: Instance, text: str) -> str:
+        try:
+            secrets = {f.name for f in self._template(inst).fields if f.secret}
+        except GameDockError:
+            return text
+        values = sorted({inst.env.get(n, "") for n in secrets if len(inst.env.get(n, "")) >= MIN_SECRET_LEN},
+                        key=len, reverse=True)
+        for v in values:
+            text = text.replace(v, cfg.MASK)
+        return text
 
     # ------------------------------------------------------------ monitoring
     def sample_stats(self, record: bool = True) -> StatsSnapshot:

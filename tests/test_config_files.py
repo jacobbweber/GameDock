@@ -46,7 +46,7 @@ def test_read_masks_sensitive_values(srv):
 
 def test_read_missing_file_is_empty_and_creatable(service, deployed):
     r = service.read_config_file("one", INI)
-    assert not r.info.exists and r.content == "" and "does not exist yet" in r.note
+    assert not r.info.exists and r.content == "" and "has not created its settings file yet" in r.note
 
 
 def test_only_declared_files_are_accessible(srv, tmp_path):

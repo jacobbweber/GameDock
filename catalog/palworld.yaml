@@ -3,7 +3,16 @@ id: palworld
 name: Palworld Dedicated Server
 image: thijsvanloef/palworld-server-docker:latest
 description: Palworld dedicated server using a popular community image.
-notes: Example values. Check the image documentation before real use.
+notes: >-
+  Example values. Check the image documentation before real use. The first start downloads about 5 GB, so the server
+  shows "Installing" and then "Starting" before it can be joined. This image rewrites PalWorldSettings.ini from the
+  settings below every time it starts, so edits made in the config editor are lost unless you set
+  DISABLE_GENERATE_SETTINGS to true.
+# The container is "running" long before the game can be joined: on first start it downloads ~5 GB through SteamCMD.
+# GameDock uses the image's Docker health check, and these two optional log patterns, to show Installing / Starting
+# instead of Running until the server really accepts players.
+ready_log_pattern: "Running Palworld dedicated server on"      # used when there is no health check or it lags behind
+progress_log_pattern: "progress: *([0-9]+(?:[.][0-9]+)?)"      # SteamCMD: "Update state (0x61) downloading, progress: 51.68"
 ports:
   - { protocol: udp, host: 8211, container: 8211 }
   - { protocol: udp, host: 27015, container: 27015 }
@@ -15,6 +24,10 @@ env:
 config_files:               # editable from the Config button (example path; verify)
   - path: palworld/Pal/Saved/Config/LinuxServer/PalWorldSettings.ini
     label: Palworld settings
+    note: >-
+      The image regenerates this file from the server settings (name, players, passwords...) on every start. To keep
+      hand edits made here, set "Keep hand-edited settings file" to true in the server's Edit dialog after the first
+      full start.
     format: ini
     sensitive_keys: [AdminPassword, ServerPassword]
     # hot_edit: false  -> the server must be stopped before saving
@@ -24,3 +37,5 @@ fields:
   - { name: SERVER_PASSWORD, label: Server password, secret: true,
       description: Leave empty for no password. }
   - { name: ADMIN_PASSWORD, label: Admin password, secret: true, required: true }
+  - { name: DISABLE_GENERATE_SETTINGS, label: Keep hand-edited settings file, default: "false",
+      description: "false = the image rewrites PalWorldSettings.ini from these settings at every start. Set to true after the first full start to keep edits made in the config editor." }

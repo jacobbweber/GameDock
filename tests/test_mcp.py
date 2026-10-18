@@ -13,7 +13,7 @@ from tests.conftest import ADMIN
 from tests.mcp_helpers import call, make_app, run
 
 READ = {"list_catalog", "get_catalog_entry", "list_servers", "get_server_status", "get_server_stats",
-        "get_host_stats", "get_stats_history", "list_backups", "list_config_files", "read_config_file"}
+        "get_host_stats", "get_stats_history", "list_backups", "list_config_files", "read_config_file", "get_server_logs"}
 STANDARD = {"deploy_server", "start_server", "stop_server", "restart_server", "update_server_settings",
             "update_server_image", "create_backup", "write_config_file"}
 DESTRUCTIVE = {"delete_server", "restore_backup", "delete_backup", "wipe_server_data"}
