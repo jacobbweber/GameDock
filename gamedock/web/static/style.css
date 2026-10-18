@@ -78,3 +78,29 @@ label.check { display: flex; align-items: center; gap: 8px; font-size: 14px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
 .warn { color: #e3b341; font-size: 13.5px; }
 .card .actions { flex-wrap: wrap; }
+
+/* ---- step 3: wide panels, tables, editor ---- */
+dialog.wide { width: min(860px, 96vw); }
+.panel { padding: 20px 22px; display: flex; flex-direction: column; gap: 12px; max-height: 90vh; overflow: auto; }
+.panel h3 { margin: 0; font-size: 18px; }
+.hint { color: var(--muted); font-size: 13.5px; margin: 0; }
+.toolbar { display: flex; gap: 10px; align-items: center; }
+.okmsg { background: rgba(46,160,67,.14); border: 1px solid var(--green); color: #7ee787;
+  padding: 8px 12px; border-radius: 8px; font-size: 13.5px; }
+table.list { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+table.list th { text-align: left; color: var(--muted); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+table.list td { padding: 7px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+table.list code { font-size: 12.5px; word-break: break-all; }
+td.rowactions { white-space: nowrap; text-align: right; }
+td.rowactions button { padding: 4px 10px; margin-left: 6px; font-size: 13px; }
+.kind { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: rgba(110,118,129,.25); white-space: nowrap; }
+.kind.auto { background: rgba(210,153,34,.2); color: #e3b341; }
+.empty-small { color: var(--muted); text-align: center; margin: 14px 0; }
+textarea#config-text { width: 100%; font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px;
+  resize: vertical; white-space: pre; overflow: auto; }
+textarea#config-text:disabled { opacity: .6; }
+select { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border);
+  border-radius: 6px; padding: 7px 10px; width: 100%; }
+.card .actions.tools { margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--border); }
+.dialog-actions .spacer { flex: 1; }
