@@ -7,6 +7,7 @@ import uvicorn
 
 from .backends import make_backend
 from .config import Settings, load_dotenv
+from .hostcheck import port_free
 from .mcp_api import McpConfig
 from .sampler import Sampler
 from .service import GameDockService
@@ -17,10 +18,12 @@ log = logging.getLogger("gamedock")
 
 def build_app(settings: Settings | None = None):
     settings = settings or Settings.from_env()
-    service = GameDockService(make_backend(settings.backend), settings.catalog_dir, settings.data_dir,
+    service = GameDockService(make_backend(settings.backend, settings.stop_timeout), settings.catalog_dir,
+                              settings.data_dir,
                               backup_retention=settings.backup_retention,
                               stats_interval=settings.stats_interval,
-                              stats_history_seconds=settings.stats_history_seconds)
+                              stats_history_seconds=settings.stats_history_seconds,
+                              port_probe=port_free if settings.backend == "docker" else None)
     sampler = Sampler(service) if settings.stats_enabled else None
     return create_app(service, sampler=sampler, metrics_enabled=settings.metrics_enabled,
                       metrics_allow_remote=settings.metrics_allow_remote,

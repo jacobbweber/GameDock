@@ -21,7 +21,7 @@ from typing import Callable, Iterable, Iterator, Mapping
 
 from . import backups as bk
 from . import configfiles as cfg
-from .backends.base import ContainerBackend
+from .backends.base import ContainerBackend, DockerDiagnosis
 from .catalog import entry_to_dict, load_catalog, parse_definition
 from .hoststats import HostMeter
 from .errors import BackendError, ConflictError, GameDockError, NotFoundError, ValidationError
@@ -54,13 +54,20 @@ def slugify(name: str) -> str:
 class GameDockService:
     def __init__(self, backend: ContainerBackend, catalog_dir: Path, data_dir: Path,
                  backup_retention: int = 10, clock: Callable[[], datetime] | None = None,
-                 stats_interval: float = 10.0, stats_history_seconds: int = 3600) -> None:
+                 stats_interval: float = 10.0, stats_history_seconds: int = 3600,
+                 port_probe: Callable[[str, int], bool | None] | None = None) -> None:
+        """`port_probe(protocol, port)` returns False when the host port is taken by another program (checked
+        before a server starts); None/True mean "free or unknown". Tests leave it out."""
         self.backend = backend
         self.catalog_dir = Path(catalog_dir)
         self.data_dir = Path(data_dir)
         self.store = InstanceStore(self.data_dir / "instances.json")
         self.backup_retention = max(1, int(backup_retention))
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self.catalog_problems: list[tuple[str, str]] = []  # (file, problem) from the last catalog load
+        self._port_probe = port_probe
+        self._deploy_lock = Lock()  # deploys check names/ports and then store: do that one at a time
+        self._docker_cache: tuple[float, DockerDiagnosis] | None = None
         self._locks: dict[str, Lock] = {}
         self._locks_guard = Lock()
         # monitoring (all in memory)
@@ -91,8 +98,12 @@ class GameDockService:
 
     # ------------------------------------------------------------------ catalog
     def _catalog(self) -> dict[str, CatalogEntry]:
-        # Reloaded on each call so catalog edits show up without a restart.
-        return load_catalog(self.catalog_dir)
+        # Reloaded on each call so catalog edits show up without a restart. A broken file is skipped (and
+        # remembered in catalog_problems) so one typo does not hide every other game.
+        problems: list[tuple[str, str]] = []
+        entries = load_catalog(self.catalog_dir, errors=problems)
+        self.catalog_problems = problems
+        return entries
 
     def list_catalog(self) -> list[CatalogEntry]:
         return list(self._catalog().values())
@@ -241,6 +252,11 @@ class GameDockService:
     def deploy(self, game_id: str, name: str, ports: Iterable[PortMapping] | None = None,
                env: Mapping[str, str] | None = None, start: bool = False) -> ServerInfo:
         """Create a server from a catalog entry: store it and create its container (stopped)."""
+        with self._deploy_lock:
+            return self._deploy(game_id, name, ports, env, start)
+
+    def _deploy(self, game_id: str, name: str, ports: Iterable[PortMapping] | None,
+                env: Mapping[str, str] | None, start: bool) -> ServerInfo:
         t = self.get_catalog_entry(game_id)
         name = self._check_name(name)
         resolved = self._resolve_ports(t, ports)
@@ -257,7 +273,10 @@ class GameDockService:
         self.store.put(inst)
         if start:
             try:
+                self._check_host_ports(inst)
                 self.backend.start(spec.name)
+            except ConflictError as e:
+                raise ConflictError(f"Server '{name}' was deployed but could not be started: {e}") from e
             except BackendError as e:
                 raise BackendError(f"Server '{name}' was deployed but could not be started: {e}") from e
         return self._info(inst)
@@ -290,7 +309,33 @@ class GameDockService:
             return
         self._prepare_dirs(spec)
         self.backend.create(spec)
+        self._check_host_ports(inst)
         self.backend.start(spec.name)
+
+    def _check_host_ports(self, inst: Instance) -> None:
+        """Refuse to start if another program on this machine already holds one of the host ports."""
+        if self._port_probe is None:
+            return
+        for p in inst.ports:
+            if self._port_probe(p.protocol, p.host) is False:
+                raise ConflictError(
+                    f"Host port {p.host}/{p.protocol} is already in use on this machine by another program or "
+                    f"container, so '{inst.name}' cannot start. Edit the server to pick another port, or stop "
+                    "whatever uses it (find it with: sudo ss -lntup | grep :" + str(p.host) + ").")
+
+    def docker_status(self, max_age: float = 10.0) -> DockerDiagnosis:
+        """Can GameDock use the container engine right now? Cached briefly; never raises."""
+        import time
+        now = time.monotonic()
+        cached = self._docker_cache
+        if cached and now - cached[0] < max_age:
+            return cached[1]
+        try:
+            d = self.backend.diagnose()
+        except Exception as e:  # a broken backend must not break the status page
+            d = DockerDiagnosis(False, None, None, False, None, "error", f"Could not check Docker: {e}")
+        self._docker_cache = (now, d)
+        return d
 
     def _stop(self, inst: Instance) -> None:
         name = container_name(inst.id)

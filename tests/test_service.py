@@ -1,7 +1,8 @@
 import pytest
 
-from gamedock.errors import BackendError, ConflictError, NotFoundError, ValidationError
+from gamedock.errors import BackendError, ConflictError, GameDockError, NotFoundError, ValidationError
 from gamedock.models import PortMapping, Status
+from gamedock.service import GameDockService
 from tests.conftest import ADMIN
 
 
@@ -263,3 +264,76 @@ def test_delete_data_needs_second_confirmation(service, deployed, tmp_path):
 def test_delete_unknown(service):
     with pytest.raises(NotFoundError):
         service.delete("nope", confirm=True)
+
+
+# ------------------------------------------------------------------ review pass: store, ports, catalog
+def test_store_keeps_a_bak_and_explains_corruption(service, tmp_path):
+    service.deploy("sample", "One", env=ADMIN)
+    service.deploy("sample", "Two", env=ADMIN, ports=[PortMapping("udp", 27016, 27015)])
+    path = tmp_path / "data" / "instances.json"
+    bak = tmp_path / "data" / "instances.json.bak"
+    assert bak.is_file() and path.stat().st_mode & 0o777 == 0o600 and bak.stat().st_mode & 0o777 == 0o600
+    path.write_text("{ truncated")
+    with pytest.raises(GameDockError, match=r"instances\.json\.bak"):
+        service.list_servers()
+    bak.replace(path)  # the documented recovery
+    assert [s.id for s in service.list_servers()] == ["one"]
+
+
+def test_no_leftover_temp_files_after_saves(service, tmp_path):
+    service.deploy("sample", "One", env=ADMIN)
+    assert not list((tmp_path / "data").glob(".instances-*"))
+
+
+def test_start_refused_when_host_port_is_taken_by_something_else(backend, catalog_dir, tmp_path, clock):
+    taken = {("udp", 27015)}
+    svc = GameDockService(backend, catalog_dir, tmp_path / "data", clock=clock,
+                          port_probe=lambda proto, port: False if (proto, port) in taken else True)
+    svc.deploy("sample", "One", env=ADMIN)  # creating a container does not bind anything
+    with pytest.raises(ConflictError, match="27015/udp is already in use on this machine"):
+        svc.start("one")
+    assert svc.get_status("one").status.value != "running"
+    taken.add(("udp", 27016))
+    with pytest.raises(ConflictError, match="was deployed but could not be started"):
+        svc.deploy("sample", "Two", env=ADMIN, ports=[PortMapping("udp", 27016, 27015)], start=True)
+    assert [x.id for x in svc.list_servers()] == ["one", "two"]  # it was still created, just not started
+    taken.clear()
+    assert svc.start("one").status.value == "running"
+
+
+def test_port_probe_is_not_asked_for_a_server_that_already_runs(backend, catalog_dir, tmp_path, clock):
+    asked = []
+    svc = GameDockService(backend, catalog_dir, tmp_path / "data", clock=clock,
+                          port_probe=lambda p, n: asked.append((p, n)) or True)
+    svc.deploy("sample", "One", env=ADMIN)
+    svc.start("one")
+    asked.clear()
+    svc.start("one")  # already running: its own ports are of course in use
+    assert asked == []
+
+
+def test_broken_catalog_file_does_not_hide_the_good_ones(service, catalog_dir):
+    (catalog_dir / "broken.yaml").write_text("id: broken\nname: x\nimage: 'bad image name'\n")
+    (catalog_dir / "worse.yaml").write_text("{ nope")
+    assert [e.id for e in service.list_catalog()] == ["sample"]
+    problems = dict(service.catalog_problems)
+    assert "broken.yaml" in problems and "not a valid image name" in problems["broken.yaml"]
+    assert "worse.yaml" in problems
+    assert service.deploy("sample", "One", env=ADMIN).id == "one"  # deploying still works
+
+
+def test_concurrent_deploys_cannot_share_a_port(service):
+    import threading
+    results = []
+
+    def go(name):
+        try:
+            service.deploy("sample", name, env=ADMIN)
+            results.append("ok")
+        except ConflictError:
+            results.append("conflict")
+
+    ts = [threading.Thread(target=go, args=(f"S{i}",)) for i in range(4)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert results.count("ok") == 1 and results.count("conflict") == 3

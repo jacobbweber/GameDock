@@ -17,6 +17,20 @@ from .models import Instance, PortMapping
 FORMAT_VERSION = 1
 
 
+def _fsync_dir(path: Path) -> None:
+    """Make the rename itself durable (not possible on every platform; then it is skipped)."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 def _to_json(i: Instance) -> dict:
     return {
         "id": i.id, "name": i.name, "game_id": i.game_id, "template": i.template,
@@ -43,20 +57,34 @@ class InstanceStore:
         if not self.path.is_file():
             return {}
         try:
-            raw = json.loads(self.path.read_text())
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
             return {d["id"]: _from_json(d) for d in raw.get("instances", [])}
-        except (ValueError, KeyError, TypeError) as e:
-            raise GameDockError(f"Instance store {self.path} is unreadable: {e}") from e
+        except (ValueError, KeyError, TypeError, AttributeError, OSError) as e:
+            bak = self.path.with_name(self.path.name + ".bak")
+            hint = (f" The previous version is kept at {bak}. To go back to it: stop GameDock, copy that file over "
+                    f"{self.path}, start GameDock." if bak.is_file() else
+                    " There is no .bak copy; restore the file from your own backup or fix the JSON by hand.")
+            raise GameDockError(f"The list of deployed servers ({self.path}) is unreadable: {e}.{hint}") from e
 
     def _save(self, items: dict[str, Instance]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps({"version": FORMAT_VERSION, "instances": [_to_json(i) for i in items.values()]}, indent=2)
-        fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".instances-", suffix=".tmp")
+        fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".instances-", suffix=".tmp")  # created 0600
         try:
-            with os.fdopen(fd, "w") as f:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())  # data is on disk before the rename makes it the real file
             os.chmod(tmp, 0o600)
+            if self.path.is_file():  # keep the last good version (same 0600 mode: it holds secrets too)
+                bak = self.path.with_name(self.path.name + ".bak")
+                data = self.path.read_bytes()
+                bfd = os.open(bak, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # never briefly world-readable
+                with os.fdopen(bfd, "wb") as bf:
+                    bf.write(data)
+                os.chmod(bak, 0o600)
             os.replace(tmp, self.path)
+            _fsync_dir(self.path.parent)
         except BaseException:
             if os.path.exists(tmp):
                 os.unlink(tmp)

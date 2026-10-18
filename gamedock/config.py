@@ -11,7 +11,7 @@ def load_dotenv(path: str | Path = ".env") -> None:
     p = Path(path)
     if not p.is_file():
         return
-    for line in p.read_text().splitlines():
+    for line in p.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -46,6 +46,7 @@ class Settings:
     data_dir: Path = Path("data")
     backend: str = "docker"  # "docker" or "fake"
     backup_retention: int = 10  # keep the newest N backups per server
+    stop_timeout: int = 60  # seconds a game gets to save and exit when stopped (docker stop -t)
     stats_enabled: bool = True  # run the background sampler (history sparklines)
     stats_interval: float = 10.0  # seconds between samples
     stats_history_seconds: int = 3600  # how much history to keep in memory
@@ -76,6 +77,7 @@ class Settings:
             data_dir=Path(env.get("GAMEDOCK_DATA_DIR", "data")),
             backend=env.get("GAMEDOCK_BACKEND", "docker").lower(),
             backup_retention=max(1, int(env.get("GAMEDOCK_BACKUP_RETENTION", "10"))),
+            stop_timeout=min(600, max(5, int(env.get("GAMEDOCK_STOP_TIMEOUT", "60")))),
             stats_enabled=_bool(env.get("GAMEDOCK_STATS_ENABLED", "true")),
             stats_interval=min(300.0, max(2.0, float(env.get("GAMEDOCK_STATS_INTERVAL", "10")))),
             stats_history_seconds=min(86400, max(60, int(env.get("GAMEDOCK_STATS_HISTORY_SECONDS", "3600")))),

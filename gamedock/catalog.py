@@ -8,8 +8,8 @@ import yaml
 
 from .errors import CatalogError
 from .models import (
-    CONFIG_FORMATS, ENV_NAME_RE, ID_RE, UPDATE_METHODS, CatalogEntry, ConfigFile, EnvField, PortMapping,
-    VolumeMapping,
+    CONFIG_FORMATS, ENV_NAME_RE, ID_RE, IMAGE_RE, UPDATE_METHODS, CatalogEntry, ConfigFile, EnvField, PortMapping,
+    VolumeMapping, is_reserved_env_name,
 )
 
 
@@ -29,6 +29,9 @@ def _parse_port(p: object, source: str) -> PortMapping:
 def _parse_field(f: object, source: str) -> EnvField:
     if not isinstance(f, dict) or not isinstance(f.get("name"), str) or not ENV_NAME_RE.match(f["name"]):
         raise CatalogError(f"{source}: bad env field entry {f!r}")
+    if is_reserved_env_name(f["name"]):
+        raise CatalogError(f"{source}: '{f['name']}' is a reserved name (it would change how the docker command "
+                           "behaves) and cannot be used as a setting")
     return EnvField(
         name=f["name"],
         label=str(f.get("label") or f["name"]),
@@ -65,6 +68,9 @@ def parse_definition(data: object, source: str = "<definition>") -> CatalogEntry
     for key in ("id", "name", "image"):
         if not data.get(key) or not isinstance(data[key], str):
             raise CatalogError(f"{source}: missing or invalid '{key}'")
+    if not IMAGE_RE.match(data["image"]):
+        raise CatalogError(f"{source}: image {data['image']!r} is not a valid image name "
+                           "(letters, digits and . _ - / : @ only, no spaces)")
     gid = data["id"]
     if not ID_RE.match(gid):
         raise CatalogError(f"{source}: id '{gid}' must be lowercase letters, digits, '-' or '_'")
@@ -84,11 +90,22 @@ def parse_definition(data: object, source: str = "<definition>") -> CatalogEntry
             raise CatalogError(f"{source}: bad volume entry {v!r}") from e
         if ".." in Path(host).parts:
             raise CatalogError(f"{source}: volume host path may not contain '..': {host!r}")
+        if not host.strip() or "\0" in host or "\n" in host:
+            raise CatalogError(f"{source}: bad volume host path {host!r}")
+        if not cont.startswith("/") or "\0" in cont or "\n" in cont or ".." in PurePosixPath(cont).parts:
+            raise CatalogError(f"{source}: volume container path must be absolute (start with /): {cont!r}")
         volumes.append(VolumeMapping(host, cont))
 
     env = data.get("env") or {}
     if not isinstance(env, dict):
         raise CatalogError(f"{source}: 'env' must be a mapping")
+    for k, v in env.items():
+        if not ENV_NAME_RE.match(str(k)):
+            raise CatalogError(f"{source}: bad name in 'env': {k!r}")
+        if is_reserved_env_name(str(k)):
+            raise CatalogError(f"{source}: '{k}' in 'env' is a reserved name and cannot be used")
+        if any(c in str(v) for c in "\n\r\0"):
+            raise CatalogError(f"{source}: value of '{k}' in 'env' may not contain line breaks")
     fields = [_parse_field(f, source) for f in data.get("fields") or []]
     names = [f.name for f in fields]
     if len(set(names)) != len(names):
@@ -144,8 +161,12 @@ def entry_to_dict(e: CatalogEntry) -> dict:
     }
 
 
-def load_catalog(directory: Path) -> dict[str, CatalogEntry]:
-    """Return {id: entry} for every *.yaml/*.yml/*.json file in directory."""
+def load_catalog(directory: Path, errors: list[tuple[str, str]] | None = None) -> dict[str, CatalogEntry]:
+    """Return {id: entry} for every *.yaml/*.yml/*.json file in directory.
+
+    By default the first bad file raises CatalogError. If `errors` is given, bad files are skipped and
+    (file name, problem) is appended to it instead, so one typo cannot hide every game.
+    """
     defs: dict[str, CatalogEntry] = {}
     directory = Path(directory)
     if not directory.is_dir():
@@ -153,11 +174,19 @@ def load_catalog(directory: Path) -> dict[str, CatalogEntry]:
     files = sorted([*directory.glob("*.yaml"), *directory.glob("*.yml"), *directory.glob("*.json")])
     for f in files:
         try:
-            data = yaml.safe_load(f.read_text())  # JSON is valid YAML
-        except yaml.YAMLError as e:
-            raise CatalogError(f"{f.name}: invalid YAML/JSON: {e}") from e
-        d = parse_definition(data, f.name)
-        if d.id in defs:
-            raise CatalogError(f"{f.name}: duplicate game id '{d.id}'")
+            try:
+                data = yaml.safe_load(f.read_text(encoding="utf-8"))  # JSON is valid YAML
+            except yaml.YAMLError as e:
+                raise CatalogError(f"{f.name}: invalid YAML/JSON: {e}") from e
+            except (UnicodeDecodeError, OSError) as e:
+                raise CatalogError(f"{f.name}: cannot read the file as UTF-8 text: {e}") from e
+            d = parse_definition(data, f.name)
+            if d.id in defs:
+                raise CatalogError(f"{f.name}: duplicate game id '{d.id}'")
+        except CatalogError as e:
+            if errors is None:
+                raise
+            errors.append((f.name, str(e)))
+            continue
         defs[d.id] = d
     return defs
