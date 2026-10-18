@@ -135,7 +135,7 @@ class GameDockService:
             for f in t.fields
         )
         return ServerInfo(inst.id, inst.name, inst.game_id, t.name, t.image, t.description,
-                          status, inst.ports, env, detail, inst.created_at)
+                          status, inst.ports, env, detail, inst.created_at, t.update_method, len(t.config_files))
 
     # --------------------------------------------------------------- validation
     @staticmethod

@@ -132,6 +132,8 @@ class ServerInfo:
     env: tuple[EnvValue, ...] = ()
     detail: str = ""  # e.g. an error message
     created_at: str = ""
+    update_method: str = "pull_recreate"
+    config_file_count: int = 0
 
 
 # ----------------------------------------------------------------------- operation results

@@ -15,7 +15,8 @@ log = logging.getLogger("gamedock")
 
 def build_app(settings: Settings | None = None):
     settings = settings or Settings.from_env()
-    service = GameDockService(make_backend(settings.backend), settings.catalog_dir, settings.data_dir)
+    service = GameDockService(make_backend(settings.backend), settings.catalog_dir, settings.data_dir,
+                              backup_retention=settings.backup_retention)
     return create_app(service)
 
 

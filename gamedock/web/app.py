@@ -12,7 +12,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .. import __version__
-from ..errors import BackendError, CatalogError, ConflictError, GameDockError, NotFoundError
+from ..errors import (
+    AccessError, BackendError, CatalogError, ConflictError, GameDockError, NotFoundError, OperationError,
+    TooLargeError,
+)
 from ..models import CatalogEntry, PortMapping, ServerInfo
 from ..service import GameDockService
 
@@ -29,6 +32,9 @@ def catalog_to_dict(e: CatalogEntry) -> dict:
     return {
         "id": e.id, "name": e.name, "image": e.image, "description": e.description, "notes": e.notes,
         "ports": [asdict(p) for p in e.ports],
+        "update_method": e.update_method,
+        "config_files": [{"path": c.path, "label": c.label, "format": c.format, "hot_edit": c.hot_edit}
+                         for c in e.config_files],
         "fields": [asdict(f) for f in e.fields],  # defaults of secret fields are not secret values
     }
 
@@ -45,6 +51,15 @@ class DeployIn(BaseModel):
     ports: list[PortIn] = []
     env: dict[str, str] = {}
     start: bool = False
+
+
+class BackupIn(BaseModel):
+    live: bool = False  # back up a running server without stopping it (may be inconsistent)
+
+
+class ConfigWriteIn(BaseModel):
+    path: str
+    content: str
 
 
 class UpdateIn(BaseModel):
@@ -78,6 +93,18 @@ def create_app(service: GameDockService) -> FastAPI:
     @app.exception_handler(ConflictError)
     async def _co(_: Request, e: ConflictError):
         return JSONResponse({"error": str(e)}, status_code=409)
+
+    @app.exception_handler(AccessError)
+    async def _ae(_: Request, e: AccessError):
+        return JSONResponse({"error": str(e)}, status_code=403)
+
+    @app.exception_handler(TooLargeError)
+    async def _tl(_: Request, e: TooLargeError):
+        return JSONResponse({"error": str(e)}, status_code=413)
+
+    @app.exception_handler(OperationError)
+    async def _oe(_: Request, e: OperationError):
+        return JSONResponse({"error": str(e)}, status_code=500)
 
     @app.exception_handler(RequestValidationError)
     async def _rv(_: Request, e: RequestValidationError):
@@ -126,8 +153,55 @@ def create_app(service: GameDockService) -> FastAPI:
     @app.delete("/api/servers/{server_id}")
     def delete_server(server_id: str, confirm: bool = False, delete_data: bool = False,
                       confirm_delete_data: bool = False):
-        service.delete(server_id, confirm, delete_data, confirm_delete_data)
-        return {"deleted": server_id, "data_kept": True}
+        r = service.delete(server_id, confirm, delete_data, confirm_delete_data)
+        return {"deleted": r.deleted, "data_kept": not r.data_deleted, "data_deleted": r.data_deleted,
+                "backup": r.backup.name if r.backup else None,
+                "backup_location": r.backup.path if r.backup else None, "note": r.note}
+
+    # ---- backups
+    @app.get("/api/servers/{server_id}/backups")
+    def list_backups(server_id: str):
+        return {"retention": service.backup_retention,
+                "backups": [asdict(b) for b in service.list_backups(server_id)]}
+
+    @app.post("/api/servers/{server_id}/backups", status_code=201)
+    def create_backup(server_id: str, body: BackupIn | None = None):
+        return asdict(service.create_backup(server_id, live=body.live if body else False))
+
+    @app.post("/api/servers/{server_id}/backups/{name}/restore")
+    def restore_backup(server_id: str, name: str, confirm: bool = False):
+        return asdict(service.restore_backup(server_id, name, confirm))
+
+    @app.delete("/api/servers/{server_id}/backups/{name}")
+    def delete_backup(server_id: str, name: str, confirm: bool = False):
+        service.delete_backup(server_id, name, confirm)
+        return {"deleted": name}
+
+    @app.post("/api/servers/{server_id}/wipe-data")
+    def wipe_data(server_id: str, confirm: bool = False):
+        return asdict(service.wipe_data(server_id, confirm))
+
+    # ---- image updates
+    @app.get("/api/servers/{server_id}/image")
+    def image_info(server_id: str):
+        return asdict(service.get_image_info(server_id))
+
+    @app.post("/api/servers/{server_id}/update-image")
+    def update_image(server_id: str, confirm: bool = False):
+        return asdict(service.update_server_image(server_id, confirm))
+
+    # ---- config files
+    @app.get("/api/servers/{server_id}/config")
+    def list_config(server_id: str):
+        return [asdict(c) for c in service.list_config_files(server_id)]
+
+    @app.get("/api/servers/{server_id}/config/file")
+    def read_config(server_id: str, path: str):
+        return asdict(service.read_config_file(server_id, path))
+
+    @app.put("/api/servers/{server_id}/config/file")
+    def write_config(server_id: str, body: ConfigWriteIn):
+        return asdict(service.write_config_file(server_id, body.path, body.content))
 
     @app.get("/api/servers/{server_id}")
     def get_server(server_id: str):
