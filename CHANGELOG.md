@@ -2,7 +2,37 @@
 
 All notable changes. Dates are 2026.
 
-## Unreleased: review and polish pass
+## 0.2.0: progress, honest readiness, logs and a settings form
+
+Driven by the first real test (deploying Palworld): the deploy button greyed out with no feedback for 30 seconds, the dashboard said "Running" while the game was still downloading about 5 GB (so joining timed out), there was no way to see logs, and the config file was one huge line.
+
+### Added
+
+- **Progress everywhere.** Clicking Deploy shows a "Deploying" tile at once (a fast validation error still stays in the form). Start, stop, restart, update, backup, restore, wipe and delete show a spinner, a bar and a plain sentence on the card and in their dialogs. The "Working" badge is larger, animated and has a coloured border. The tile updates in place, so animations do not restart on every refresh. The server also reports what it is doing (`activity`), so a page reload or an MCP client sees it too.
+- **Readiness: Starting / Installing NN% / Ready to join.** Based on Docker's `State.Health.Status`, and for images without a health check on two optional catalog fields, `ready_log_pattern` and `progress_log_pattern` (one capture group = the percentage). With neither, behaviour is as before (Running = ready), except that a visible download below 100% still counts as installing. A download in progress outranks an `unhealthy` health check (Palworld's check goes unhealthy during a long first download). Exposed as `ready`, `phase`, `progress`, `phase_detail`, `activity` in the API, in the MCP `list_servers` / `get_server_status`, on the dashboard tile and in the log viewer header. Log reads are throttled (2 s per server) and skipped for healthy containers.
+- **Log viewer.** **Logs** button on each server: 100 to 1000 lines (200 default), Follow (3 s), Refresh, Copy, ANSI colours removed, carriage-return progress lines collapsed, secret values masked. `GET /api/servers/{id}/logs`, backend method `get_logs` (Docker and fake), MCP tool `get_server_logs` (read-only; in `read_only`, `standard` and `full` modes; 100 lines default, 500 max, 40 000 characters max). Tool counts are now 11 (`read_only`), 19 (`standard`), 23 (`full`).
+- **Settings form for config files.** Form view with labelled fields, switches for True/False, number and text inputs, password inputs for `sensitive_keys`, search, "Only changed" filter, highlighted changes with `was:` and Undo, a review list, and a toggle to the raw text. Parsers for Palworld-style `OptionSettings=(...)` (commas and escaped quotes inside quoted values, nested lists), `key=value` ini / properties (sections, comments) and flat JSON. Edits replace only the changed value's characters, so the rest of the file is preserved byte for byte. New read-only endpoint `POST /api/servers/{id}/config/form`. Saving uses the existing path, so `.bak` copies, traversal protection, secret masking and `hot_edit` are unchanged.
+- The raw editor wraps long lines (it used to be one endless line).
+- Catalog: `ready_log_pattern`, `progress_log_pattern` (validated at load time) and `note` on config files (warning above the editor). Palworld and Enshrouded entries use them. Palworld also gets a `DISABLE_GENERATE_SETTINGS` field ("Keep hand-edited settings file"), because that image rewrites `PalWorldSettings.ini` from environment variables on every start.
+- A missing settings file now says: "This game has not created its settings file yet; it appears after the first full start."
+- `scripts/make_screenshots.py`: browser smoke test and screenshots on the fake backend.
+- Screenshots: `docs/gamedock-020-*.png`.
+
+### Changed
+
+- Version 0.2.0 (`pyproject.toml`, `/api/health`).
+- Backend `inspect` format also returns health and start time; `ContainerBackend` has a new `get_logs` method (a custom backend must add it).
+- The dashboard keeps refreshing while an action runs or a dialog is open.
+
+### Known gaps
+
+- The ready / progress patterns are written from the images' documentation, not yet checked against real logs on a real machine. The Enshrouded pattern in particular is unverified.
+- The real Docker backend (health, `docker logs --since`) is covered by command tests and fake `docker` scripts, not a real engine.
+- A server deployed before this version keeps its old template: redeploy (or recreate it) to get new catalog fields such as `DISABLE_GENERATE_SETTINGS`. Readiness patterns are read from the current catalog, so they work for existing servers straight away.
+- The MCP `write_config_file` tool is still text based; only the web page has the form view.
+- Patterns are regular expressions written by whoever authors a catalog entry (trusted input, like the rest of the catalog).
+
+## 0.1.x: review and polish pass
 
 ### Fixed (found in review of the real Docker backend, which has not yet run against a real engine)
 
@@ -36,7 +66,7 @@ All notable changes. Dates are 2026.
 ### Known limits
 
 - The real Docker backend is covered by command-construction tests and fake `docker` scripts, not yet by a real engine.
-- No login or TLS; no `docker logs` viewer; SELinux relabeling is not handled; Linux hosts only.
+- No login or TLS; SELinux relabeling is not handled; Linux hosts only.
 
 ## 0.1.0 (steps 1 to 5)
 

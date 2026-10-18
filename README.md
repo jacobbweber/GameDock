@@ -6,17 +6,23 @@ It is not tied to one machine or one game. A game is just a small YAML file in `
 
 ![Dashboard](docs/gamedock-polish-dashboard.png)
 
+A server that is still downloading its game files shows **Installing 52%** instead of "Running", with a bar:
+
+![Installing](docs/gamedock-020-installing.png)
+
 **What you get**
 
 - A catalog of game templates; deploy several servers of the same game on different ports.
-- Start / stop / restart, edit settings, update the image, delete safely.
+- Start / stop / restart, edit settings, update the image, delete safely. Every action shows what it is doing (spinner and bar) from the first click.
+- Honest status: **Starting**, **Installing NN%** and **Ready to join**, not just "Running" (see [Ready versus running](#ready-versus-running)).
+- A log viewer for each server (last 200 lines, follow mode, copy).
 - Backups and restore of each server's data folder (always a safety backup first).
-- A text editor for the game's config files, with passwords hidden.
+- An editor for the game's config files: a form with labelled fields, switches and hidden passwords, or the raw text. Changed fields are highlighted before you save.
 - Live CPU, memory and network per game, plus host totals. No database needed.
 - A **Health** page and a `doctor` command that tell you in plain language what is wrong and how to fix it.
 - An optional MCP endpoint for AI agents (read-only, standard or full mode, with two-step confirmation for anything destructive).
 
-**Version:** 0.1.0. See [CHANGELOG.md](CHANGELOG.md). How it is built: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+**Version:** 0.2.0. See [CHANGELOG.md](CHANGELOG.md). How it is built: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Quick start
 
@@ -75,6 +81,27 @@ Set these as environment variables or in a `.env` file in the folder you start G
 3. Tick **Start after deploy** if you want it running right away. Deploy creates the container either way. The first deploy of a game downloads its image, which can take a while for big games.
 4. On the **Dashboard**: Start / Stop / Restart, **Edit** (the server must be stopped; its container is recreated; leave a password blank to keep the stored one) and **Delete**.
 5. If something looks wrong, open **Health**. A red banner at the top of every page appears when Docker is not reachable.
+
+## Ready versus running
+
+Docker says a container is "running" as soon as its process starts, but many games then spend minutes downloading or generating files and cannot be joined yet. GameDock therefore reports a phase for every running server:
+
+| Phase | Meaning |
+|---|---|
+| **Starting** | The container is up but the game is not ready (health check still `starting`, or the ready line has not appeared). |
+| **Installing NN%** | The game is downloading its files and the log shows a percentage (SteamCMD prints lines such as `Update state (0x61) downloading, progress: 51.68`). It cannot be joined yet. |
+| **Ready to join** | Docker's health check says `healthy`, or the catalog's `ready_log_pattern` was seen in the log. |
+| **Unhealthy** | The health check says `unhealthy` and no download is in progress. |
+
+How it is decided, in order: (1) `State.Health.Status` from Docker if the image has a health check; (2) otherwise, or in addition, the catalog's optional `ready_log_pattern` (a regular expression searched in the log since the container started); (3) a download percentage from `progress_log_pattern` (one capture group) in the recent log lines keeps the server in **Installing** even when the health check has already gone `unhealthy` (some images give up on the health check during a long first download); (4) an image with no health check, no pattern and no download in its log is reported **Ready** as soon as it runs, as before. Healthy servers cost no log reads, and logs of the others are read at most every 2 seconds per server.
+
+While GameDock itself is doing something to a server (deploying, starting, stopping, restarting, updating, backing up, restoring, wiping, saving settings) the card, the API (`activity`) and the MCP status tools say so, even after a page reload. A deploy shows a "Deploying" tile immediately while the image downloads.
+
+## Logs
+
+Press **Logs** on a server card for the end of its container log: 100 / 200 / 500 / 1000 lines, **Follow** (refreshes every 3 seconds, stays scrolled to the end), **Refresh** and **Copy**. Colour codes are removed and progress lines that rewrite themselves with carriage returns are shown once. Values of the server's secret settings are replaced by `********` if they appear in the log. Also available as `GET /api/servers/{id}/logs?lines=200` and the MCP tool `get_server_logs` (read-only, 100 lines by default, at most 500 lines and 40 000 characters).
+
+![Log viewer](docs/gamedock-020-logs.png)
 
 ## Health check (`doctor`)
 
@@ -165,6 +192,12 @@ A catalog entry can declare config files; each server then gets a **Config** but
 - Every save first copies the old file to `<name>.<timestamp>.bak` beside it (the newest 10 are kept) and then replaces it atomically.
 - Saving is refused while the server runs unless the catalog marks the file `hot_edit: true`. Most games need a restart to pick up changes; the editor says so.
 - `sensitive_keys` values (passwords) are shown as `********`. Leave the placeholder to keep the real value; type over it to change it. Works for `key=value`, `key: value`, JSON and inline `Key="value"` styles.
+- **Settings form and raw text.** For files in a format GameDock understands, the editor opens as a form: one labelled row per setting (the file's own key is shown under the label), a switch for `True` / `False`, number and text inputs, password inputs for `sensitive_keys`, a search box and an **Only changed** filter. Changed rows are highlighted, show `was: ...` with an **Undo** button, and are listed in a review box before you save. A toggle switches to the raw text at any time. Understood formats: Palworld-style `OptionSettings=(Key=Value,...)` (quoted values with commas, escaped quotes and nested `(a,b)` lists), `key=value` ini / properties files (with `[sections]`), and flat JSON. Only the characters of values you changed are replaced, so everything else in the file (comments, order, spacing, unusual quoting) stays byte-for-byte the same. A file in another format simply opens as raw text.
+- The form only prepares the new text; saving still goes through the same checks as the raw editor (`.bak` copy, path rules, masking, `hot_edit`).
+- If the game has not created its settings file yet, the editor says: "This game has not created its settings file yet; it appears after the first full start." (You can still write the file yourself.)
+- Some images regenerate the file from environment variables on every start (Palworld does, unless `DISABLE_GENERATE_SETTINGS=true`). A catalog `note` on the config file shows such a warning above the editor.
+
+![Settings form](docs/gamedock-020-config-form.png)
 
 ## Adding a game to the catalog
 
@@ -185,16 +218,21 @@ volumes:
 env:                     # fixed values, not editable in the deploy form
   SOME_FLAG: "1"
 update_method: pull_recreate   # default; or 'none' if the game updates itself
+ready_log_pattern: "Server is ready"   # optional regex: when this appears in the log the server is Ready
+progress_log_pattern: "progress: *([0-9.]+)"   # optional regex with exactly ONE group: the download percentage
 config_files:            # files users may edit (relative to the server's data folder)
   - path: saves/settings.ini
     label: Settings
     format: ini          # ini | json | yaml | text (json is validated)
     sensitive_keys: [AdminPassword]
     hot_edit: false      # true = safe to edit while running
+    note: "Shown above the editor, e.g. a warning that the image rewrites this file on start."
 fields:                  # settings shown in the deploy/edit form
   - { name: SERVER_NAME, label: Server name, default: "My Server", required: true }
   - { name: SERVER_PASSWORD, label: Password, secret: true }   # secret = password input
 ```
+
+`ready_log_pattern` and `progress_log_pattern` are optional and only matter for images that take a while to become joinable; if the image has a Docker `HEALTHCHECK` that already says `healthy` at the right moment, you do not need them. Both are checked when the catalog loads (valid regex, one line, at most 300 characters; the progress pattern needs exactly one capture group). Find the right lines with the **Logs** button after a first start. The Palworld and Enshrouded entries are examples.
 
 ### Worked example: the smoke-test entry
 
@@ -245,7 +283,7 @@ GameDock serves a [Model Context Protocol](https://modelcontextprotocol.io) endp
 | Mode | Tools served |
 |---|---|
 | `off` | none (`/mcp` answers 404 with an explanation) |
-| `read_only` | `list_catalog`, `get_catalog_entry`, `list_servers`, `get_server_status`, `get_server_stats`, `get_host_stats`, `get_stats_history`, `list_backups`, `list_config_files`, `read_config_file` |
+| `read_only` | `list_catalog`, `get_catalog_entry`, `list_servers`, `get_server_status`, `get_server_stats`, `get_host_stats`, `get_stats_history`, `list_backups`, `list_config_files`, `read_config_file`, `get_server_logs` |
 | `standard` (default) | read-only tools plus `deploy_server`, `start_server`, `stop_server`, `restart_server`, `update_server_settings`, `update_server_image`, `create_backup`, `write_config_file` |
 | `full` | standard plus the destructive tools `delete_server`, `restore_backup`, `delete_backup`, `wipe_server_data` |
 
@@ -362,7 +400,8 @@ Start with `python -m gamedock doctor` (or the Health page). It names most of th
 | "A container named ... was not created by GameDock" | A container with that name already exists | Rename or remove it with `docker`, or name the server differently. GameDock will not touch it. |
 | Backup or restore says "permission denied", or Config cannot be saved | The game container wrote files as root (or another user) | Run the `chown` command shown in the message once. To stop it coming back, give the game your user id with its `PUID` / `PGID` settings (use the numbers from `id -u` and `id -g`). |
 | "No space left on device" | The disk holding the data folder is full | Free space, or lower `GAMEDOCK_BACKUP_RETENTION`. |
-| Server shows "exited unexpectedly (exit code N)" | The game crashed or has a bad setting | Run `docker logs gamedock-<server id>` and read the last lines. |
+| Server says "Installing" or "Starting" for a long time | The game is downloading or generating files (Palworld downloads about 5 GB on first start) | Press **Logs** to watch it. Join once it says **Ready to join**. |
+| Server shows "exited unexpectedly (exit code N)" | The game crashed or has a bad setting | Press **Logs** on the card (or run `docker logs gamedock-<server id>`) and read the last lines. |
 | Browser says "421 Host not allowed" | You opened GameDock by a name it does not know | Add it to `GAMEDOCK_ALLOWED_HOSTS` (e.g. `gamedock.lan:8080`). Using `localhost` or `127.0.0.1` always works. |
 | MCP page says "Off" although you set a mode | GameDock is not bound to localhost and has no token | Set `GAMEDOCK_MCP_TOKEN`, or bind to `127.0.0.1`. |
 | "instances.json is damaged" | The list of servers cannot be read | Copy `data/instances.json.bak` over it (the message shows the exact path). Containers are not affected. |
@@ -385,7 +424,9 @@ Start with `python -m gamedock doctor` (or the Health page). It names most of th
 | POST | `/api/servers/{id}/wipe-data?confirm=true` | empty the data folder (backup first) |
 | GET | `/api/servers/{id}/image` | image name and current image id |
 | POST | `/api/servers/{id}/update-image?confirm=true` | update the image |
+| GET | `/api/servers/{id}/logs?lines=200` | end of the container log (ANSI removed, secrets masked; 1 to 1000 lines) |
 | GET | `/api/servers/{id}/config` | declared config files |
+| POST | `/api/servers/{id}/config/form` | read-only: `{path, content?, changes?}` returns the form fields, or the new file text for `changes` (nothing is written) |
 | GET / PUT | `/api/servers/{id}/config/file?path=...` | read (masked) / save `{path, content}` |
 | GET | `/api/stats?sort=cpu\|memory\|name` | host totals and every server's numbers (latest sample) |
 | GET | `/api/stats/host` | host totals, read live |
@@ -409,6 +450,8 @@ gamedock/
   store.py         persistent JSON store of deployed servers (atomic, fsync, .bak)
   backups.py       backup archives: create, list, restore, prune
   configfiles.py   safe config file read/write, masking, .bak copies
+  configforms.py   turns a config file into form fields and back (OptionSettings, key=value, JSON), byte-exact
+  readiness.py     Starting / Installing NN% / Ready decision from health status and log lines
   hoststats.py     host CPU / memory / disk from /proc and shutil
   hostcheck.py     port probe, free space, file-owner scan
   doctor.py        the health checks (CLI, API and UI share them)
@@ -423,6 +466,7 @@ catalog/           game templates (examples plus the smoke test)
 deploy/            example systemd units and settings file (not installed anywhere)
 docs/              architecture, deployment, first-test checklist, screenshots
 tests/             pytest suite (no Docker needed)
+scripts/           make_screenshots.py: browser smoke test + screenshots on the fake backend (needs Playwright)
 ```
 
 ## Tests

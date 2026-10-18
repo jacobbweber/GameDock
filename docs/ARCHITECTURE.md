@@ -20,6 +20,8 @@ flowchart LR
         Service --> Store["store.py<br/>instances.json (atomic, 0600, .bak)"]
         Service --> Backups["backups.py<br/>tar.gz archives"]
         Service --> Config["configfiles.py<br/>safe config editing"]
+        Service --> Forms["configforms.py<br/>settings form <-> file text"]
+        Service --> Ready["readiness.py<br/>Starting / Installing / Ready"]
         Service --> Backend{{"ContainerBackend"}}
         Sampler["sampler.py<br/>background stats thread"] --> Backend
         Web --> Sampler
@@ -50,6 +52,13 @@ flowchart LR
 - **A server keeps a copy of its template.** Editing a catalog file later cannot break servers that already exist.
 - **Friendly failures.** Docker errors are translated into a plain sentence plus the fix (daemon down, no permission, port in use, disk full, image not found, wrong CPU type, name taken). The doctor reuses the same text.
 
+## Readiness, activity and logs
+
+- **`readiness.py`** is pure logic: `decide(health, has_ready_pattern, ready_seen, progress)` returns a phase (`starting`, `installing`, `ready`, `unhealthy`), an optional percentage and a plain sentence. Docker's `State.Health.Status` comes from the backend; the log is only read when it is needed (never for a healthy container), at most every `READINESS_TTL` (2 s) per server, always limited to lines since the container's `StartedAt` so output of an earlier run cannot count. A found ready line is remembered per container start. A download percentage only counts if it is in the most recent log lines.
+- **Activity.** `service._operation` records what GameDock is doing to a server (deploying, stopping, backing up, ...) while it holds the server's lock. `list_servers` and `get_status` include it, plus a placeholder entry for a deploy that has not created its container yet, so the page, a reload and MCP clients all see the same thing. Action responses do not include it.
+- **Logs.** `ContainerBackend.get_logs(name, tail, since)` is implemented by `docker logs` (argument list, `since` validated, tail capped) and by the fake backend. The service cleans the text (ANSI, carriage-return progress lines), masks the server's secret values and reports whether it was cut.
+- **`configforms.py`** scans a config file into fields with character spans and rewrites only the spans of changed values, so untouched text is preserved exactly. It never writes anything: the web page asks the read-only `config/form` endpoint for the new text and saves it through `write_config_file`, which keeps all the safety rules (masking, `.bak`, path checks, `hot_edit`) in one place.
+
 ## Where things are stored
 
 | What | Where |
@@ -69,5 +78,7 @@ flowchart LR
 5. The result (or a friendly error) goes back up and the page redraws the card.
 
 ## Testing
+
+`scripts/make_screenshots.py` starts the real app on the fake backend and drives it with a headless browser (Playwright, not part of the normal test run); it doubles as a browser smoke test for the progress UI, log viewer and config form.
 
 `tests/` runs without Docker. The engine is the in-memory fake; the Docker command is checked by recording the exact argument lists it would run, and by tiny fake `docker` shell scripts that simulate "daemon down" and "permission denied". The real engine is exercised for the first time in [NIMO_FIRST_TEST.md](NIMO_FIRST_TEST.md).
