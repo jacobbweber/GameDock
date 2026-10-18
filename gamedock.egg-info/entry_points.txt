@@ -1,2 +1,0 @@
-[console_scripts]
-gamedock = gamedock.__main__:main

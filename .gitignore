@@ -8,3 +8,5 @@ __pycache__/
 data/
 backups/
 *.log
+*.egg-info/
+.pytest_cache/
