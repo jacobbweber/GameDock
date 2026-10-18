@@ -10,6 +10,8 @@ A server that is still downloading its game files shows **Installing 52%** inste
 
 ![Installing](docs/gamedock-020-installing.png)
 
+**New in 0.6.1:** a stuck server now says *why*. When the logs show a known failure (for example Steam rejecting a game server login token) the card and Check setup show it in plain words with the next step; games can add their own explanations (`fail_log_patterns`, `log_files`) and settings can check their shape (`pattern`). The updater also copes with a catalog file that is in the way. See the [CHANGELOG](CHANGELOG.md).
+
 **New in 0.6.0:** troubleshooting and review tools, built from a real AI-agent review (AutoReiv adding ASKA). Each server card has a **Check setup** button: a read-only checklist of what is right and wrong (container, ready line, game version and Steam app id, config files, ports, folders, required settings), with the concrete fix for each problem and a **Copy diagnostics** button (passwords hidden) for pasting into a chat. The Deploy dialog warns, as you type, when a host port is already used by another server or another program, and offers a free one. AI agents get matching read-only tools (`verify_game_setup`, `check_ports`, `preview_deploy`, `get_server_diagnostics`, `get_catalog_review_status`, `get_mcp_audit`), `inspect_image` now says which tags exist when a tag is wrong, and `validate_catalog_entry` catches more mistakes before a person has to.
 
 ![Check setup dialog](docs/gamedock-060-check-setup.png)
@@ -45,9 +47,10 @@ A server that is still downloading its game files shows **Installing 52%** inste
 - A **Health** page and a `doctor` command that tell you in plain language what is wrong and how to fix it.
 - A step-by-step guide for adding new games ([docs/ADDING_A_GAME.md](docs/ADDING_A_GAME.md)), a template (`catalog/_template.yaml`), and MCP tools so an AI agent can research, validate and add an entry that you then review and approve.
 - **Check setup** and **Copy diagnostics** on every server, port-conflict warnings in the Deploy dialog, and an MCP audit section ([Troubleshooting a server](#troubleshooting-a-server)).
+- **Known problems**: when a server is stuck, the card and Check setup say why in plain words (for example "Steam rejected the login token") with the next step, from the game's catalog entry and built-in patterns ([Ready versus running](#ready-versus-running)).
 - An optional MCP endpoint for AI agents (read-only, standard or full mode, with two-step confirmation for anything destructive).
 
-**Version:** 0.6.0. See [CHANGELOG.md](CHANGELOG.md). How it is built: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+**Version:** 0.6.1. See [CHANGELOG.md](CHANGELOG.md). How it is built: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Quick start
 
@@ -121,9 +124,12 @@ Docker says a container is "running" as soon as its process starts, but many gam
 | **Starting** | The container is up but the game is not ready (health check still `starting`, or the ready line has not appeared). |
 | **Installing NN%** | The game is downloading its files and the log shows a percentage (SteamCMD prints lines such as `Update state (0x61) downloading, progress: 51.68`). It cannot be joined yet. |
 | **Ready to join** | Docker's health check says `healthy`, or the catalog's `ready_log_pattern` was seen in the log. |
-| **Unhealthy** | The health check says `unhealthy` and no download is in progress. |
+| **Unhealthy** | The health check says `unhealthy` and no download is in progress. Docker only says so after the image's start period and its retries, so the game really is not answering. |
+| **Problem** | A server that is Starting, Installing or Unhealthy and whose logs show a known failure (for example "Steam rejected the login token"). The card shows what went wrong, what to do next and the one log line it saw. See *Known problems* below. |
 
 How it is decided, in order: (1) `State.Health.Status` from Docker if the image has a health check; (2) otherwise, or in addition, the catalog's optional `ready_log_pattern` (a regular expression searched in the log since the container started); (3) a download percentage from `progress_log_pattern` (one capture group) in the recent log lines keeps the server in **Installing** even when the health check has already gone `unhealthy` (some images give up on the health check during a long first download); (4) an image with no health check, no pattern and no download in its log is reported **Ready** as soon as it runs, as before. Healthy servers cost no log reads, and logs of the others are read at most every 2 seconds per server.
+
+**Known problems.** While a server runs but is not ready, GameDock reads its newest container log lines (and the game's own log files, when the catalog entry names them in `log_files`) and looks for known failures. The catalog entry's `fail_log_patterns` (a plain title and a next step per failure) come first, then built-in patterns that apply to every game unless the entry says `builtin_fail_patterns: false`: out of memory, a port already in use, permission denied on the data folder, a full disk, SteamCMD errors (`state is 0x202`, `No subscription`, `Missing configuration`, `Failed to install`) and a refused Steam login. The first matching pattern wins and the newest matching line is shown, with passwords and tokens hidden. A log file only counts if it was written during the current run. A container that Docker killed for memory also shows the problem on its stopped card (an exit code 137 alone is shown only in Check setup, because a slow stop looks the same). The same problem is in the API (`problem` on every server), Check setup (a *Known problem* row at the top), diagnostics, and the MCP tools `list_servers`, `get_server_status`, `verify_game_setup` and `get_server_diagnostics`. If nothing matches, an unhealthy card says so plainly and points to **Logs** and **Check setup**. The patterns only describe how to read logs, so existing servers use the current catalog entry's patterns without being deployed again.
 
 While GameDock itself is doing something to a server (deploying, starting, stopping, restarting, updating, backing up, restoring, wiping, saving settings) the card, the API (`activity`) and the MCP status tools say so, even after a page reload. A deploy shows a "Deploying" tile immediately while the image downloads.
 
@@ -228,6 +234,8 @@ The header shows `Version 0.3.0 (abc1234)`: the version and the short git commit
 - the pull would not be a plain fast-forward (you have your own commits);
 - the update changes the packages GameDock needs (`requirements.txt`, or the dependency lines of `pyproject.toml`; a change of only the version line is fine from 0.4.0 on); it then tells you to run `.venv/bin/pip install -e .` by hand first.
 
+A file in the way: if an update adds a catalog file (`catalog/<game>.yaml`) and the install folder already has an untracked file of that name (for example a game an AI agent saved there earlier), a plain `git pull` would stop with "untracked working tree files would be overwritten". Since 0.6.1 the updater first moves such a file to `<data folder>/catalog-displaced/<file>.<time>` (an identical file is simply replaced), pulls, and tells you where your copy is; if the pull fails the file is put back. Only plain files directly in `catalog/` are ever moved, never a symbolic link or a tracked file. If an AI-added game was approved and the file that ships with GameDock differs, the game asks to be approved again.
+
 In every refusal the dialog shows the exact commands to run by hand. The restart asks systemd (`systemctl --user restart gamedock`); if that is not possible it exits with code 75 so a unit with `Restart=on-failure` or `Restart=always` starts it again; outside systemd it starts itself again in place. Updating GameDock is web only: it is deliberately not an MCP tool, so an AI agent cannot replace the program it runs in. Agents can read the version with `get_gamedock_version`.
 
 ### A game's own version (SteamCMD games)
@@ -326,6 +334,12 @@ config_files:            # files users may edit (relative to the server's data f
     sensitive_keys: [AdminPassword]
     hot_edit: false      # true = safe to edit while running
     note: "Shown above the editor, e.g. a warning that the image rewrites this file on start."
+fail_log_patterns:       # optional: known failures, shown instead of "the health check is failing" (up to 12; read-only hints)
+  - pattern: "CustomAuthenticationFailed"      # regular expression for ONE log line
+    title: Steam rejected the login token.     # plain words: what went wrong
+    advice: "Create a new token for App ID 123 (not a Web API key), then Edit the server and paste it."   # the next step
+log_files: [server/logs/game.log]   # optional: game log files in the data folder that are scanned for the patterns as well (tail only)
+builtin_fail_patterns: true      # false = skip GameDock's built-in patterns (out of memory, port in use, full disk, SteamCMD, Steam login)
 fields:                  # settings shown in the deploy/edit form
   - { name: SERVER_NAME, label: Server name, default: "My Server", required: true }
   - { name: SERVER_PASSWORD, label: Password, secret: true }   # secret = password input
@@ -371,7 +385,7 @@ fields:                              # the form the user fills in; each becomes 
 
 Rules every entry must follow (checked when the file loads): no privileged mode, host networking, device mappings, extra capabilities or Docker socket mount, a normal image name, valid ports and patterns. Entries **added by an AI agent** are held to stricter rules (only documented keys, relative host folders, host ports 1024 and up, at most 20 KB) and need your approval; see below.
 
-Never put real passwords in catalog files (they are committed to git); users type them into the form. A server keeps a snapshot of its template from deploy time, so changes to a catalog entry (fixed `env`, `fields`, `volumes`, `ports`, `stop_timeout`) only affect servers deployed afterwards; only the read-only hints (update note, Steam and version settings, `installed_build_file`) are taken from the current entry for older servers. Every setting's value is passed to the container, an **empty value too** (as `NAME=`, "present but empty"); some images, such as Enshrouded's, treat that differently from a missing variable.
+Never put real passwords in catalog files (they are committed to git); users type them into the form. A server keeps a snapshot of its template from deploy time, so changes to a catalog entry (fixed `env`, `fields`, `volumes`, `ports`, `stop_timeout`) only affect servers deployed afterwards; only the read-only hints (update note, Steam and version settings, `installed_build_file`) are taken from the current entry for older servers, and `fail_log_patterns`, `log_files`, `builtin_fail_patterns` and a field's `pattern` / `pattern_hint` always come from the current entry (they change no container). A secret or other setting with a known shape can carry `pattern` (a regular expression the whole value must match) and `pattern_hint` (what a right value looks like): a wrong value is refused when the server is deployed or edited, with that sentence, and the value is never repeated in the message. Every setting's value is passed to the container, an **empty value too** (as `NAME=`, "present but empty"); some images, such as Enshrouded's, treat that differently from a missing variable.
 
 **The bundled games (Enshrouded, Palworld, Valheim, Minecraft Java, Satisfactory) are examples.** Their images, ports and variables were written from general knowledge of popular community images and have not been run here. Check each against the image's own documentation before real use.
 
@@ -493,13 +507,19 @@ Stopping or restarting GameDock does not stop your game servers (they are separa
 
 ## Troubleshooting a server
 
-Three read-only helpers (nothing here changes a server, a file or the catalog):
+Four read-only helpers (nothing here changes a server, a file or the catalog):
 
 - **Check setup** (button on each server card, also the MCP tool `verify_game_setup`). A checklist with OK / Check / Problem / Skipped for: the container (running, restart count, exit code, out of memory), the image's health check, the game's ready line, the installed game version (the Steam record `appmanifest_<id>.acf`; if `steam_app_id` is wrong it names the id it really found), the newest known Steam build, the game's version line in the log, each config file (exists, readable, parses, empty), each port (published by Docker, bound on the machine, or taken by another program), each folder (exists, writable, mounted in the running container), file ownership, free disk space, required settings, and whether the catalog entry changed after the server was deployed. Every Check or Problem comes with a *Fix* in plain words. Some results are only "Check" on a young server because the game may not have written its files yet; run it again after the first start.
 - **Copy diagnostics** (in the same dialog; `GET /api/servers/{id}/diagnostics`, MCP `get_server_diagnostics`). One block of text: GameDock version, status and phase, Docker's facts about the container, ports, settings (passwords only as set / not set), data folder size, free disk, backups, update checks and the newest log lines. Password values, `password=` / `token=` shapes, bearer tokens and passwords in URLs are replaced by `********` (the server's own secret values are masked wherever they appear). Read it before you paste it somewhere.
 - **Port conflicts.** In the Deploy and Edit dialogs a note appears under the ports when a host port is already used by another GameDock server (a conflict), by another program on this machine (a conflict, found by trying to bind it: only with the real Docker backend) or is the default of another catalog game (information only). **Use N** fills in a free port. The same logic is `POST /api/ports/check`, the MCP tool `check_ports` and part of `preview_deploy` (a dry run of a deploy that shows the container command with secrets hidden and every problem at once). Deploy errors now say what to do ("The setting 'X' (NAME) is required", "the container port must be one of ...", "Could not create the server ... Nothing was saved or started").
 
 A server keeps a **snapshot** of its catalog entry from the day it was deployed. If you (or an agent) fix the entry later, an existing server does not change: Check setup shows "The catalog entry changed after this server was deployed", and the fix is to delete that server (keep or wipe its data) and deploy it again.
+
+- **Known problem** (a row at the top of Check setup, and a banner on the server card): the logs explain why the game is stuck, with the next step. See *Ready versus running*.
+
+![Known problem on the card](docs/gamedock-061-problem-card.png)
+
+![Known problem in Check setup](docs/gamedock-061-problem-check.png)
 
 ![Diagnostics](docs/gamedock-060-diagnostics.png)
 
@@ -596,6 +616,8 @@ gamedock/
   configforms.py   turns a config file into form fields and back (OptionSettings, key=value, JSON), byte-exact
   baselines.py     recorded defaults of config files: snapshot, comparison by meaning, storage under <data>/config-baselines/
   readiness.py     Starting / Installing NN% / Ready decision from health status and log lines
+  problems.py      known problems: catalog fail_log_patterns and built-in patterns -> plain title, next step, redacted log line
+  problem_service.py  finds the problem for a server (container log, declared log files, how the container ended); part of the service
   hoststats.py     host CPU / memory / disk from /proc and shutil
   hostcheck.py     port probe, free space, file-owner scan
   portcheck.py     port conflict logic (GameDock servers, programs on the machine, catalog defaults, free-port suggestions)

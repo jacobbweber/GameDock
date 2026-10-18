@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 import subprocess
 
 import pytest
@@ -345,7 +346,7 @@ def client(svc):
 def test_version_endpoint_and_health(client, repos):
     v = client.get("/api/version").json()
     assert v["version"] == "0.3.0" and v["commit_short"] == repos.head()[:7] and v["self_update"]["possible"] is True
-    assert client.get("/api/health").json() == {"ok": True, "version": "0.6.0"}
+    assert client.get("/api/health").json() == {"ok": True, "version": "0.6.1"}
     assert "update_available" in client.get("/api/status").json()
 
 
@@ -377,3 +378,137 @@ def test_update_endpoint_refuses_outside_git(tmp_path):
 def test_update_is_not_an_mcp_tool():
     from tests.test_mcp import DESTRUCTIVE, READ, STANDARD
     assert not any("update_gamedock" in n or "self_update" in n for n in READ | STANDARD | DESTRUCTIVE)
+
+
+# ------------------------------------------------------------------ an untracked catalog file in the way of the update (0.6.1)
+ASKA_V1 = "id: aska\nname: ASKA (as saved by an AI agent)\nimage: example/aska:1\n"
+ASKA_V2 = "id: aska\nname: ASKA (bundled)\nimage: example/aska:2\n"
+
+
+def bundle_aska(repos, text=ASKA_V2):
+    (repos.seed / "catalog").mkdir(exist_ok=True)
+    return repos.remote_commit(version="0.3.1", files={"catalog/aska.yaml": text})
+
+
+def local_aska(repos, text=ASKA_V1):
+    (repos.local / "catalog").mkdir(exist_ok=True)
+    p = repos.local / "catalog" / "aska.yaml"
+    p.write_text(text)
+    return p
+
+
+def test_plain_pull_would_have_failed_on_the_untracked_file(repos):
+    """The reason for the set-aside step: git itself refuses (and so did GameDock 0.6.0's updater)."""
+    local_aska(repos)
+    bundle_aska(repos)
+    import subprocess as sp
+    r = sp.run(["git", "pull", "--ff-only", "origin", "main"], cwd=str(repos.local), capture_output=True, text=True)
+    assert r.returncode != 0 and "untracked working tree files would be overwritten" in r.stderr
+
+
+def test_a_different_untracked_catalog_file_is_set_aside_and_kept(svc, checker, repos, restarts, tmp_path):
+    p = local_aska(repos)
+    new = bundle_aska(repos)
+    out = apply(svc, checker)
+    assert out["updated"] and repos.head() == new
+    assert p.read_text() == ASKA_V2                                   # the file that ships with GameDock is in place
+    kept = out["catalog_files_replaced"]
+    assert len(kept) == 1 and kept[0]["file"] == "catalog/aska.yaml" and kept[0]["identical"] is False
+    assert Path(kept[0]["kept_at"]).read_text() == ASKA_V1
+    assert str(repos.local / "data" / "catalog-displaced") in kept[0]["kept_at"] or "catalog-displaced" in kept[0]["kept_at"]
+    assert kept[0]["kept_at"] in out["message"] and "approved again" in out["message"]
+    assert git(repos.local, "status", "--porcelain", "--untracked-files=no") == ""   # still a clean checkout
+
+
+def test_an_identical_untracked_file_is_simply_replaced(svc, checker, repos):
+    p = local_aska(repos, ASKA_V2)
+    bundle_aska(repos)
+    out = apply(svc, checker)
+    assert out["updated"] and out["catalog_files_replaced"][0]["identical"] is True and out["catalog_files_replaced"][0]["kept_at"] is None
+    assert p.read_text() == ASKA_V2 and "approved again" not in out["message"]
+    displaced = repos.local / "data" / "catalog-displaced"
+    assert not displaced.exists() or list(displaced.iterdir()) == []   # no clutter left behind
+
+
+def test_a_failed_pull_puts_the_file_back_exactly(svc, repos, gh, clock, restarts):
+    p = local_aska(repos)
+    bundle_aska(repos)
+
+    def runner(args, cwd, timeout):
+        if args[:2] == ["git", "pull"]:
+            return subprocess.CompletedProcess(args, 1, "", "fatal: simulated failure")
+        return up.default_runner(args, cwd, timeout)
+
+    checker = up.UpdateChecker(install_dir=repos.local, http_get=gh, clock=clock, version="0.3.0", runner=runner,
+                               restart=lambda: restarts.append(1))
+    before = repos.head()
+    from gamedock.errors import BackendError
+    with pytest.raises(BackendError, match="simulated failure"):
+        checker.apply(svc.freeze, svc.unfreeze)
+    assert p.read_text() == ASKA_V1 and repos.head() == before and not svc._frozen and restarts == []
+    displaced = repos.local / "data" / "catalog-displaced"
+    assert not displaced.exists() or list(displaced.iterdir()) == []
+
+
+def test_only_files_directly_in_catalog_are_ever_moved(svc, checker, repos):
+    (repos.local / "docs").mkdir()
+    mine = repos.local / "docs" / "notes.md"
+    mine.write_text("my notes")
+    (repos.seed / "docs").mkdir()
+    repos.remote_commit(version="0.3.1", files={"docs/notes.md": "from GameDock"})
+    with pytest.raises(Exception, match="untracked working tree files would be overwritten|pull --ff-only failed"):
+        apply(svc, checker)
+    assert mine.read_text() == "my notes" and not svc._frozen
+
+
+def test_a_symbolic_link_in_the_way_is_left_alone(svc, checker, repos, tmp_path):
+    target = tmp_path / "elsewhere.yaml"
+    target.write_text(ASKA_V1)
+    (repos.local / "catalog").mkdir()
+    (repos.local / "catalog" / "aska.yaml").symlink_to(target)
+    bundle_aska(repos)
+    with pytest.raises(Exception):
+        apply(svc, checker)
+    assert (repos.local / "catalog" / "aska.yaml").is_symlink() and target.read_text() == ASKA_V1
+
+
+def test_other_untracked_catalog_files_are_not_touched(svc, checker, repos):
+    (repos.local / "catalog").mkdir()
+    other = repos.local / "catalog" / "mine.yaml"
+    other.write_text("id: mine\n")
+    bundle_aska(repos)
+    out = apply(svc, checker)
+    assert out["updated"] and out["catalog_files_replaced"] == [] and other.read_text() == "id: mine\n"
+
+
+def test_two_files_and_name_clashes_in_the_displaced_folder(svc, checker, repos):
+    (repos.seed / "catalog").mkdir()
+    local_aska(repos)
+    (repos.local / "catalog" / "zork.yaml").write_text("id: zork\nname: Z\nimage: z:1\n")
+    stale = repos.local / "data" / "catalog-displaced"
+    stale.mkdir(parents=True)
+    repos.remote_commit(version="0.3.1", files={"catalog/aska.yaml": ASKA_V2, "catalog/zork.yaml": "id: zork\nname: Z2\nimage: z:2\n"})
+    out = apply(svc, checker)
+    assert sorted(m["file"] for m in out["catalog_files_replaced"]) == ["catalog/aska.yaml", "catalog/zork.yaml"]
+    assert all(Path(m["kept_at"]).exists() for m in out["catalog_files_replaced"])
+
+
+@pytest.mark.parametrize("bundled,expect_reviewed", [(ASKA_V2, False), (ASKA_V1, True)])
+def test_review_consequence_after_the_update(tmp_path, repos, gh, clock, restarts, bundled, expect_reviewed):
+    """AI-added entry approved before: a different bundled file asks for approval again; an identical one stays approved."""
+    import hashlib
+    local_aska(repos, ASKA_V1)
+    data = tmp_path / "data"
+    data.mkdir()
+    digest = hashlib.sha256(ASKA_V1.encode()).hexdigest()
+    (data / "catalog-review.json").write_text(json.dumps({"aska": {
+        "added_by": "mcp", "reviewed": True, "reviewed_sha256": digest, "yaml_sha256": digest}}))
+    checker = up.UpdateChecker(install_dir=repos.local, http_get=gh, clock=clock, version="0.3.0", data_dir=data,
+                               restart=lambda: restarts.append(1))
+    svc = GameDockService(FakeBackend(), repos.local / "catalog", data, updater=checker)
+    assert svc.get_catalog_entry("aska").reviewed is True
+    bundle_aska(repos, bundled)
+    assert checker.apply(svc.freeze, svc.unfreeze)["updated"]
+    e = GameDockService(FakeBackend(), repos.local / "catalog", data).get_catalog_entry("aska")
+    assert e.reviewed is expect_reviewed
+    assert (data / "catalog-displaced").exists() is (not expect_reviewed) or not list((data / "catalog-displaced").iterdir())

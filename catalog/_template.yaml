@@ -38,6 +38,8 @@ fields:
     label: Server password
     secret: true                 # a password box, never shown again, never logged
     description: Leave empty for no password.   # say what an empty value does; check that the image really means that
+    # pattern: "[0-9A-Fa-f]{32}"          # optional: the WHOLE value must match this (a wrong paste is refused; the value is never shown back)
+    # pattern_hint: "It is exactly 32 letters and digits (0-9, A-F)."   # what a right value looks like
 
 # ---- config_files: settings files people may edit with the Config button (path is relative to the server's data folder)
 # config_files:
@@ -51,6 +53,14 @@ fields:
 # ---- readiness: log lines that tell "container is up" from "players can join" (read them with the Logs button)
 # ready_log_pattern: "Server is ready"                     # a regular expression
 # progress_log_pattern: "progress: *([0-9]+(?:[.][0-9]+)?)"   # exactly ONE group: the percentage
+
+# ---- known failures: how GameDock explains a server that runs but never becomes ready (read-only; existing servers use the current list)
+# fail_log_patterns:
+#   - pattern: "Login token rejected|InvalidToken"       # a regular expression matching ONE log line of the failure
+#     title: The game server login token was rejected.   # what went wrong, one plain sentence
+#     advice: "Create a new token at <where>, then Edit the server, paste it and start it again."   # the next step
+# log_files: [server/logs/game.log]     # game log files inside the data folder to scan as well (only the end is read)
+# builtin_fail_patterns: true           # false = do not apply GameDock's built-in patterns (out of memory, port in use, full disk, SteamCMD errors...)
 
 # ---- Steam games (SteamCMD): version tracking and updates
 # steam_app_id: 123456                  # the DEDICATED SERVER's app id (not the game you play)

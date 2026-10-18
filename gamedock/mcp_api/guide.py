@@ -58,7 +58,11 @@ and GameDock works for any game: a game is just an entry in the catalog.
   Never invent an image, a port or a Steam app id: research them and write in the entry's `notes` what you could not
   confirm. Never put a password in an entry. **Inspect the exact image tag you use** (never assume `latest` exists; when a tag
   is not found, `inspect_image` lists the tags that exist) and **expose every documented player-facing setting as a field**, or
-  say in `notes` why one was left out: `validate_catalog_entry` warns about both.
+  say in `notes` why one was left out: `validate_catalog_entry` warns about both. **Write down how the game fails:** put the
+  image's documented error lines in `fail_log_patterns` (each with a plain `title` and the next step as `advice`), name the
+  game's own log files in `log_files` when the real error never reaches `docker logs`, and give a secret with a known shape
+  (a fixed-length token) a `pattern` and `pattern_hint`. Say in the field's `description` exactly where the person gets it
+  (the page, the App ID, and what NOT to use instead).
 - **After you add a game (add -> approve -> deploy a test copy -> verify -> fix -> re-review)**: `add_catalog_entry` saves the
   entry as "waiting for approval". You cannot see the person's click directly, so poll `get_catalog_review_status(game_id)`:
   `state` becomes `approved` (or `changed_since_approval` / `waiting_for_approval` again after an edit), with the file's
@@ -69,10 +73,11 @@ and GameDock works for any game: a game is just an entry in the catalog.
   required settings, disk) with concrete fixes. Use `get_server_logs` and `get_server_diagnostics` for details. To fix the
   entry call `update_catalog_entry` (it needs a new approval) and then deploy a NEW test copy: a deployed server keeps a
   snapshot of the entry, so catalog changes never reach it (`get_catalog_review_status` lists servers on an older
-  snapshot). Deleting the old test server needs the person, or full mode. Only a person can approve or delete: say what
+  snapshot). Two things DO reach existing servers without a redeploy because they change no container: `fail_log_patterns`
+  / `log_files` / `builtin_fail_patterns` (how GameDock explains a stuck server) and the format rule `pattern` of a field. Deleting the old test server needs the person, or full mode. Only a person can approve or delete: say what
   you need and wait.
 - **Checking and troubleshooting (all read-only)**: `verify_game_setup`, `get_server_diagnostics` (status, container exit code
-  and restarts, ports, disk, backups, newest redacted log lines), `check_ports`, `preview_deploy`, and `get_mcp_audit` (what
+  and restarts, ports, disk, backups, a `problem` when a known failure is in the logs, newest redacted log lines), `check_ports`, `preview_deploy`, and `get_mcp_audit` (what
   agents and schedules did; secrets and file contents are never in it).
 - **Config files**: only files listed by `list_config_files` can be read or written. Sensitive values appear
   as placeholders; writing the placeholder back keeps the existing value.

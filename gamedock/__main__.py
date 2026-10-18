@@ -32,7 +32,7 @@ def build_service(settings: Settings) -> GameDockService:
                            stats_history_seconds=settings.stats_history_seconds,
                            port_probe=port_free if settings.backend == "docker" else None,
                            updater=UpdateChecker(repo=settings.update_repo, enabled=settings.update_check,
-                                                 self_update=settings.self_update),
+                                                 self_update=settings.self_update, data_dir=settings.data_dir),
                            steam_info=SteamInfo(settings.data_dir / "steam-latest.json", settings.steam_info_url,
                                                 enabled=settings.update_check))
 

@@ -14,7 +14,8 @@ Result phases (only meaningful while the container runs):
   ready       the game can be joined (healthy, or the ready line was seen, or there is no signal at all)
   installing  downloading or installing game files (with ``progress`` when the log shows a percentage)
   starting    the container is up but the game is not ready yet
-  unhealthy   Docker's health check keeps failing and nothing else explains it
+  unhealthy   Docker's health check keeps failing (Docker only says so after the image's start period and its retries;
+              the service layer then looks for a known problem in the logs, see gamedock/problems.py)
 """
 from __future__ import annotations
 
@@ -109,8 +110,9 @@ def decide(health: str, has_ready_pattern: bool, ready_seen: bool, progress: flo
         return _installing(progress)
     if health == "unhealthy":
         return Readiness(PHASE_UNHEALTHY,
-                         detail="Docker's health check for this game is failing. It may still be starting up; "
-                                "open the logs to see what it is doing.")
+                         detail="Docker's health check for this game keeps failing: the container is running, but the game is "
+                                "not answering the way it should. Open Logs to see what it printed, or Check setup for a "
+                                "checklist with fixes.")
     return Readiness(PHASE_STARTING,
                      detail="The container is running but the game is not ready to join yet. "
                             "The first start can take several minutes.")

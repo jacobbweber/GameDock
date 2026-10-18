@@ -455,4 +455,4 @@ def test_version_is_consistent(svc):
     import gamedock
     pyproject = (Path(__file__).resolve().parent.parent / "pyproject.toml").read_text()
     assert re.search(r'^version = "%s"$' % re.escape(gamedock.__version__), pyproject, re.M)
-    assert gamedock.__version__ == "0.6.0"
+    assert gamedock.__version__ == "0.6.1"

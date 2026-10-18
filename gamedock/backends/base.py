@@ -17,6 +17,8 @@ class ContainerState:
     detail: str = ""
     health: str = ""      # Docker health check result: healthy | unhealthy | starting | "" (image has no health check)
     started_at: str = ""  # when the current run began (RFC 3339 text); changes on every restart
+    exit_code: int | None = None  # how the last run ended (only while the container is not running)
+    oom_killed: bool = False      # the last run was killed by the out-of-memory killer (only while not running)
 
 
 @dataclass(frozen=True)

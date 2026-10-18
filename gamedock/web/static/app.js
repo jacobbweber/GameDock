@@ -125,16 +125,28 @@ function serverState(s) {
     if (s.phase === "installing") {
       const p = typeof s.progress === "number" ? s.progress : null;
       return { kind: "installing", label: p === null ? "Installing" : `Installing ${Math.round(p)}%`, working: true, progress: p,
-        sub: s.phase_detail || "Downloading and installing game files. It cannot be joined yet." };
+        sub: s.phase_detail || "Downloading and installing game files. It cannot be joined yet.", problem: hasProblem(s) ? s.problem : null };
     }
     if (s.phase === "starting") {
       return { kind: "starting", label: "Starting", working: true, progress: null,
-        sub: s.phase_detail || "The container is up but the game is not ready to join yet." };
+        sub: s.phase_detail || "The container is up but the game is not ready to join yet.", problem: hasProblem(s) ? s.problem : null };
     }
-    if (s.phase === "unhealthy") return { kind: "unhealthy", label: "Unhealthy", working: false, progress: null, sub: s.phase_detail };
+    const problem = hasProblem(s) ? s.problem : null;
+    if (s.phase === "unhealthy") return { kind: "unhealthy", label: problem ? "Problem" : "Unhealthy", working: false, progress: null, sub: s.phase_detail, problem };
     return { kind: "running", label: "Running", working: false, progress: null, sub: "", ready: s.ready !== false };
   }
-  return { kind: s.status, label: s.status.replace("_", " "), working: false, progress: null, sub: "" };
+  return { kind: s.status, label: s.status.replace("_", " "), working: false, progress: null, sub: "", problem: hasProblem(s) ? s.problem : null };
+}
+
+// A known problem found in the logs of a server that is stuck (or was killed for memory): see gamedock/problems.py.
+const hasProblem = (s) => !!(s.problem && s.problem.title);
+
+function problemBlock(p) {
+  return el("div", { class: "problem-box", role: "alert", "data-problem": p.id },
+    el("div", { class: "problem-title", textContent: p.title }),
+    el("div", { class: "problem-advice", textContent: p.advice }),
+    p.excerpt ? el("div", { class: "problem-seen" }, el("span", { textContent: `Seen in ${p.where || "the logs"}: ` }), el("code", { textContent: p.excerpt })) : null,
+    el("div", { class: "problem-links", textContent: "Logs shows the whole output; Check setup gives a checklist." }));
 }
 
 function progressBar(st) {
@@ -146,9 +158,12 @@ function progressBar(st) {
 }
 
 function statusBox(st) {
-  const box = el("div", { class: `statusbox ${st.kind}` });
+  const box = el("div", { class: `statusbox ${st.problem && !st.working ? "unhealthy" : st.kind}` });
   if (st.working) {
     box.append(progressBar(st), el("div", { class: "status-text", textContent: st.sub }));
+    if (st.problem) box.append(problemBlock(st.problem));
+  } else if (st.problem) {
+    box.append(problemBlock(st.problem));
   } else if (st.kind === "unhealthy") {
     box.append(el("div", { class: "status-text warn", textContent: st.sub }));
   } else if (st.kind === "running" && st.ready) {
@@ -256,7 +271,7 @@ function syncCard(key, s, build) {
     s.game_name, st.kind === "busy", s.id, s.env && s.env.length, s.update_available, !!s.activity,
     s.steam_app_id, s.game_version, s.installed_build, s.latest_build, s.game_update_status]);
   const badgeSig = `${st.working ? 1 : 0}|${st.kind}|${st.label}`;
-  const statusSig = JSON.stringify([st.kind, st.working, st.progress, st.sub, st.ready]);
+  const statusSig = JSON.stringify([st.kind, st.working, st.progress, st.sub, st.ready, st.problem ? [st.problem.id, st.problem.excerpt] : null]);
   const lsig = liveSig(s);
   let c = cardCache.get(key);
   if (!c || c.structSig !== structSig) {
@@ -273,7 +288,7 @@ function syncCard(key, s, build) {
     const old = c.node.querySelector(".statusbox");
     const fill = old && old.querySelector(".progress:not(.indeterminate) .fill");
     const prev = JSON.parse(c.statusSig);
-    if (fill && st.working && st.kind === prev[0] && st.progress !== null) {
+    if (fill && st.working && st.kind === prev[0] && st.progress !== null && !st.problem && !prev[5]) {
       fill.style.width = `${Math.max(2, Math.min(100, st.progress))}%`;   // same kind of wait: just move the bar
       old.querySelector(".progress").setAttribute("aria-valuenow", String(Math.round(st.progress)));
       old.querySelector(".status-text").textContent = st.sub;

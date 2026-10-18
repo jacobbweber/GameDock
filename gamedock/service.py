@@ -38,6 +38,7 @@ from .hoststats import HostMeter
 from .hostcheck import foreign_owners
 from .authoring_service import AuthoringMixin
 from .ops_service import OpsMixin
+from .problem_service import ProblemsMixin
 from .game_updates import GameUpdateMixin
 from .errors import BackendError, BusyError, ConflictError, GameDockError, NotFoundError, ValidationError
 from .models import (
@@ -96,7 +97,7 @@ def slugify(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:40].strip("-")
 
 
-class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin):
+class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin, ProblemsMixin):
     def __init__(self, backend: ContainerBackend, catalog_dir: Path, data_dir: Path,
                  backup_retention: int = 10, clock: Callable[[], datetime] | None = None,
                  stats_interval: float = 10.0, stats_history_seconds: int = 3600,
@@ -122,6 +123,7 @@ class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin):
         self.updater = updater or UpdateChecker(enabled=False, self_update=False)
         self._init_game_updates(steam_info, game_update_wait, game_update_poll, game_update_settle)
         self._init_authoring()
+        self._init_problems()
         self.audit_hook: Callable[[str, dict, str, str], None] | None = None  # set by the web app (writes the audit file)
         self._frozen = ""                                  # non-empty while GameDock is about to restart for an update
         self._image_checks: dict[str, ImageCheck] = {}
@@ -232,10 +234,12 @@ class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin):
         action itself (which is returned when the action is already over)."""
         t = self._template(inst)
         health, started = "", ""
+        exit_code, oom_killed = None, False
         try:
             state = self.backend.get_state(container_name(inst.id))
             status, detail = state.status, state.detail
             health, started = state.health, state.started_at
+            exit_code, oom_killed = state.exit_code, state.oom_killed
         except BackendError as e:
             status, detail = Status.ERROR, str(e)
         r = self._readiness(inst, t, health, started) if status == Status.RUNNING else None
@@ -252,6 +256,11 @@ class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin):
             )
             for f in t.fields
         )
+        problem = self._card_problem(inst, t, status, health, started, exit_code, oom_killed, bool(r and r.ready)) \
+            if status != Status.ERROR or oom_killed else {}
+        phase_detail = r.detail if r else ""
+        if problem and r is not None and r.phase == rd.PHASE_UNHEALTHY:
+            phase_detail = f"{problem['title']} {problem['advice']}"
         hints = self._with_current_hints(inst, t)
         chk = self._image_checks.get(inst.id)
         game = self._game_report(inst, hints, status == Status.RUNNING, started) if hints.steam_app_id else None
@@ -259,7 +268,7 @@ class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin):
                           status, inst.ports, env, detail, inst.created_at, t.update_method, len(t.config_files),
                           activity=self._activity.get(inst.id, "") if show_activity else "",
                           phase=r.phase if r else "", ready=bool(r and r.ready),
-                          progress=r.progress if r else None, phase_detail=r.detail if r else "",
+                          progress=r.progress if r else None, phase_detail=phase_detail,
                           update_available=chk.available if chk and t.update_method != "none" else None,
                           update_checked_at=sch.iso(datetime.fromtimestamp(chk.checked_at, timezone.utc)) or "" if chk else "",
                           update_note=hints.update_note, schedule=self._schedule_overview(inst.id),
@@ -268,7 +277,7 @@ class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin):
                           installed_build=(game["installed"]["build"] or "") if game else "",
                           latest_build=(game["latest"]["build"] or "") if game else "",
                           game_update_status=game["status"] if game else stm.UNKNOWN,
-                          game_update_method=hints.game_update_method)
+                          game_update_method=hints.game_update_method, problem=problem)
 
     # --------------------------------------------------------------- readiness
     def _current_entries(self) -> dict[str, CatalogEntry]:
@@ -335,6 +344,7 @@ class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin):
                 text = self.backend.get_logs(container_name(inst.id), READINESS_LOG_LINES, started or None)
             except BackendError:
                 text = ""  # logs are only a hint; never break the server list because of them
+            self._readiness_text[inst.id] = (now, started, text)   # the problem finder reuses it (no second `docker logs`)
         seen = rd.pattern_seen(text, t.ready_log_pattern)
         if seen:
             self._ready_seen[inst.id] = started
@@ -395,6 +405,14 @@ class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin):
                 raise ValidationError(f"Invalid value for '{f.label}'")
             if f.secret and value == "" and current is not None:
                 continue  # blank on edit = keep what is stored
+            if f.pattern and value != "":
+                if re.fullmatch(f.pattern, value) is None and re.fullmatch(f.pattern, value.strip()) is not None:
+                    value = value.strip()      # a stray space or line break from copy and paste
+                if re.fullmatch(f.pattern, value) is None:
+                    # Never repeat the value: it may be a password or token.
+                    raise ValidationError(f"The setting '{f.label}' ({f.name}) does not look right: "
+                                          f"{f.pattern_hint or 'it does not have the format this game expects'}. "
+                                          "The value you typed is not shown here; check it and try again.")
             values[name] = value
         for f in t.fields:
             if f.required and not values.get(f.name, "").strip():
@@ -497,7 +515,7 @@ class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin):
             new_name = self._check_name(name, ignore_id=inst.id) if name is not None else inst.name
             new_ports = self._resolve_ports(t, ports, current=inst.ports)
             self._check_port_conflicts(new_ports, ignore_id=inst.id)
-            new_env = self._merge_env(t, env, current=inst.env)
+            new_env = self._merge_env(self._with_current_field_rules(inst, t), env, current=inst.env)
             updated = Instance(inst.id, new_name, inst.game_id, inst.template, new_ports, new_env, inst.created_at)
             spec = self._spec(updated)
             self._prepare_dirs(spec)

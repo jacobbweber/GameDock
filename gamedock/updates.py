@@ -44,6 +44,11 @@ VERSION_RE = re.compile(r'^__version__\s*=\s*"([^"]+)"', re.M)
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,100}$")
 DEPENDENCY_FILES = ("pyproject.toml", "requirements.txt")
+# A catalog file that an update ADDS to the repository. If the install folder already has an untracked file of the same
+# name (for example a game entry an AI agent saved there before the game was bundled), `git pull` would stop with
+# "untracked working tree files would be overwritten"; apply() sets that file aside first (see _set_aside).
+CATALOG_FILE_RE = re.compile(r"^catalog/[A-Za-z0-9][A-Za-z0-9_.-]*\.(?:yaml|yml|json)$")
+DISPLACED_DIRNAME = "catalog-displaced"
 
 HttpGet = Callable[[str, dict, float], tuple[int, str]]
 
@@ -137,8 +142,9 @@ class UpdateChecker:
     def __init__(self, install_dir: Path | None = None, repo: str = DEFAULT_REPO, enabled: bool = True,
                  self_update: bool = True, http_get: HttpGet | None = None, runner=None,
                  restart: Callable[[], None] | None = None, clock: Callable[[], float] = time.time,
-                 version: str = __version__, service_name: str = "gamedock") -> None:
+                 version: str = __version__, service_name: str = "gamedock", data_dir: Path | None = None) -> None:
         self.install_dir = Path(install_dir).resolve() if install_dir else Path(__file__).resolve().parent.parent
+        self.data_dir = Path(data_dir) if data_dir else self.install_dir / "data"
         self.repo = parse_repo(repo)
         self.enabled = enabled
         self.self_update_enabled = self_update
@@ -385,9 +391,12 @@ class UpdateChecker:
                         "Nothing was changed. Run these commands on the machine: "
                         + "; ".join(self.manual_commands(deps_changed=True)))
                 before = self._local()["commit"][:7]
+                aside = self._set_aside()
                 rc, _, err = self._git("pull", "--ff-only", "origin", branch, timeout=GIT_PULL_TIMEOUT)
                 if rc != 0:
+                    self._put_back(aside)
                     raise BackendError(f"git pull --ff-only failed: {_short(err)} Nothing was restarted.")
+                notes = self._after_pull_notes(aside)
                 new_version = self._read_installed_version()
                 self._git_cache = None
                 after = self._local()["commit"][:7]
@@ -396,13 +405,83 @@ class UpdateChecker:
                 threading.Timer(1.5, self._restart).start()
                 return {"updated": True, "restarting": True, "from_version": self.version,
                         "version": new_version or self.version, "from_commit": before, "commit": after,
+                        "catalog_files_replaced": [{"file": a["file"], "kept_at": a["kept_at"], "identical": a["identical"]}
+                                                   for a in aside],
                         "message": f"Updated GameDock from {before} to {after}. GameDock is restarting now; your game "
-                                   "servers keep running. This page will reload by itself."}
+                                   "servers keep running. This page will reload by itself." + notes}
             finally:
                 if frozen:
                     unfreeze()
         finally:
             self._apply_lock.release()
+
+    # ------------------------------------------------------------------ untracked catalog files in the way
+    def _set_aside(self) -> list[dict]:
+        """Move away untracked catalog files that this update is about to add under the same name, so the pull does not
+        stop on them. Only plain files directly in catalog/ with a catalog extension are touched, never a symbolic link,
+        never a tracked file. Each one is moved to <data>/catalog-displaced/<name>.<time>; `_put_back` restores it when the pull
+        fails. Returns [{"file", "path", "kept_at", "identical"}]."""
+        rc, out, _ = self._git("diff", "--name-only", "--diff-filter=A", "HEAD", "FETCH_HEAD")
+        if rc != 0:
+            return []
+        moved: list[dict] = []
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime(self._clock()))
+        for rel in out.splitlines():
+            rel = rel.strip()
+            if not CATALOG_FILE_RE.match(rel):
+                continue
+            path = self.install_dir / rel
+            try:
+                if path.is_symlink() or not path.is_file():
+                    continue
+                if self._git("ls-files", "--error-unmatch", "--", rel)[0] == 0:
+                    continue          # tracked: an ordinary merge handles it
+                rc1, mine, _ = self._git("hash-object", "--", rel)
+                rc2, theirs, _ = self._git("rev-parse", f"FETCH_HEAD:{rel}")
+                if rc1 != 0 or rc2 != 0:
+                    continue
+                dest_dir = self.data_dir / DISPLACED_DIRNAME
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                dest = dest_dir / f"{path.name}.{stamp}"
+                n = 1
+                while dest.exists():
+                    n += 1
+                    dest = dest_dir / f"{path.name}.{stamp}-{n}"
+                shutil.copy2(path, dest)
+                path.unlink()
+                moved.append({"file": rel, "path": path, "kept_at": str(dest), "identical": mine == theirs})
+            except OSError as e:
+                log.warning("Could not set aside %s before the update: %s", rel, e)
+                continue
+        if moved:
+            log.warning("Set aside before the update: %s", ", ".join(m["file"] for m in moved))
+        return moved
+
+    def _put_back(self, aside: list[dict]) -> None:
+        for m in aside:
+            try:
+                if not m["path"].exists():
+                    shutil.copy2(m["kept_at"], m["path"])
+                Path(m["kept_at"]).unlink()
+            except OSError as e:
+                log.error("Could not put %s back after a failed update (a copy is at %s): %s", m["file"], m["kept_at"], e)
+
+    def _after_pull_notes(self, aside: list[dict]) -> str:
+        """Plain sentence for the update result; identical copies are simply deleted (the pull brought the same bytes)."""
+        notes = []
+        for m in aside:
+            if m["identical"]:
+                try:
+                    Path(m["kept_at"]).unlink()
+                except OSError:
+                    pass
+                m["kept_at"] = None
+            else:
+                notes.append(f"Your own copy of {m['file']} was different from the one that now ships with GameDock, so "
+                             f"it was replaced; your version is kept at {m['kept_at']}. If an AI agent added that game, "
+                             "its approval no longer matches the new file and the game asks to be approved again in the "
+                             "Catalog page.")
+        return (" " + " ".join(notes)) if notes else ""
 
     def _pyproject_deps_changed(self) -> bool:
         """True unless the only difference between HEAD and FETCH_HEAD in pyproject.toml is the `version = ...` line

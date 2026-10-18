@@ -15,7 +15,7 @@ from gamedock import authoring as au
 from gamedock import authoring_service
 from gamedock.backends import DockerCliBackend, FakeBackend
 from gamedock.catalog import (
-    CONFIG_FILE_KEYS, ENTRY_KEYS, FIELD_KEYS, FORBIDDEN_KEYS, PORT_KEYS, VOLUME_KEYS, entry_to_dict, load_catalog,
+    CONFIG_FILE_KEYS, ENTRY_KEYS, FAIL_PATTERN_KEYS, FIELD_KEYS, FORBIDDEN_KEYS, PORT_KEYS, VOLUME_KEYS, entry_to_dict, load_catalog,
     parse_definition,
 )
 from gamedock.errors import BackendError, CatalogError, ConflictError, NotFoundError, ValidationError
@@ -707,7 +707,8 @@ def test_field_reference_names_exactly_the_keys_the_loader_knows():
     assert keys[""] == set(ENTRY_KEYS)
     assert keys["ports"] == set(PORT_KEYS) and keys["volumes"] == set(VOLUME_KEYS)
     assert keys["fields"] == set(FIELD_KEYS) and keys["config_files"] == set(CONFIG_FILE_KEYS)
-    assert set(keys) == {"", "ports", "volumes", "fields", "config_files"}
+    assert keys["fail_log_patterns"] == set(FAIL_PATTERN_KEYS)
+    assert set(keys) == {"", "ports", "volumes", "fields", "config_files", "fail_log_patterns"}
 
 
 def test_every_model_attribute_and_serialised_key_is_a_catalog_key():

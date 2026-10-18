@@ -59,6 +59,21 @@ class EnvField:
     secret: bool = False  # rendered as a password input; never returned by the API or logged
     required: bool = False
     description: str = ""
+    # Optional format check, applied when a server is deployed or edited (never to a blank value that keeps the stored
+    # secret). `pattern` is a regular expression the WHOLE value must match; `pattern_hint` says in plain words what a
+    # right value looks like. The value itself is never echoed back in the error.
+    pattern: str = ""
+    pattern_hint: str = ""
+
+
+@dataclass(frozen=True)
+class FailPattern:
+    """A known way a game fails to start: a log line (regular expression) with a plain-language explanation and the
+    next step. Matched against the newest log lines while the server runs but is not ready (see gamedock/problems.py)."""
+
+    pattern: str
+    title: str
+    advice: str
 
 
 CONFIG_FORMATS = ("ini", "json", "yaml", "text")
@@ -107,6 +122,10 @@ class CatalogEntry:
     game_update_method: str = "none"  # "restart" = the image updates the game when the container starts; "none" = GameDock cannot update it
     installed_build_file: str = ""   # file (relative to the server's data folder) whose text is the installed version/build, for images that keep no Steam appmanifest
     stop_timeout: int = 0            # seconds this game gets to save when stopped; 0 = GameDock's default (GAMEDOCK_STOP_TIMEOUT)
+    # Known failures (read-only hints: they change no container, so servers deployed earlier use the CURRENT values).
+    fail_log_patterns: tuple[FailPattern, ...] = ()
+    builtin_fail_patterns: bool = True  # False = do not apply GameDock's built-in problem patterns (out of memory, port in use, ...)
+    log_files: tuple[str, ...] = ()  # extra log files (relative to the server's data folder) scanned for the patterns, tail only
     # Where the entry came from. NOT catalog keys: they are filled in by the loader (see gamedock/authoring.py) and
     # are not part of the entry's YAML form or of the snapshot a deployed server keeps.
     origin: str = "repo"             # "repo" (a file a person put in the catalog folder) | "mcp" (added by an AI agent)
@@ -192,6 +211,9 @@ class ServerInfo:
     latest_build: str = ""        # newest public build id (from the last check; no network is used to show this)
     game_update_status: str = "unknown"
     game_update_method: str = "none"
+    # A known problem that explains why the server is not ready (or has stopped): {} when there is none, otherwise
+    # {"id", "title", "advice", "source" (catalog | builtin | docker), "where", "excerpt" (one log line, secrets hidden)}.
+    problem: dict = field(default_factory=dict)
 
 
 # ----------------------------------------------------------------------- operation results

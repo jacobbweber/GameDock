@@ -50,6 +50,7 @@ For every step, write down **where you found the answer** (a link). You will put
 - Values people choose go in `fields`. Fixed values that should always be set go in `env`.
 - **Expose every documented player-facing setting as a field** (game mode, world name or seed, difficulty, save options, player slots, and so on), or list in `notes` which ones you left out and why. An entry with only a few fields gets a warning. If the image is stored on the machine, `inspect_image` shows the variable names the image knows, and `validate_catalog_entry` lists those that the entry neither exposes nor sets.
 - **Every password or token must be a field with `secret: true`.** Never write a real password in the file: catalog files are public in git.
+- **Say exactly where each key comes from, in the field's `description`.** For a token: the page, the App ID or account type, and what NOT to use instead (people paste the wrong kind of key). If the value has a fixed shape (a 32-character hex token, a whole number), add `pattern` (a regular expression the whole value must match) and `pattern_hint` (what a right value looks like). GameDock then refuses a wrong paste when the server is deployed or edited, with that sentence, and never repeats what was typed. A shape cannot tell two keys of the same shape apart: it catches typos, stray spaces and a wrong length, not the wrong kind of key.
 - Read what an empty value means. Some images treat "empty" as "no password"; others keep a generated one. See the common traps below.
 - If the image runs as a chosen user id (`PUID` and `PGID` variables), set them in `env` to match the user GameDock runs as, so backups can read the files.
 
@@ -66,6 +67,7 @@ For every step, write down **where you found the answer** (a link). You will put
   - a line printed once players **can join** (`ready_log_pattern`). Pick a line that appears *late*, after the game is listening; some images print "config loaded" long before.
   - the percentage line printed while SteamCMD downloads (`progress_log_pattern`), such as `Update state (0x61) downloading, progress: 51.68`. The pattern needs exactly one group in round brackets around the number.
   - a line that shows the game's own version (`version_log_pattern`), if any.
+- Also write down **how the game fails to start**, from the image's documentation ("Common issues") and from what you saw in step 9: put each known error line in `fail_log_patterns` with a plain `title` (what went wrong) and `advice` (what to do next). While a server runs but is not ready, GameDock looks for them in the newest container log lines and shows the matching explanation on the card, in Check setup and over MCP, instead of "the health check is failing". If the real error is only written to a file inside the data folder, name it in `log_files` (relative path, only the end is read, only if it was written during the current run). GameDock also knows common failures of any game (out of memory, a port in use, permission denied on the data folder, a full disk, SteamCMD errors, a refused Steam login); `builtin_fail_patterns: false` switches those off for one game.
 - These are regular expressions (patterns for text). Keep them simple and test them against real log text. GameDock checks that they are valid when the file loads.
 - If the image has a Docker health check, GameDock uses it; the patterns still help while the health check lags.
 
@@ -91,7 +93,7 @@ For every step, write down **where you found the answer** (a link). You will put
 
 ### Step 10. Verify, then mark as reviewed
 
-Run `verify_game_setup` (the **Check setup** button on the server's card does the same): it checks, read-only, that the container runs, the ready line and health check, the Steam record and `steam_app_id`, each config file, each published port, each folder, the required settings, and whether the catalog entry changed after the test copy was deployed. Every failed check carries a concrete fix for the entry. `get_server_diagnostics` (the **Copy diagnostics** button in the same dialog) bundles the facts and the newest log lines, with passwords hidden, for pasting into a chat. Then work through the [verification checklist](#verification-checklist). When everything passes, update the entry's `notes` to say what was verified and on which date, remove any "unverified" remarks that are now confirmed, and (for entries added by an AI agent) ask the person to review and approve it in the web page. Delete the test server when you are done, if the person agrees.
+Run `verify_game_setup` (the **Check setup** button on the server's card does the same): it checks, read-only, that the container runs, the ready line and health check, the Steam record and `steam_app_id`, each config file, each published port, each folder, the required settings, and whether the catalog entry changed after the test copy was deployed. Every failed check carries a concrete fix for the entry; a **Known problem** row names a failure found in the logs (from your `fail_log_patterns` first, then GameDock's built-in ones) with its next step. `get_server_diagnostics` (the **Copy diagnostics** button in the same dialog) bundles the facts and the newest log lines, with passwords hidden, for pasting into a chat. Then work through the [verification checklist](#verification-checklist). When everything passes, update the entry's `notes` to say what was verified and on which date, remove any "unverified" remarks that are now confirmed, and (for entries added by an AI agent) ask the person to review and approve it in the web page. Delete the test server when you are done, if the person agrees.
 
 ### The loop for an AI agent: add, approve, test, fix, re-review
 
@@ -99,7 +101,7 @@ Run `verify_game_setup` (the **Check setup** button on the server's card does th
 2. Poll `get_catalog_review_status`: `waiting_for_approval` means a person has not approved it yet; `approved` means it can be deployed; `changed_since_approval` means the file differs from what was approved. While it is not approved, `deploy_server` stays blocked (and so does the web page's Deploy). There is no tool for approving.
 3. `preview_deploy` and `check_ports`, then `deploy_server` a test copy on spare ports.
 4. `verify_game_setup`, `get_server_logs`, `get_server_diagnostics`. Write down what failed.
-5. Fix the entry with `update_catalog_entry`. This makes it unapproved again: tell the person, wait for `approved`, and deploy the test copy again. A deployed server keeps a **snapshot** of the entry it was created from, so a fix only reaches a server that is deleted and deployed again (`verify_game_setup` and `get_catalog_review_status` say when a server is on an older snapshot).
+5. Fix the entry with `update_catalog_entry`. This makes it unapproved again: tell the person, wait for `approved`, and deploy the test copy again. A deployed server keeps a **snapshot** of the entry it was created from, so a fix only reaches a server that is deleted and deployed again (except the read-only `fail_log_patterns`, `log_files` and `builtin_fail_patterns`, and a field's `pattern` / `pattern_hint`: those change no container, so existing servers always use the current ones) (`verify_game_setup` and `get_catalog_review_status` say when a server is on an older snapshot).
 6. Repeat until the checks pass, then report.
 
 ## 3. Field reference
@@ -129,6 +131,8 @@ Every key a catalog entry understands. This table is generated from the program 
 | `fields[].secret` | true or false | no | false | true = a password box whose value is never shown again, never written to logs and never returned by the API. Use it for every password. |
 | `fields[].required` | true or false | no | false | true = the person must fill it in when deploying. |
 | `fields[].description` | text | no | empty | Help text under the box. Say what an empty value means (for example 'leave empty for no password'). |
+| `fields[].pattern` | regular expression | no | empty (no format check) | The WHOLE value must match this when a server is deployed or edited, for example [0-9A-Fa-f]{32} for a 32-character hex token. A wrong value is refused with a plain message that never repeats what was typed (it may be a password). A blank secret on edit keeps the stored value and is not checked. One line, at most 300 characters. The default, if any, must match it. |
+| `fields[].pattern_hint` | text | no | empty | What a right value looks like, in plain words, shown when the pattern does not match (for example 'It is exactly 32 letters and digits (0-9, A-F)'). One line, at most 300 characters. Needs pattern. |
 | `config_files` | list of files | no | none | Settings files people may read and edit with the Config button. Each must be inside a mounted folder. |
 | `config_files[].path` | relative file path | yes | (none) | Relative to the server's data folder, so it starts with the volume's host folder, for example saves/settings.ini. No '..', no absolute path. Each path once. |
 | `config_files[].label` | text | no | the path | The name shown above the editor. |
@@ -148,6 +152,12 @@ Every key a catalog entry understands. This table is generated from the program 
 | `version_log_pattern` | regular expression with exactly one group | no | empty | A log line that shows the game's own version, with the version in the one group, for example 'Game version is (v?[0-9.]+)'. The last match is used. |
 | `game_update_method` | restart or none | no | restart when steam_app_id is set, otherwise none | restart = the image updates the game when the container starts, so Update game now restarts the server and checks the build changed. none = GameDock cannot update the game itself. restart needs steam_app_id. |
 | `installed_build_file` | relative file path | no | empty | A small file, inside the server's data folder, whose text is the installed version or build, for images that keep no Steam appmanifest. A plain number is compared with Steam's newest build. |
+| `fail_log_patterns` | list of known failures | no | none | Known ways this game fails to start. While a server runs but is not ready, GameDock looks for these in the newest log lines (and in log_files) and shows the matching explanation on the server card, in Check setup and over MCP, instead of 'Docker's health check is failing'. Up to 12 items. Read-only: servers deployed earlier use the current list without being redeployed. |
+| `fail_log_patterns[].pattern` | regular expression | yes | (none) | Matches ONE log line of the failure, for example 'CustomAuthenticationFailed/k_EResultAccountNotFound'. One line, at most 300 characters. A group that repeats a group that repeats, like (a+)+, is refused. |
+| `fail_log_patterns[].title` | text | yes | (none) | What went wrong, in one plain sentence a player understands. At most 120 characters. |
+| `fail_log_patterns[].advice` | text | yes | (none) | The next step: where to get the right value, what to change, what to press. At most 600 characters. Never put a secret in it: the file is public. |
+| `log_files` | list of relative file paths | no | none | Log files the game writes inside its data folder (for example server/logs/game.log) that are scanned for fail_log_patterns as well. Only the end of the file is read, and only if it was written during the current run. Relative to the server's data folder, no '..', at most 6. Use it when the real error never reaches 'docker logs'. |
+| `builtin_fail_patterns` | true or false | no | true | GameDock also knows common failures of any game: out of memory, a port already in use, permission denied on the data folder, a full disk, SteamCMD errors and a refused Steam login. false = do not apply them to this game (use it only if they give false alarms for this game's normal log). |
 | `stop_timeout` | whole number of seconds, 1-600 | no | 0 (GameDock's usual stop time, 60 seconds) | How long this game gets to save and exit when stopped, before Docker kills it. Give slow-saving games more time. |
 <!-- field-reference:end -->
 
@@ -158,7 +168,7 @@ These apply to every entry, whoever wrote it:
 - The image must be a normal image reference (`name`, `name:tag` or `name@sha256:...`, no spaces).
 - Ports must be between 1 and 65535, and the protocol must be `tcp` or `udp`.
 - Environment variable names must be valid, and names that would change how Docker itself behaves (such as `PATH` or `DOCKER_HOST`) are refused.
-- Regular expressions must be valid, one line, and at most 300 characters.
+- Regular expressions must be valid, one line, and at most 300 characters. In `fail_log_patterns` a group that repeats a group that repeats (such as `(a+)+`) is refused, because it can hang on some log text.
 - Privileged mode, host networking, device mappings, extra capabilities (and similar keys such as `security_opt`) are refused, and so is any mount of the Docker socket (`docker.sock`).
 
 Additionally, for entries **added by an AI agent**:
@@ -186,6 +196,8 @@ These were all learned on real servers (Palworld and Enshrouded). Check each one
 12. **Wine games are slow to start** and print many warnings. Warnings are normal; look for the real ready line.
 13. **The Steam app id of the game is not the id of its dedicated server.** If `steam_app_id` is wrong, version tracking says unknown forever. `verify_game_setup` lists the Steam records (`appmanifest_<id>.acf`) it really finds and names the id to use.
 14. **Two games with the same default port cannot run together.** Pick defaults other games do not use; the Deploy dialog warns when a chosen port is taken.
+15. **A wrong key or token often looks like a slow start.** The container runs, the game installs, and then the health check never turns healthy. Games that need a login key (ASKA's Game Server Login Token, created for App ID 1898300 on the Steam page, is a real example; the Steam Web API key looks the same and is refused) print the reason in their own log. Put that line in `fail_log_patterns` and the file in `log_files`, and describe the right key in the field.
+16. **Two numbers can both be "the" Steam app id.** The key for a game server may be created for the base game's App ID, while the dedicated server installs as another app (ASKA: key for 1898300, server installed as 3246670). `steam_app_id` is the one in `appmanifest_<id>.acf`; say in `notes` when the key needs another number.
 
 ## 5. Verification checklist
 
@@ -215,7 +227,7 @@ An AI agent connected to GameDock's `/mcp` endpoint (modes `read_only`, `standar
 | `preview_deploy` | all | Dry run of a deploy: the plan (ports, folders, container command with secrets hidden) and every problem at once. Creates nothing |
 | `check_ports` | all | Are these host ports free? Reports clashes with GameDock servers and (on the real Docker backend) with other programs, and suggests free ports |
 | `verify_game_setup` | all | Read-only checklist of a deployed server against its catalog entry, with a fix for each failure |
-| `get_server_diagnostics` | all | One bundle for troubleshooting: status, container facts, ports, disk, backups, update checks, newest log lines (passwords hidden) |
+| `get_server_diagnostics` | all | One bundle for troubleshooting: status, a known `problem` if the logs show one, container facts, ports, disk, backups, update checks, newest log lines and the end of the entry's `log_files` (passwords hidden) |
 | `get_mcp_audit` | all | The newest audit-log entries (what agents did and whether it worked); secrets and file bodies are never in it |
 | `add_catalog_entry` | `standard`, `full` | Saves a new entry as `catalog/<id>.yaml`. Refuses an existing id |
 | `update_catalog_entry` | `standard`, `full` | Replaces an entry that was added through MCP. Never an entry from the repository |

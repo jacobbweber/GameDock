@@ -2,6 +2,40 @@
 
 All notable changes. Dates are 2026.
 
+## 0.6.1: say why a server is stuck (known problems), a clearer ASKA entry, and an updater that copes with a file in the way
+
+Built from a real case: Jacob's ASKA server installed but stayed Docker-"unhealthy", and GameDock only said "Docker's health check for this game is failing". The game's own log said `Failed to connect to Steam reason: k_EResultAccountNotFound` and `Disconnected with reason: CustomAuthenticationFailed`: Steam had refused the Game Server Login Token (a Steam Web API key looks the same and is refused). Now GameDock reads such lines and says so.
+
+### Added
+
+- **Known problems.** While a server runs but is not ready, GameDock scans the newest container log lines and the game's declared log files and shows the matching problem (plain title, next step and the one log line it saw, passwords and tokens hidden) on the card (badge **Problem**), in Check setup (a **Known problem** row at the top), in `get_server_diagnostics`, in the web API (`problem` on every server) and in the MCP tools `list_servers`, `get_server_status` and `verify_game_setup`. Ready servers are never scanned for a problem; a stopped server shows one only when Docker says it was killed for memory.
+- **Catalog keys** `fail_log_patterns` (up to 12 of `pattern`, `title`, `advice`), `log_files` (up to 6 relative paths inside the data folder; only the last 64 KiB is read, never through a symbolic link, ignored when written before the current run started) and `builtin_fail_patterns` (default true). Validated by `validate_catalog_entry`, `add_catalog_entry`, the loader and `scripts/lint_catalog.py` (a nested repeat such as `(a+)+` is refused; lint warns about a pattern that matches almost everything, a log file outside the mounted folders, and a pattern without a hint). They are read-only hints, so **existing servers use the current catalog entry's list without being deployed again**.
+- **Built-in patterns for every game** (conservative, plain language): killed for memory (OOM, exit 137 with the OOM flag), port already in use, permission denied on the data folder, disk full, SteamCMD (`state is 0x202/0x402/0x602`, `No subscription`, `Missing configuration`, `Failed to install`) and a refused Steam login or token. The entry's own patterns come first.
+- **Field rules** `pattern` and `pattern_hint` on a setting: the whole value must match, checked at deploy and edit time with the hint as the message; the value is never repeated in an error. Also current for older servers.
+- A clearer message for an unhealthy server without a known problem: it points to **Logs** and **Check setup**.
+- `docs/catalog-entries/aska.yaml`: the corrected ASKA entry (see below). `scripts/make_screenshots_problems.py` and `docs/gamedock-061-*.png`.
+- Docs: ADDING_A_GAME (new keys, two new traps), the agent prompt, `catalog/_template.yaml`, README, ARCHITECTURE.
+- **Tool counts unchanged** (read_only 24, standard 37, full 41): `problem` was added to existing outputs.
+
+### Changed
+
+- **ASKA entry** (kept outside `catalog/`, see below): `steam_app_id` is now `3246670` (the dedicated server's app id, which is the id in `appmanifest_3246670.acf`; the token is still created for App ID 1898300, and the token field says so, with the page `https://steamcommunity.com/dev/managegameservers` and that the Steam Web API key from `/dev/apikey` is wrong); the token must be 32 hex characters; a `fail_log_patterns` entry for `CustomAuthenticationFailed` / `k_EResultAccountNotFound`; `log_files: [server/logs/aska_game_output.log]`; new settings `ASKA_MODE`, `ASKA_SEED`, `ASKA_KEEP_WORLD_ALIVE`, `ASKA_AUTOSAVE_STYLE`, `ASKA_SAVE_BACKUP` (default 1), `ASKA_KEEP_SAVES` and `TZ`. **Because the file changed, an approved AI-added ASKA entry asks for approval again** (the review gate compares the file's SHA-256); approve it again in Catalog.
+- **The self-updater copes with an untracked catalog file in the way.** Before `git pull --ff-only` it moves a plain, untracked file directly in `catalog/` that the update is about to add (same name) to `<data>/catalog-displaced/<name>.<UTC time>` (an identical file is simply replaced), and puts it back if the pull fails. It never touches symlinks, tracked files or other paths, and the update result and dialog tell where the copy is. This only helps from 0.6.1 on: GameDock 0.6.0's updater still stops with "untracked working tree files would be overwritten".
+- The unhealthy message now says the health check "keeps failing" and where to look. Docker marks a container unhealthy only after the image's start period plus its retries.
+- Version 0.6.1 (only the version lines of `pyproject.toml` and `gamedock/__init__.py`; dependencies unchanged, so the header update button accepts it).
+
+### Why `aska.yaml` is not in `catalog/`
+
+Files in `catalog/` that are in the repository are trusted and need no approval, which would bypass the review gate for a game that was added by an AI agent, and a tracked `catalog/aska.yaml` would make GameDock 0.6.0's updater fail on a machine that already holds an untracked file of that name. The corrected entry is therefore shipped as `docs/catalog-entries/aska.yaml`: copy it over the existing file in `catalog/` (or let an agent call `update_catalog_entry`), then approve it in Catalog.
+
+### Known limits
+
+- A Game Server Login Token and a Steam Web API key are both 32 hex characters; the pattern catches typos, stray spaces and a wrong length, and the log message catches the wrong kind of key.
+- A server deployed before this release keeps `steam_app_id` from its snapshot: version tracking for the existing ASKA server stays "unknown" until it is deleted (keep its data) and deployed again. The problem messages and field rules do refresh.
+- An exit code 137 without Docker's out-of-memory flag shows only in Check setup and diagnostics, not on the card (a slow `docker stop` looks the same).
+- Log patterns need the text to appear in the newest 600 container lines or in the end of a declared log file.
+- ASKA entry details that were rebuilt without access to the original file (name, description, labels, config file note) should be compared with the copy already on the machine.
+
 ## 0.6.0: Check setup, port-conflict warnings, diagnostics and a stricter add-a-game loop
 
 Built from a real AI-agent review (AutoReiv adding ASKA through MCP) and from the questions a person asks when a new server does not behave: *is it set up the way the entry says, is the port free, what do I paste into a chat?* Everything new is read-only: no tool approves an entry or re-records a config baseline, and nothing destructive was added.

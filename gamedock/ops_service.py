@@ -14,6 +14,7 @@ from . import checks as ck
 from . import configfiles as cfg
 from . import configforms as forms
 from . import portcheck as pc
+from . import problems as pb
 from . import readiness as rd
 from . import steam as stm
 from .backends.docker_cli import DockerCliBackend
@@ -29,7 +30,10 @@ RESTART_WARN = 3
 LOG_SCAN_LINES = 1500
 DIAG_MAX_LOG_LINES = 200
 # Snapshot keys that only describe the game, not the container; a difference there needs no redeploy.
-_DRIFT_SKIP = {"id", "name", "description", "notes", "update_note"}
+_DRIFT_SKIP = {"id", "name", "description", "notes", "update_note",
+               # read-only hints that always come from the current entry (see ProblemsMixin)
+               "fail_log_patterns", "log_files", "builtin_fail_patterns"}
+_FIELD_RULE_KEYS = ("pattern", "pattern_hint")   # format rules of a setting: they check typing, not the container
 _SNAPSHOT_OPTIONAL = {"update_note", "backup_stop_first", "save_command", "steam_app_id", "steam_branch", "steam_manifest_dir",
                       "version_log_pattern", "game_update_method", "installed_build_file", "ready_log_pattern",
                       "progress_log_pattern"}
@@ -66,6 +70,8 @@ class OpsMixin:
         except GameDockError:
             return ["(the stored snapshot cannot be read)"]
         now = entry_to_dict(current)
+        for d in (snap, now):
+            d["fields"] = [{k: v for k, v in f.items() if k not in _FIELD_RULE_KEYS} for f in d.get("fields", [])]
         out = []
         for k, v in now.items():
             if k in _DRIFT_SKIP or (k in _SNAPSHOT_OPTIONAL and k not in inst.template):
@@ -250,6 +256,7 @@ class OpsMixin:
         text = self._scan_text(inst) if running else ""
         ready_now = self._check_container(checks, inst, state, details)
         game_ready = self._check_ready(checks, inst, t_read, state, running, text)
+        problem = self._check_problem(checks, inst, t, state, details, running, text, ready_now and game_ready)
         if hints.steam_app_id or hints.installed_build_file:
             self._check_steam(checks, inst, hints, running, text, ready_now and game_ready)
         self._check_config_files(checks, inst, t, running)
@@ -257,16 +264,37 @@ class OpsMixin:
         self._check_volumes(checks, inst, t, running, details)
         self._check_settings(checks, inst, t)
         self._check_catalog_snapshot(checks, inst)
-        return self._verify_result(inst, checks, details)
+        return self._verify_result(inst, checks, details, problem)
 
-    def _verify_result(self, inst: Instance, checks: list[ck.Check], details) -> dict:
+    def _verify_result(self, inst: Instance, checks: list[ck.Check], details, problem=None) -> dict:
         out = {"server_id": inst.id, "name": inst.name, "game_id": inst.game_id,
                "checked_at": self._now().isoformat(timespec="seconds"), "read_only": True,
+               "problem": problem.to_dict() if problem else None,
                "checks": [c.to_dict() for c in checks]}
         out.update(ck.summarize(checks))
         out["how_to_read"] = ("pass = fine, warn = worth a look (often just 'not finished starting yet'), fail = a problem. "
                               "`suggestions` are concrete fixes for the catalog entry or the server.")
         return out
+
+    # -- a known problem in the logs (see problems.py)
+    def _check_problem(self, checks, inst, t, state, details, running, text, ready) -> "pb.Problem | None":
+        """Adds a 'Known problem' check when the logs (or how the container ended) explain why the game is not ready.
+        Nothing is added when the game is ready or no known pattern matches. Returns the problem, or None."""
+        if running and ready:
+            return None
+        scan_text = text
+        if not running:
+            scan_text = self._scan_text(inst, 400) if details and details.get("exit_code") else ""
+        try:
+            p = self.find_problem(inst, t, running, scan_text, state.started_at, details)
+        except Exception:  # noqa: BLE001 - a check must never break the checklist
+            p = None
+        if p is None:
+            return None
+        where = f" Seen in {p.where}: \u201c{p.excerpt}\u201d" if p.excerpt and p.source != pb.SOURCE_DOCKER else \
+            (f" Seen: {p.excerpt}" if p.excerpt else "")
+        checks.insert(min(1, len(checks)), ck.Check("problem", "Known problem", ck.FAIL, f"{p.title}{where}", p.advice))
+        return p
 
     # -- container + health + restarts
     def _check_container(self, checks, inst, state, details) -> bool:
@@ -650,12 +678,21 @@ class OpsMixin:
         chk = getattr(self, "_image_checks", {}).get(inst.id)
         game_chk = self.steam.cached(hints.steam_app_id, hints.steam_branch or "public") if hints.steam_app_id else None
         version = self.updater.status()
+        problem = info.problem or None
+        if problem is None and info.status in (Status.RUNNING, Status.STOPPED) and not info.ready:
+            try:
+                p = self.find_problem(inst, t, info.status == Status.RUNNING, log_text,
+                                      (details or {}).get("started_at", ""), details)
+                problem = p.to_dict() if p else None
+            except Exception:  # noqa: BLE001 - diagnostics must still be produced
+                problem = None
         d = {
             "generated_at": self._now().isoformat(timespec="seconds"), "read_only": True,
             "gamedock": {"version": version["version"], "commit": version["commit_short"]},
             "server": {"id": inst.id, "name": inst.name, "game_id": inst.game_id, "game": t.name, "image": t.image,
                        "created_at": inst.created_at, "status": info.status.value, "phase": info.phase, "ready": info.ready,
-                       "phase_detail": info.phase_detail, "detail": info.detail, "activity": info.activity},
+                       "phase_detail": info.phase_detail, "detail": info.detail, "activity": info.activity,
+                       "problem": problem},
             "container": ({"status": details["status"], "health": details["health"] or "none",
                            "exit_code": details["exit_code"], "out_of_memory": details["oom_killed"],
                            "restart_count": details["restart_count"], "started_at": details["started_at"],
@@ -678,6 +715,7 @@ class OpsMixin:
                                   if hints.steam_app_id else None),
             "schedule": info.schedule,
             "logs": {"lines": log_text.count("\n") + 1 if log_text else 0, "text": log_text, "note": log_note},
+            "log_files": self.log_file_tails(inst, t),
             "notes": notes,
         }
         return d
@@ -694,6 +732,12 @@ class OpsMixin:
             L.append(f"  {s['phase_detail']}")
         if s["detail"]:
             L.append(f"Detail: {s['detail']}")
+        pr = s.get("problem")
+        if pr:
+            L.append(f"PROBLEM: {pr['title']}")
+            L.append(f"  Next step: {pr['advice']}")
+            if pr.get("excerpt"):
+                L.append(f"  Seen in {pr.get('where') or 'the logs'}: {pr['excerpt']}")
         if c:
             L.append(f"Container: {c['status']}, health {c['health']}, restarts {c['restart_count']}, exit code "
                      f"{c['exit_code'] if c['exit_code'] is not None else '-'}, out of memory: {'yes' if c['out_of_memory'] else 'no'}, started {c['started_at'] or '-'}")
@@ -721,4 +765,7 @@ class OpsMixin:
         for n in d["notes"]:
             L.append(f"Note: {n}")
         L += ["", f"--- last {d['logs']['lines']} log lines (passwords hidden) ---", d["logs"]["text"] or d["logs"]["note"] or "(no log output)"]
+        for lf in d.get("log_files") or []:
+            L += ["", f"--- end of the game's log file {lf['path']} (passwords hidden) ---",
+                  (lf["text"] or "(empty)") if lf["found"] else "(file not found: the game has not written it yet)"]
         return "\n".join(L)

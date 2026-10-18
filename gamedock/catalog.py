@@ -13,7 +13,8 @@ import yaml
 from .errors import CatalogError
 from .steam import APP_ID_RE, BRANCH_RE
 from .models import (
-    CONFIG_FORMATS, ENV_NAME_RE, GAME_UPDATE_METHODS, ID_RE, IMAGE_RE, UPDATE_METHODS, CatalogEntry, ConfigFile, EnvField, PortMapping,
+    CONFIG_FORMATS, ENV_NAME_RE, GAME_UPDATE_METHODS, ID_RE, IMAGE_RE, UPDATE_METHODS, CatalogEntry, ConfigFile, EnvField, FailPattern,
+    PortMapping,
     VolumeMapping, is_reserved_env_name,
 )
 
@@ -37,17 +38,40 @@ def _parse_field(f: object, source: str) -> EnvField:
     if is_reserved_env_name(f["name"]):
         raise CatalogError(f"{source}: '{f['name']}' is a reserved name (it would change how the docker command "
                            "behaves) and cannot be used as a setting")
+    pattern = _parse_pattern(f.get("pattern"), f"pattern of setting {f['name']}", source, groups=None)
+    hint = str(f.get("pattern_hint") or "").strip().rstrip(".").strip()
+    if len(hint) > MAX_HINT or "\n" in hint or "\0" in hint:
+        raise CatalogError(f"{source}: pattern_hint of {f['name']} must be one line of at most {MAX_HINT} characters")
+    if hint and not pattern:
+        raise CatalogError(f"{source}: setting {f['name']} has a pattern_hint but no pattern")
+    default = "" if f.get("default") is None else str(f["default"])
+    if pattern and default and not _full_match(pattern, default):
+        raise CatalogError(f"{source}: the default of {f['name']} does not match its own pattern")
     return EnvField(
         name=f["name"],
         label=str(f.get("label") or f["name"]),
-        default="" if f.get("default") is None else str(f["default"]),
+        default=default,
         secret=bool(f.get("secret", False)),
         required=bool(f.get("required", False)),
         description=str(f.get("description", "")),
+        pattern=pattern,
+        pattern_hint=hint,
     )
 
 
 KEY_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
+MAX_HINT = 300
+MAX_FAIL_PATTERNS = 12
+MAX_LOG_FILES = 6
+MAX_TITLE = 120
+MAX_ADVICE = 600
+
+
+def _full_match(pattern: str, value: str) -> bool:
+    try:
+        return re.fullmatch(pattern, value) is not None
+    except re.error:
+        return False
 
 
 def _parse_config_file(c: object, source: str) -> ConfigFile:
@@ -88,6 +112,58 @@ def _parse_pattern(value: object, name: str, source: str, groups: int | None) ->
         raise CatalogError(f"{source}: {name} must contain exactly {groups} capture group, for example "
                            "'progress: *([0-9.]+)' (the part in brackets is the percentage)")
     return value
+
+
+# A group that is repeated and contains its own repeat, such as (a+)+ or (.*)*, can make a regular expression take
+# forever on some text. Log lines come from the game, so such patterns are refused in fail_log_patterns.
+_NESTED_REPEAT_RE = re.compile(r"\((?:[^()\\]|\\.)*[+*](?:[^()\\]|\\.)*\)[+*{]")
+
+
+def _parse_fail_patterns(value: object, source: str) -> tuple[FailPattern, ...]:
+    if value in (None, "", []):
+        return ()
+    if not isinstance(value, list):
+        raise CatalogError(f"{source}: fail_log_patterns must be a list of {{pattern, title, advice}} items")
+    if len(value) > MAX_FAIL_PATTERNS:
+        raise CatalogError(f"{source}: fail_log_patterns has {len(value)} items; at most {MAX_FAIL_PATTERNS} are allowed")
+    out: list[FailPattern] = []
+    for i, item in enumerate(value, 1):
+        if not isinstance(item, dict):
+            raise CatalogError(f"{source}: fail_log_patterns item {i} must have pattern, title and advice")
+        extra = sorted(str(k) for k in item if k not in FAIL_PATTERN_KEYS)
+        if extra:
+            raise CatalogError(f"{source}: fail_log_patterns item {i} has keys GameDock does not know: {', '.join(extra)} "
+                               f"(allowed: {', '.join(FAIL_PATTERN_KEYS)})")
+        pattern = _parse_pattern(item.get("pattern"), f"fail_log_patterns item {i} pattern", source, groups=None)
+        if not pattern:
+            raise CatalogError(f"{source}: fail_log_patterns item {i} needs a pattern (a regular expression)")
+        if _NESTED_REPEAT_RE.search(pattern):
+            raise CatalogError(f"{source}: fail_log_patterns item {i}: the pattern repeats a group that already repeats "
+                               "(like (a+)+), which can hang on some log text. Write it more simply.")
+        title, advice = (str(item.get(k) or "").strip() for k in ("title", "advice"))
+        if not title or not advice:
+            raise CatalogError(f"{source}: fail_log_patterns item {i} needs a title (what went wrong, in plain words) and "
+                               "advice (what to do next)")
+        if len(title) > MAX_TITLE or len(advice) > MAX_ADVICE or "\0" in title + advice:
+            raise CatalogError(f"{source}: fail_log_patterns item {i}: title at most {MAX_TITLE} and advice at most "
+                               f"{MAX_ADVICE} characters")
+        out.append(FailPattern(pattern, " ".join(title.split()), " ".join(advice.split())))
+    return tuple(out)
+
+
+def _parse_log_files(value: object, source: str) -> tuple[str, ...]:
+    if value in (None, "", []):
+        return ()
+    if not isinstance(value, list) or len(value) > MAX_LOG_FILES:
+        raise CatalogError(f"{source}: log_files must be a list of at most {MAX_LOG_FILES} file paths")
+    out = []
+    for v in value:
+        p = _parse_relative_path(v, "log_files item", source)
+        if not p:
+            raise CatalogError(f"{source}: log_files has an empty item")
+        if p not in out:
+            out.append(p)
+    return tuple(out)
 
 
 def _parse_save_command(value: object, source: str) -> tuple[str, ...]:
@@ -154,10 +230,11 @@ def _parse_steam(data: dict, source: str) -> tuple[str, str, str, str]:
 ENTRY_KEYS = ("id", "name", "image", "description", "notes", "ports", "volumes", "env", "fields", "config_files",
               "update_method", "update_note", "backup_stop_first", "save_command", "ready_log_pattern",
               "progress_log_pattern", "steam_app_id", "steam_branch", "steam_manifest_dir", "version_log_pattern",
-              "game_update_method", "installed_build_file", "stop_timeout")
+              "game_update_method", "installed_build_file", "stop_timeout", "fail_log_patterns", "log_files", "builtin_fail_patterns")
 PORT_KEYS = ("protocol", "host", "container")
 VOLUME_KEYS = ("host", "container")
-FIELD_KEYS = ("name", "label", "default", "secret", "required", "description")
+FIELD_KEYS = ("name", "label", "default", "secret", "required", "description", "pattern", "pattern_hint")
+FAIL_PATTERN_KEYS = ("pattern", "title", "advice")
 CONFIG_FILE_KEYS = ("path", "label", "format", "sensitive_keys", "hot_edit", "note")
 
 # Things a catalog file must never ask for. GameDock always creates plain, unprivileged containers on Docker's
@@ -180,7 +257,7 @@ FORBIDDEN_KEYS = {
     "sysctls": "kernel setting changes",
 }
 MAX_DESCRIPTION = 2000
-LIST_KEYS = ("ports", "volumes", "fields", "config_files")
+LIST_KEYS = ("ports", "volumes", "fields", "config_files", "fail_log_patterns", "log_files")
 DOCKER_SOCKET_RE = re.compile(r"docker\.sock", re.I)
 
 
@@ -192,7 +269,7 @@ def _bad_sub_keys(data: Mapping) -> list[str]:
     """Unknown keys inside ports / volumes / fields / config_files items (plain words, for strict checking)."""
     out = []
     for key, allowed in (("ports", PORT_KEYS), ("volumes", VOLUME_KEYS), ("fields", FIELD_KEYS),
-                         ("config_files", CONFIG_FILE_KEYS)):
+                         ("config_files", CONFIG_FILE_KEYS), ("fail_log_patterns", FAIL_PATTERN_KEYS)):
         items = data.get(key)
         if not isinstance(items, list):
             continue
@@ -339,6 +416,14 @@ def parse_definition(data: object, source: str = "<definition>", origin: str = "
     if isinstance(stop_timeout, bool) or not isinstance(stop_timeout, int) or not (0 <= stop_timeout <= 600):
         raise CatalogError(f"{source}: stop_timeout must be a whole number of seconds from 1 to 600 (or left out)")
 
+    fail_patterns = _parse_fail_patterns(data.get("fail_log_patterns"), source)
+    log_files = _parse_log_files(data.get("log_files"), source)
+    builtin = data.get("builtin_fail_patterns", True)
+    if builtin is None:
+        builtin = True
+    if not isinstance(builtin, bool):
+        raise CatalogError(f"{source}: builtin_fail_patterns must be true or false")
+
     return CatalogEntry(
         id=gid,
         name=data["name"],
@@ -363,6 +448,9 @@ def parse_definition(data: object, source: str = "<definition>", origin: str = "
         game_update_method=game_update_method,
         installed_build_file=installed_file,
         stop_timeout=stop_timeout,
+        fail_log_patterns=fail_patterns,
+        log_files=log_files,
+        builtin_fail_patterns=builtin,
         origin=origin,
     )
 
@@ -388,6 +476,9 @@ def entry_to_dict(e: CatalogEntry) -> dict:
         "game_update_method": e.game_update_method,
         "installed_build_file": e.installed_build_file,
         "stop_timeout": e.stop_timeout,
+        "fail_log_patterns": [{"pattern": f.pattern, "title": f.title, "advice": f.advice} for f in e.fail_log_patterns],
+        "log_files": list(e.log_files),
+        "builtin_fail_patterns": e.builtin_fail_patterns,
         "config_files": [
             {"path": c.path, "label": c.label, "format": c.format,
              "sensitive_keys": list(c.sensitive_keys), "hot_edit": c.hot_edit, "note": c.note}
@@ -398,7 +489,8 @@ def entry_to_dict(e: CatalogEntry) -> dict:
         "env": dict(e.env),
         "fields": [
             {"name": f.name, "label": f.label, "default": f.default, "secret": f.secret,
-             "required": f.required, "description": f.description}
+             "required": f.required, "description": f.description, "pattern": f.pattern,
+             "pattern_hint": f.pattern_hint}
             for f in e.fields
         ],
     }

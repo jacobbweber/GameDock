@@ -100,8 +100,10 @@ class FakeBackend:
                 return ContainerState(Status.NOT_CREATED)
             running = entry[1] == Status.RUNNING
             started = self._started.get(name)
+            code, oom = self.exit_info.get(name, (None, False))
             return ContainerState(entry[1], health=self.health.get(name, "") if running else "",
-                                  started_at=started.isoformat() if running and started else "")
+                                  started_at=started.isoformat() if running and started else "",
+                                  exit_code=None if running else code, oom_killed=oom and not running)
 
     def create(self, spec: ContainerSpec) -> None:
         self._pause("create")

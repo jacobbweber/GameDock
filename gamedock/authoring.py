@@ -99,6 +99,14 @@ FIELD_REFERENCE: list[dict] = [
      "meaning": "true = the person must fill it in when deploying."},
     {"key": "fields[].description", "type": "text", "required": False, "default": "empty",
      "meaning": "Help text under the box. Say what an empty value means (for example 'leave empty for no password')."},
+    {"key": "fields[].pattern", "type": "regular expression", "required": False, "default": "empty (no format check)",
+     "meaning": "The WHOLE value must match this when a server is deployed or edited, for example [0-9A-Fa-f]{32} for a "
+                "32-character hex token. A wrong value is refused with a plain message that never repeats what was typed "
+                "(it may be a password). A blank secret on edit keeps the stored value and is not checked. One line, at "
+                f"most {MAX_PATTERN_LEN} characters. The default, if any, must match it."},
+    {"key": "fields[].pattern_hint", "type": "text", "required": False, "default": "empty",
+     "meaning": "What a right value looks like, in plain words, shown when the pattern does not match (for example 'It is "
+                "exactly 32 letters and digits (0-9, A-F)'). One line, at most 300 characters. Needs pattern."},
     {"key": "config_files", "type": "list of files", "required": False, "default": "none",
      "meaning": "Settings files people may read and edit with the Config button. Each must be inside a mounted folder."},
     {"key": "config_files[].path", "type": "relative file path", "required": True, "default": "(none)",
@@ -156,6 +164,28 @@ FIELD_REFERENCE: list[dict] = [
     {"key": "installed_build_file", "type": "relative file path", "required": False, "default": "empty",
      "meaning": "A small file, inside the server's data folder, whose text is the installed version or build, for "
                 "images that keep no Steam appmanifest. A plain number is compared with Steam's newest build."},
+    {"key": "fail_log_patterns", "type": "list of known failures", "required": False, "default": "none",
+     "meaning": "Known ways this game fails to start. While a server runs but is not ready, GameDock looks for these in the "
+                "newest log lines (and in log_files) and shows the matching explanation on the server card, in Check setup "
+                "and over MCP, instead of 'Docker's health check is failing'. Up to 12 items. Read-only: servers deployed "
+                "earlier use the current list without being redeployed."},
+    {"key": "fail_log_patterns[].pattern", "type": "regular expression", "required": True, "default": "(none)",
+     "meaning": "Matches ONE log line of the failure, for example 'CustomAuthenticationFailed|k_EResultAccountNotFound'. One "
+                f"line, at most {MAX_PATTERN_LEN} characters. A group that repeats a group that repeats, like (a+)+, is refused."},
+    {"key": "fail_log_patterns[].title", "type": "text", "required": True, "default": "(none)",
+     "meaning": "What went wrong, in one plain sentence a player understands. At most 120 characters."},
+    {"key": "fail_log_patterns[].advice", "type": "text", "required": True, "default": "(none)",
+     "meaning": "The next step: where to get the right value, what to change, what to press. At most 600 characters. Never "
+                "put a secret in it: the file is public."},
+    {"key": "log_files", "type": "list of relative file paths", "required": False, "default": "none",
+     "meaning": "Log files the game writes inside its data folder (for example server/logs/game.log) that are scanned for "
+                "fail_log_patterns as well. Only the end of the file is read, and only if it was written during the current "
+                "run. Relative to the server's data folder, no '..', at most 6. Use it when the real error never reaches "
+                "'docker logs'."},
+    {"key": "builtin_fail_patterns", "type": "true or false", "required": False, "default": "true",
+     "meaning": "GameDock also knows common failures of any game: out of memory, a port already in use, permission denied on "
+                "the data folder, a full disk, SteamCMD errors and a refused Steam login. false = do not apply them to this "
+                "game (use it only if they give false alarms for this game's normal log)."},
     {"key": "stop_timeout", "type": "whole number of seconds, 1-600", "required": False,
      "default": "0 (GameDock's usual stop time, 60 seconds)",
      "meaning": "How long this game gets to save and exit when stopped, before Docker kills it. Give slow-saving games "
@@ -383,6 +413,32 @@ def analyze_entry(e: CatalogEntry, others: Mapping[str, CatalogEntry] | None = N
         add("warn", f"Only {exposed} setting(s) are exposed as fields. Rule: expose every documented player-facing setting "
                     "(game mode, world name or seed, difficulty, save options, slot count...) as a field, or list in the "
                     "notes which ones were left out and why.")
+    for f in e.fields:
+        if f.secret and f.required and not f.pattern:
+            add("info", f"The required secret {f.name} has no format check (pattern). If it has a known shape (a fixed length, "
+                        "hex digits), add pattern and pattern_hint so a wrong paste is refused with a clear message.")
+    for f in e.fields:
+        if f.pattern and not f.pattern_hint:
+            add("warn", f"The field {f.name} has a pattern but no pattern_hint, so a wrong value is refused with a vague message. "
+                        "Say in pattern_hint what a right value looks like.")
+    for i, fp in enumerate(e.fail_log_patterns, 1):
+        try:
+            too_broad = bool(re.search(fp.pattern, "") or re.search(fp.pattern, "x") or re.search(fp.pattern, "Server started"))
+        except re.error:
+            too_broad = False
+        if too_broad:
+            add("warn", f"fail_log_patterns item {i} ({fp.title!r}) matches ordinary log lines, so it would blame a healthy start. "
+                        "Make the pattern specific to the failure's own wording.")
+    if e.steam_app_id and not e.fail_log_patterns:
+        add("info", "No fail_log_patterns: when the game cannot start, the card only says the health check is failing. "
+                    "Add the game's known error lines (with a plain title and a next step) so GameDock can name the cause.")
+    for rel in e.log_files:
+        if e.volumes and not any(rel == h or rel.startswith(h + "/") for h in
+                                 (v.host.removeprefix("./").strip("/") for v in e.volumes if not v.host.startswith(("/", "~"))) if h):
+            add("warn", f"log_files entry {rel} is not inside any mounted folder, so it only exists inside the container and "
+                        "GameDock can never read it.")
+    if e.log_files and not e.fail_log_patterns:
+        add("info", "log_files is set but there are no fail_log_patterns, so the files are only used by the built-in patterns.")
     if e.steam_app_id and not e.installed_build_file:
         if not e.volumes:
             add("warn", "steam_app_id is set but no folder is mounted, so GameDock can never find the game's Steam record "
@@ -567,9 +623,19 @@ def summarize_entry(e: CatalogEntry) -> dict:
         lines.append("Lets people edit: " + ", ".join(c.path for c in e.config_files) + ".")
     if e.steam_app_id:
         lines.append(f"Tracks game versions with Steam app id {e.steam_app_id}.")
+    if e.fail_log_patterns:
+        lines.append(f"Knows {len(e.fail_log_patterns)} way(s) the game fails to start and explains them on the card: "
+                     + "; ".join(f.title for f in e.fail_log_patterns) + ".")
+    if e.log_files:
+        lines.append("Reads the end of these log files inside the server's own data folder to find those problems: "
+                     + ", ".join(e.log_files) + " (one matching line may be shown, with passwords hidden).")
+    patterned = [f.name for f in e.fields if f.pattern]
+    if patterned:
+        lines.append("Checks the format of: " + ", ".join(patterned) + " when a server is deployed or edited.")
     return {"id": e.id, "name": e.name, "image": e.image, "ports": ports, "folders": folders,
             "fields": [f.name for f in e.fields], "secret_fields": secrets, "fixed_env_names": list(e.env),
-            "config_files": [c.path for c in e.config_files], "steam_app_id": e.steam_app_id, "lines": lines}
+            "config_files": [c.path for c in e.config_files], "steam_app_id": e.steam_app_id,
+            "fail_log_patterns": [f.title for f in e.fail_log_patterns], "log_files": list(e.log_files), "lines": lines}
 
 
 # --------------------------------------------------------------------------- the review record

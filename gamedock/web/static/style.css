@@ -224,6 +224,13 @@ pre, textarea#config-text { max-width: 100%; }
 .statusbox.installing { border-color: #1f4f8f; background: rgba(31,111,235,.09); }
 .statusbox.running { padding: 6px 12px; background: rgba(46,160,67,.08); border-color: #2a5a35; }
 .statusbox.unhealthy, .statusbox.failed { border-color: #6e2b2b; background: rgba(218,54,51,.08); }
+.problem-box { font-size: 13px; overflow-wrap: anywhere; }
+.problem-title { color: #ffa198; font-weight: 600; }
+.problem-advice { color: var(--text, #c9d1d9); margin-top: 6px; }
+.problem-seen { color: var(--muted); margin-top: 8px; font-size: 12px; }
+.problem-seen code { white-space: pre-wrap; word-break: break-word; }
+.problem-links { color: var(--muted); margin-top: 8px; font-size: 12px; }
+.statusbox.starting .problem-box, .statusbox.installing .problem-box { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
 .status-text { font-size: 13px; color: var(--muted); margin-top: 7px; overflow-wrap: anywhere; }
 .status-text.ok { color: #56d364; margin-top: 0; font-weight: 600; }
 .status-text.warn { color: #e3b341; margin-top: 0; }

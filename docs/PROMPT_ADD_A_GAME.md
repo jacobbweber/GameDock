@@ -42,7 +42,10 @@ STEPS
    inspect again. If the image is not on the machine, say so; ask me to run "docker pull <image>" on the
    GameDock machine if you need its declared ports, variables and folders, then call inspect_image again.
 4. Write the catalog entry from the template in the guide. Expose every documented player-facing setting
-   as a field (or say in "notes" which ones you left out and why). Call validate_catalog_entry repeatedly
+   as a field (or say in "notes" which ones you left out and why). Describe, in each secret field's
+   "description", exactly where the person gets the key and what NOT to paste instead; give a value with a
+   fixed shape a "pattern" and "pattern_hint". Write the image's documented error messages into
+   "fail_log_patterns" (plain "title", next-step "advice") and name the game's own log files in "log_files". Call validate_catalog_entry repeatedly
    until "valid" is true. Read the warnings and fix those that apply.
 5. If you have standard or full mode: call add_catalog_entry. If you only have read-only mode: stop here
    and give me the validated YAML in your report. After adding, tell me the entry is waiting for my review

@@ -160,7 +160,9 @@ class DockerCliBackend:
         status = _STATUS_MAP.get(found.raw, Status.ERROR)
         running = found.raw in ("running", "restarting")
         return ContainerState(status, detail=describe_state(found), health=found.health if running else "",
-                              started_at=found.started_at if running else "")
+                              started_at=found.started_at if running else "",
+                              exit_code=None if running or found.raw == "created" else found.exit_code,
+                              oom_killed=found.oom and not running)
 
     def get_logs(self, name: str, tail: int = 200, since: str | None = None) -> str:
         found = self._ours(name)

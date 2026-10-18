@@ -110,7 +110,8 @@ def make_tools(service: GameDockService, confirms: ConfirmationStore, audit: Aud
         """List deployed servers with their status (running, stopped, not_created, error), ports and
         settings. Secret settings are never shown, only whether they are set. `status: running` only means the
         container is up: check `ready` (true = the game can be joined) and `phase` (starting, installing with
-        `progress` percent, ready, unhealthy). `activity` shows what GameDock is doing right now (e.g. deploying).
+        `progress` percent, ready, unhealthy). `problem` is empty, or a known failure found in the logs of a server that is
+        not ready ({title, advice, ...}: read it before guessing). `activity` shows what GameDock is doing right now (e.g. deploying).
         `update_available` says whether a newer game image exists (null = unknown). For SteamCMD games
         `game_version`, `installed_build`, `latest_build` and `game_update_status` (up_to_date, update_available,
         could_not_check, unknown) describe the game's own version; see check_game_update. `schedule` summarises the
@@ -121,7 +122,9 @@ def make_tools(service: GameDockService, confirms: ConfirmationStore, audit: Aud
     def get_server_status(server_id: ServerId) -> Result:
         """Current status and settings of one server. `status: running` only means the container is up; the game can
         be joined when `ready` is true. `phase` is starting, installing (with `progress` percent), ready or
-        unhealthy; `phase_detail` explains it in plain words. `activity` is what GameDock is doing right now.
+        unhealthy; `phase_detail` explains it in plain words. `problem` is empty, or (while the game is not ready, or after it was killed
+        for memory) `{title, advice, source, where, excerpt}`: a known failure found in the logs, such as "Steam rejected the
+        login token", with the next step and one matching log line (passwords hidden). `activity` is what GameDock is doing right now.
         `update_available` is true when the registry has a newer image than the container runs, false when it is current
         and null when unknown; `update_note` explains how this game really updates. `game_version`, `installed_build`,
         `latest_build` and `game_update_status` describe the game's own version (SteamCMD games)."""
@@ -279,7 +282,10 @@ def make_tools(service: GameDockService, confirms: ConfirmationStore, audit: Aud
         catalog's steam_app_id matches the record that is really there, each config file exists and parses in its declared
         format, each port is published and bound, each folder exists and is used, required settings are filled (secrets only
         as set / not set), free disk space, and whether the catalog entry changed since the server was deployed. `suggestions`
-        lists concrete fixes such as "appmanifest_X.acf was found with id Y, not your steam_app_id Z". Read-only."""
+        lists concrete fixes such as "appmanifest_X.acf was found with id Y, not your steam_app_id Z". When the game is not ready,
+        a "Known problem" check (and the top-level `problem`) names a failure found in the container log or in the entry's
+        `log_files`, using the entry's `fail_log_patterns` first and GameDock's built-in ones (out of memory, port in use,
+        permission denied, disk full, SteamCMD errors, refused Steam login) after; its `fix` is the next step. Read-only."""
         r = service.verify_game_setup(server_id)
         r["_audit_detail"] = f"{r['overall']}: {r['summary']}"
         return r
@@ -321,8 +327,8 @@ def make_tools(service: GameDockService, confirms: ConfirmationStore, audit: Aud
     ) -> Result:
         """One bundle for troubleshooting a server: status and phase, container facts (health, exit code, out-of-memory flag,
         restart count), configured and published ports, settings (secrets only set / not set), data folder size, free disk,
-        newest backup, last game and image update checks, GameDock's version and the newest log lines with passwords and
-        tokens redacted. Read-only. The web page has the same bundle as a Copy diagnostics button."""
+        newest backup, last game and image update checks, GameDock's version, a `problem` (a known failure found in the logs,
+        with the next step), the end of the entry's `log_files` and the newest log lines with passwords and tokens redacted. Read-only. The web page has the same bundle as a Copy diagnostics button."""
         return service.get_server_diagnostics(server_id, log_lines)
 
     @tool(READ, _ann(read=True))
