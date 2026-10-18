@@ -91,6 +91,7 @@ class InstalledGame:
     state_flags: str = ""      # "4" = fully installed; other values mean an update or validation is running
     name: str = ""
     path: str = ""
+    comparable: bool = True    # False = `build` is some version text, not a Steam build number (cannot be compared)
 
     @property
     def complete(self) -> bool:
@@ -180,6 +181,26 @@ def read_installed(path: Path) -> InstalledGame | None:
     except OSError:
         return None
     return installed_from_manifest(parse_manifest(text), str(path))
+
+
+VERSION_FILE_RE = re.compile(r"^[\w.+\-() ]{1,64}$")
+
+
+def read_version_file(path: Path) -> InstalledGame | None:
+    """The installed version from a small text file such as ``game/current_version`` (first non-empty line).
+    A number is taken as the Steam build id; any other text is shown as the version but cannot be compared with
+    Steam's newest build. None if the file cannot be read, is empty, or holds anything but a short version text."""
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read(4096)
+    except OSError:
+        return None
+    line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+    if not VERSION_FILE_RE.match(line):
+        return None
+    return InstalledGame(line, None, "", "", str(path), comparable=line.isdigit())
 
 
 def render_manifest(app_id: str, build: str, updated_at: int | None = None, name: str = "Game Server",
@@ -400,6 +421,9 @@ def compute_status(has_steam_id: bool, installed: InstalledGame | None, latest: 
         return COULD_NOT_CHECK, "The newest game version has not been looked up yet."
     if not latest.ok:
         return COULD_NOT_CHECK, latest.error or "The newest game version could not be looked up."
+    if not installed.comparable:
+        return COULD_NOT_CHECK, (f"The installed game version is '{installed.build}', which is not a Steam build number, "
+                                 f"so GameDock cannot compare it with the newest Steam build ({latest.build}).")
     a, b = int(installed.build), int(latest.build)
     if a == b or a > b:
         return UP_TO_DATE, f"The installed game (build {installed.build}) is the newest public version."

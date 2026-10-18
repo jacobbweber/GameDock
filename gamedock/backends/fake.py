@@ -122,7 +122,7 @@ class FakeBackend:
                     hook()
             self._containers[name] = (self._containers[name][0], Status.RUNNING)
 
-    def stop(self, name: str) -> None:
+    def stop(self, name: str, timeout: int | None = None) -> None:
         self._pause("stop")
         with self._lock:
             self.calls.append(("stop", name))

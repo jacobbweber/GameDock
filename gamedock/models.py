@@ -105,6 +105,8 @@ class CatalogEntry:
     steam_manifest_dir: str = ""     # folder (relative to the server's data folder) holding appmanifest_<id>.acf; "" = search the volumes
     version_log_pattern: str = ""    # regex with ONE capture group: the game's own version in its log, e.g. "Game version is (v[0-9.]+)"
     game_update_method: str = "none"  # "restart" = the image updates the game when the container starts; "none" = GameDock cannot update it
+    installed_build_file: str = ""   # file (relative to the server's data folder) whose text is the installed version/build, for images that keep no Steam appmanifest
+    stop_timeout: int = 0            # seconds this game gets to save when stopped; 0 = GameDock's default (GAMEDOCK_STOP_TIMEOUT)
 
 
 @dataclass
@@ -131,6 +133,7 @@ class ContainerSpec:
     volumes: tuple[VolumeMapping, ...]
     env: dict[str, str] = field(repr=False)
     labels: dict[str, str] = field(default_factory=dict)
+    stop_timeout: int = 0  # 0 = the backend's default
 
 
 @dataclass(frozen=True)

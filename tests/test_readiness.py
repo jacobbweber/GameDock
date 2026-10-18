@@ -125,7 +125,10 @@ def test_shipped_catalog_patterns_are_valid_and_match_real_lines():
     cat = load_catalog(Path(__file__).resolve().parent.parent / "catalog")
     pal, ens = cat["palworld"], cat["enshrouded"]
     assert rd.pattern_seen("Running Palworld dedicated server on :8211", pal.ready_log_pattern)
-    assert rd.pattern_seen("[Session] 'HostOnline' (up)!", ens.ready_log_pattern)
+    assert rd.pattern_seen("[2026-10-18 00:31:07] enshrouded-server -------------- Session ----------------",
+                           ens.ready_log_pattern)
+    assert not rd.pattern_seen("[2026-10-18 00:30:11] enshrouded-server Config Parsed: /opt/enshrouded/server/enshrouded_server.json",
+                               ens.ready_log_pattern)
     for e in (pal, ens):
         assert rd.last_progress(DOWNLOAD.format(p="51.68", a=2528448160), e.progress_log_pattern) == 51.68
 
@@ -452,4 +455,4 @@ def test_version_is_consistent(svc):
     import gamedock
     pyproject = (Path(__file__).resolve().parent.parent / "pyproject.toml").read_text()
     assert re.search(r'^version = "%s"$' % re.escape(gamedock.__version__), pyproject, re.M)
-    assert gamedock.__version__ == "0.4.0"
+    assert gamedock.__version__ == "0.4.1"

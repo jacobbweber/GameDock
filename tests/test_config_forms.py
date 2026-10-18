@@ -244,24 +244,26 @@ JS_TEXT = """{
 
 def test_json_fields_and_types():
     f = fields(JS_TEXT, JS)
-    assert list(f) == ["name", "slots", "ratio", "pvp", "token", "motd", "groups", "limits"]
+    assert list(f) == ["name", "slots", "ratio", "pvp", "token", "motd", "groups[0].name", "groups[0].password",
+                       "groups[1].name", "limits.a"]
     assert (f["name"].type, f["name"].value) == ("text", "My Server")
     assert (f["slots"].type, f["slots"].value) == ("number", "16")
     assert (f["ratio"].type, f["ratio"].value) == ("number", "1.5")
     assert (f["pvp"].type, f["pvp"].value) == ("bool", "false")
     assert f["token"].sensitive and not f["name"].sensitive
     assert f["motd"].type == "json" and f["motd"].value == "null"
-    assert f["groups"].type == "json" and json.loads(f["groups"].value)[0]["name"] == "Admin"  # nested: raw JSON
-    assert f["limits"].type == "json"
+    assert f["groups[0].name"].value == "Admin" and f["groups[0].name"].label == "groups[0].name"   # nested: dotted label
+    assert f["groups[0].name"].group == "groups[0]" and f["limits.a"].group == "limits"
+    assert f["limits.a"].type == "number" and f["name"].label == "Name" and f["name"].group == ""
 
 
 def test_json_edit_is_minimal_and_valid():
     out, changed = cf.apply_changes(JS_TEXT, JS, {
-        "name": 'The "best" one', "slots": "8", "pvp": "true", "groups": '[{"name": "Only"}]', "motd": '"hello"'})
-    assert sorted(changed) == ["groups", "motd", "name", "pvp", "slots"]
+        "name": 'The "best" one', "slots": "8", "pvp": "true", "groups[1].name": "Only", "motd": '"hello"'})
+    assert sorted(changed) == ["groups[1].name", "motd", "name", "pvp", "slots"]
     data = json.loads(out)
     assert data["name"] == 'The "best" one' and data["slots"] == 8 and data["pvp"] is True
-    assert data["groups"] == [{"name": "Only"}] and data["motd"] == "hello"
+    assert data["groups"] == [{"name": "Admin", "password": "x"}, {"name": "Only"}] and data["motd"] == "hello"
     assert data["ratio"] == 1.5 and data["limits"] == {"a": 1} and data["token"] == "abc123"
     assert '"ratio": 1.5,\n  "pvp": true,' in out  # formatting around the edits is untouched
 
@@ -280,7 +282,7 @@ def test_json_validation():
     with pytest.raises(ValidationError, match="true or false"):
         cf.apply_changes(JS_TEXT, JS, {"pvp": "yes"})
     with pytest.raises(ValidationError, match="not valid JSON"):
-        cf.apply_changes(JS_TEXT, JS, {"groups": "[{"})
+        cf.apply_changes(JS_TEXT, JS, {"motd": "[{"})
 
 
 @pytest.mark.parametrize("text", ["[1, 2]", '"x"', "{", '{"a": 1,}', '{"a": 1} trailing', "// comment\n{}", ""])

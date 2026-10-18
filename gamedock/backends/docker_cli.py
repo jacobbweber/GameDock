@@ -192,15 +192,19 @@ class DockerCliBackend:
             args += ["-p", f"{p.host}:{p.container}/{p.protocol}"]
         for v in spec.volumes:
             args += ["--mount", _mount_arg(v.host, v.container)]
-        for k in spec.env:
-            args += ["-e", k]
+        for k, v in spec.env.items():
+            # A value is never put on the command line (it could be a password): "-e NAME" makes docker read it from
+            # its own environment. An EMPTY value carries no secret, so it is written out as "-e NAME=", which every
+            # docker version reads as "present but empty" (images such as Enshrouded's treat that differently from
+            # a missing variable).
+            args += ["-e", f"{k}=" if v == "" else k]
         args += ["--", spec.image]
         return args
 
     def create(self, spec: ContainerSpec) -> None:
         if self._ours(spec.name) is not None:
             return
-        args = self.build_create_args(spec, self.stop_timeout)
+        args = self.build_create_args(spec, spec.stop_timeout or self.stop_timeout)
         self._run(args, env=spec.env, timeout=PULL_TIMEOUT_SECONDS)  # also downloads the image if it is missing
 
     def start(self, name: str) -> None:
@@ -212,9 +216,10 @@ class DockerCliBackend:
             return
         self._run(["start", name], timeout=START_TIMEOUT_SECONDS)
 
-    def stop(self, name: str) -> None:
+    def stop(self, name: str, timeout: int | None = None) -> None:
         self._ours(name)
-        self._run(["stop", "-t", str(self.stop_timeout), name], timeout=self.stop_timeout + 30)
+        grace = int(timeout or self.stop_timeout)
+        self._run(["stop", "-t", str(grace), name], timeout=grace + 30)
 
     def remove(self, name: str) -> None:
         found = self._ours(name)

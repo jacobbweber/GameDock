@@ -11,7 +11,9 @@ Supported shapes (everything else has no form and falls back to the raw text edi
                   keep their settings. Quoted values may contain commas and parentheses.
   keyvalue        ordinary ``key=value`` lines (ini files with [sections], Java ``.properties`` such as Minecraft's
                   server.properties). Comment lines and blank lines are left alone.
-  json            a JSON object. Flat top-level values are fields; nested objects and arrays are shown as raw JSON.
+  json            a JSON object. Top-level values are fields; settings inside nested objects and arrays of objects are
+                  fields too, labelled with their dotted path (``gameSettings.playerHealthFactor``,
+                  ``userGroups[0].password``). Empty containers and arrays of plain values are one raw-JSON field.
 
 Callers pass text in which sensitive values are already masked (see configfiles.mask_text). A masked value that is
 sent back unchanged is ignored, so the real secret in the file is never touched.
@@ -49,6 +51,7 @@ class _Item:
     value: str          # what the form shows (quotes removed, escapes resolved)
     quoted: bool = False
     sensitive: bool = False
+    top: bool = True    # False for a setting inside a nested JSON object or array
 
 
 def humanize(key: str) -> str:
@@ -203,55 +206,93 @@ def _scan_keyvalue(text: str, cf: ConfigFile) -> list[_Item] | None:
 
 
 # ------------------------------------------------------------------ json
+MAX_JSON_DEPTH = 8
+
+
 def _scan_json(text: str, cf: ConfigFile) -> list[_Item] | None:
+    """Every scalar setting of a JSON object, including those inside nested objects and arrays of objects. A nested
+    setting has a dotted path as its id and label (``gameSettings.playerHealthFactor``, ``userGroups[0].password``)
+    and is grouped under its parent. Empty objects/arrays and arrays of plain values stay one raw-JSON field."""
     dec = json.JSONDecoder()
     n = len(text)
+    items: list[_Item] = []
+    seen: dict[str, int] = {}
 
     def ws(i: int) -> int:
         while i < n and text[i] in " \t\r\n":
             i += 1
         return i
 
+    def leaf(path: str, parent: str, key: str, start: int, end: int, val: object) -> None:
+        raw = text[start:end]
+        if isinstance(val, bool):
+            typ, shown = "bool", raw
+        elif isinstance(val, (int, float)):
+            typ, shown = "number", raw
+        elif isinstance(val, str):
+            typ, shown = "text", val
+        else:
+            typ, shown = "json", raw
+        sensitive = _is_sensitive(key, cf) and isinstance(val, str)
+        it = _Item(_unique(path, seen), path, parent, start, end, raw, typ, shown, False, sensitive)
+        it.top = not parent
+        items.append(it)
+        if len(items) > MAX_FIELDS:
+            raise ValueError("too many settings")
+
+    def value(i: int, path: str, parent: str, key: str, depth: int) -> int:
+        """Read the value starting at i (whitespace already skipped); returns the index after it."""
+        start = i
+        val, end = dec.raw_decode(text, i)
+        expand = depth < MAX_JSON_DEPTH and (
+            (isinstance(val, dict) and val) or (isinstance(val, list) and val and all(isinstance(v, dict) for v in val)))
+        if not expand:
+            leaf(path, parent, key, start, end, val)
+            return end
+        if isinstance(val, dict):
+            return obj(i, path, depth + 1)
+        i = ws(i + 1)
+        idx = 0
+        while True:
+            i = obj(i, f"{path}[{idx}]", depth + 1)
+            idx += 1
+            i = ws(i)
+            if text[i] == ",":
+                i = ws(i + 1)
+                continue
+            if text[i] == "]":
+                return i + 1
+            raise ValueError("bad array")
+
+    def obj(i: int, path: str, depth: int) -> int:
+        i = ws(i + 1)  # past "{"
+        if text[i] == "}":
+            return i + 1
+        while True:
+            k, i = dec.raw_decode(text, ws(i))
+            if not isinstance(k, str):
+                raise ValueError("bad key")
+            i = ws(i)
+            if text[i] != ":":
+                raise ValueError("missing colon")
+            i = ws(i + 1)
+            child = f"{path}.{k}" if path else k
+            i = value(i, child, path, k, depth)
+            i = ws(i)
+            if text[i] == ",":
+                i += 1
+                continue
+            if text[i] == "}":
+                return i + 1
+            raise ValueError("bad object")
+
     try:
         i = ws(0)
         if i >= n or text[i] != "{":
             return None
-        i = ws(i + 1)
-        items: list[_Item] = []
-        seen: dict[str, int] = {}
-        if i < n and text[i] == "}":
-            return items if ws(i + 1) >= n else None
-        while True:
-            key, i = dec.raw_decode(text, ws(i))
-            if not isinstance(key, str):
-                return None
-            i = ws(i)
-            if i >= n or text[i] != ":":
-                return None
-            i = ws(i + 1)
-            start = i
-            val, i = dec.raw_decode(text, i)
-            raw = text[start:i]
-            if isinstance(val, bool):
-                typ, shown = "bool", raw
-            elif isinstance(val, (int, float)):
-                typ, shown = "number", raw
-            elif isinstance(val, str):
-                typ, shown = "text", val
-            else:
-                typ, shown = "json", raw
-            sensitive = _is_sensitive(key, cf) and isinstance(val, str)
-            items.append(_Item(_unique(key, seen), key, "", start, i, raw, typ, shown, False, sensitive))
-            if len(items) > MAX_FIELDS:
-                return None
-            i = ws(i)
-            if i < n and text[i] == ",":
-                i += 1
-                continue
-            if i < n and text[i] == "}":
-                return items if ws(i + 1) >= n else None
-            return None
-    except (ValueError, IndexError):
+        end = obj(i, "", 0)
+        return items if ws(end) >= n else None
+    except (ValueError, IndexError, RecursionError):
         return None
 
 
@@ -281,7 +322,8 @@ def build_form(text: str, cf: ConfigFile) -> ConfigForm | None:
         return None
     items = _scan(text, cf, kind) or []
     return ConfigForm(kind, tuple(
-        FormField(it.id, it.key, humanize(it.key), it.value, it.type, it.sensitive, it.group) for it in items))
+        FormField(it.id, it.key, humanize(it.key) if it.top else it.key, it.value, it.type, it.sensitive, it.group)
+        for it in items))
 
 
 def _render(it: _Item, kind: str, new: str) -> str:

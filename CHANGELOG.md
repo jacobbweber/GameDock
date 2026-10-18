@@ -2,6 +2,34 @@
 
 All notable changes. Dates are 2026.
 
+## 0.4.1: Enshrouded fixes from the first real test
+
+Found by deploying the bundled Enshrouded entry on a real host: the game asked for a password although the password box was empty, and the Config editor had no file to open.
+
+### Fixed
+
+- **Enshrouded password.** The image only applies `SERVER_PASSWORD` when it is not empty, so an empty box left the game's own generated 8 character password in place. The entry now uses the role variables the image really reads: the field is `SERVER_ROLE_0_PASSWORD` (label "Server password", secret, empty = no password) and fixed `SERVER_ROLE_0_NAME=Default` and the other `SERVER_ROLE_0_*` rights are always set. The image writes a role setting whenever its variable *exists*, so an empty password now means an empty password.
+- **Empty values reach the container.** GameDock already passed every setting, empty ones too; the docker command now writes an empty value explicitly as `-e NAME=` (present but empty) instead of relying on docker copying it from its own environment. Non-empty values still never appear on the command line.
+- **Enshrouded settings file.** `/opt/enshrouded` (the game install, about 7 GB, and `server/enshrouded_server.json`) is now a volume (`./game`), so the file can be edited from the Config page and a recreated container does not download the game again. Added `PUID`/`PGID` 1000, `SERVER_QUERYPORT`, a 90 second stop timeout and a note that the file only appears after the first start (several minutes while 7 GB download; the tile shows Installing).
+- **Enshrouded ready line.** Ready is now the periodic `Session ----` block of the real log (`Config Parsed` appears before the game listens, so it is not used). The progress pattern is kept; the early "Missing configuration" updater message on first start is documented as harmless.
+
+### Added
+
+- **Nested JSON in the settings form.** Settings inside objects and arrays of objects are fields with dotted labels (`gameSettings.playerHealthFactor`, `userGroups[0].password`), grouped under their parent; empty containers and arrays of plain values stay one raw-JSON field. Edits replace only the changed value text, so tabs and layout stay byte for byte (round trip tested with a file shaped like Enshrouded's). Sensitive keys match at any depth, so every group's password is masked.
+- **Catalog `installed_build_file`** (optional): a small version file inside the server's data folder to use as the installed version for images that keep no Steam `appmanifest` (Enshrouded keeps `current_version`). A number is the Steam build id and is compared; other text is shown but "cannot be compared", and the dialog says so. Read first, falls back to the Steam record; symlinks are not followed.
+- **Catalog `stop_timeout`** (optional, 1 to 600 seconds): how long this game gets to save when stopped, instead of `GAMEDOCK_STOP_TIMEOUT`. Used for the container's stop timeout and for `docker stop`.
+
+### Changed
+
+- Version 0.4.1 (only the version line of `pyproject.toml`; no dependency changes, so the header update button accepts it).
+
+### Decisions and known gaps
+
+- **Existing servers keep their snapshot.** A server deployed before this release keeps its old fixed `env`, fields, volumes and stop timeout; only the read-only hints (including `installed_build_file`) come from the current entry. To get the fix, delete the Enshrouded server in GameDock (it takes the safety backup) and deploy it again.
+- The catalog has no field for the time zone, so `TZ` is not set (log times are UTC). The new `./game` folder is created by GameDock's own user and the image runs as uid 1000: that matches only when GameDock itself runs as uid 1000.
+- What `game/current_version` holds is not confirmed. If it is not a Steam build number the tile shows the text and "Could not check".
+- On an edit, a blank secret keeps the stored value (by design), so a password that was set cannot be cleared to "none" from the form; redeploy or set it to a new value.
+
 ## 0.4.0: each game's own version, and updating the game
 
 Asked for: per game, show the game's version and whether a newer one is out, with an Update now button (scheduled maintenance already applies updates). Before this, GameDock only compared container image digests, which for SteamCMD games says nothing about the game files (the image downloads those at every start).

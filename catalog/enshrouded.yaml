@@ -1,36 +1,79 @@
-# Example catalog entry (a game template). Copy this file to add another game.
-# EXAMPLE VALUES: verify the image, ports and variables against the image's own
-# documentation before real use. GameDock is not tied to any particular game.
+# Enshrouded dedicated server (Wine based community image mornedhels/enshrouded-server).
+# CHECKED against a real run on a real host (GameDock 0.4.0 test): the image's own start script, the settings file
+# location, the role variables and the log lines named below. Still marked "verify before use" where it says so.
 id: enshrouded
 name: Enshrouded Dedicated Server
 image: mornedhels/enshrouded-server:stable-wine
 description: Enshrouded dedicated server (Wine-based image).
-notes: Example values. Check the image documentation before real use.
-# Optional readiness hints: the game is joinable once it logs  [Session] 'HostOnline' (up)!   and the first start
-# downloads the server through SteamCMD (progress shown as a percentage).
-ready_log_pattern: "'HostOnline' \\(up\\)!"
+notes: >-
+  The first start downloads about 7 GB of game files and only then creates the settings file, which takes a few
+  minutes. The page shows "Installing" until the server is ready; do not try to join before it says Ready to join, and
+  the Config editor shows "not created yet" until then. The server password box is optional: leave it empty for no
+  password. (Otherwise the game would keep its own generated 8 character password.)
+# Readiness (from the real log). While running, the server prints a block every 30 seconds that starts with
+# "enshrouded-server -------------- Session ----------------" (followed by "Machines:"); that block means the game is up.
+# "Config Parsed: ...enshrouded_server.json" is NOT used: it is printed before the game is listening.
+ready_log_pattern: "Session -{3,}"
+# SteamCMD prints "progress: NN.NN" while it downloads. On the very first start the real log also showed
+# "enshrouded-updater ... Waiting for client config" and "Failed to install app 2278520 (Missing configuration)";
+# that resolved itself a moment later and is not a real failure.
 progress_log_pattern: "progress: *([0-9]+(?:[.][0-9]+)?)"
 # update_method: pull_recreate   (default) pull the newest image and recreate the container; "none" disables it
-# Game version tracking. 2278520 is the Enshrouded *Dedicated Server* Steam app id. VERIFY BEFORE USE: this image keeps
-# the server files (and so steamapps/appmanifest_2278520.acf) inside the container unless its install folder is a volume,
-# in which case GameDock can read the installed build. Without such a volume it says it cannot find the Steam record.
+# Game version tracking. 2278520 is the Enshrouded *Dedicated Server* Steam app id. The image keeps no Steam record
+# (appmanifest_2278520.acf) in /opt/enshrouded, only a small file "current_version", so GameDock reads that file (it is
+# in the ./game volume). If the file holds a Steam build number it is compared with Steam's newest build; if it holds
+# some other text, that text is shown but cannot be compared and the dialog says so. VERIFY the file's content on your
+# first real run.
 steam_app_id: 2278520
+installed_build_file: game/current_version
 game_update_method: restart          # the image updates the game when the container starts
+stop_timeout: 90                     # seconds the game gets to save when stopped (the old working setup used 90)
 update_note: >-
   This image downloads the newest Enshrouded server files with SteamCMD when the container starts, so restarting the
-  server is how the game itself gets updated. GameDock compares the installed Steam build with the newest public one
-  (it needs the game's install folder to be one of the server's folders; verify before use). A separate "image update"
-  only replaces the helper program around the game and keeps your world.
+  server is how the game itself gets updated. GameDock compares the installed version (read from game/current_version)
+  with the newest public Steam build; if that file does not hold a Steam build number, GameDock says it cannot compare.
+  A separate "image update" only replaces the helper program around the game and keeps your world.
 ports:                       # default host ports; each instance can choose its own
   - { protocol: udp, host: 15637, container: 15637 }
 volumes:
   # A relative host path is stored under <DATA_DIR>/<instance id>/.
+  # ./game is the whole /opt/enshrouded folder (about 7 GB: the game install and the settings file under server/). It
+  # is kept on the host so a recreated container does not download everything again, and so GameDock can edit the file.
+  - { host: ./game, container: /opt/enshrouded }
   - { host: ./savegame, container: /home/steam/enshrouded/savegame }
   - { host: ./logs, container: /home/steam/enshrouded/logs }
-env:                         # fixed values, not shown in the deploy form
+env:                         # fixed values, not shown in the deploy form (all quoted so YAML keeps them as text)
   UPDATE_CRON: "0 3 * * *"
+  # Run the game as user 1000. GameDock creates the host folders as its own user, which is uid 1000 on a typical
+  # single-user host; if GameDock runs as another user, the game cannot write there (see the README).
+  PUID: "1000"
+  PGID: "1000"
+  SERVER_QUERYPORT: "15637"
+  # One user group "Default" that everyone joins. The image only writes these into the game's settings when the variable
+  # exists, so they are all listed. The password itself is the field below (empty = no password).
+  SERVER_ROLE_0_NAME: "Default"
+  SERVER_ROLE_0_CAN_KICK_BAN: "false"
+  SERVER_ROLE_0_CAN_ACCESS_INVENTORIES: "true"
+  SERVER_ROLE_0_CAN_EDIT_WORLD: "true"
+  SERVER_ROLE_0_CAN_EDIT_BASE: "true"
+  SERVER_ROLE_0_CAN_EXTEND_BASE: "true"
+  SERVER_ROLE_0_RESERVED_SLOTS: "0"
 fields:                      # values the user can set when deploying or editing
   - { name: SERVER_NAME, label: Server name, default: "My Enshrouded Server", required: true }
   - { name: SERVER_SLOT_COUNT, label: Player slots, default: "16" }
-  - { name: SERVER_PASSWORD, label: Server password, secret: true,
+  # Do NOT use SERVER_PASSWORD: the image ignores it when empty and the game then keeps its own random default
+  # password. The role variable below is always sent, even when empty, and an empty value means "no password".
+  - { name: SERVER_ROLE_0_PASSWORD, label: Server password, secret: true,
       description: Leave empty for no password. }
+config_files:
+  # Created by the game on its first start (after the download), not before.
+  - path: game/server/enshrouded_server.json
+    label: Enshrouded server settings
+    format: json
+    sensitive_keys: [password]
+    hot_edit: false
+    note: >-
+      Stop the server before saving. The server name, slot count and the Default group's name, password and rights from
+      the deploy form are written into this file again every time the server starts, so changes to those keys here are
+      replaced on the next start; change them in the server's settings (Edit) instead. Everything else in the file
+      (for example gameSettings.*) is kept as you saved it.

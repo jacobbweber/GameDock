@@ -2,7 +2,8 @@
 
 What it adds to a server (only when its catalog entry has ``steam_app_id``):
 
-* the installed Steam build id and date, read from the game's ``appmanifest_<id>.acf`` in the server's data folders;
+* the installed Steam build id and date, read from the game's ``appmanifest_<id>.acf`` in the server's data folders (or,
+  when the catalog gives ``installed_build_file``, from that small version file);
 * the game's own version text (``version_log_pattern`` applied to the log), remembered together with the build it
   belongs to, so it survives log rotation and GameDock restarts;
 * the newest public build id (see ``gamedock/steam.py``; answers are cached and nothing here blocks on the network
@@ -21,6 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import backups as bk
+from . import configfiles as cfg
 from . import steam
 from .errors import BackendError, GameDockError, ValidationError
 from .models import CatalogEntry, Instance, Status
@@ -82,6 +84,17 @@ class GameUpdateMixin:
         a failed search is not repeated for a few seconds (unless `fresh`)."""
         if not t.steam_app_id:
             return None, ""
+        if t.installed_build_file:
+            # The catalog names a small file that holds the installed version (for images that keep no Steam record).
+            # Checked first: it is one file, not a search. If it is not there (yet), fall back to the Steam record.
+            base = self._data_dir_of(inst)
+            try:
+                target = cfg.safe_path(base, t.installed_build_file)
+            except ValidationError:
+                target = None
+            vf = steam.read_version_file(target) if target is not None else None
+            if vf is not None:
+                return vf, ""
         cached = self._manifest_cache.get(inst.id)
         path: Path | None = Path(cached) if cached else None
         if path is None or not path.is_file():
@@ -106,6 +119,10 @@ class GameUpdateMixin:
 
     @staticmethod
     def _no_manifest_text(t: CatalogEntry) -> str:
+        if t.installed_build_file:
+            return (f"GameDock could not read the installed game version from {t.installed_build_file} in this server's "
+                    "data folder, and found no Steam record (appmanifest_" + t.steam_app_id + ".acf) either. The first "
+                    "download may not be finished, or the game's files are not in a folder that GameDock keeps.")
         return (f"GameDock could not find the game's Steam record (appmanifest_{t.steam_app_id}.acf) in this server's "
                 "data folders. The first download may not be finished, or the game's own files are not in a folder "
                 "that GameDock keeps (the game's install folder must be one of the server's volumes).")

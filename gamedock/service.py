@@ -208,6 +208,7 @@ class GameDockService(GameUpdateMixin):
             ports=inst.ports,
             volumes=tuple(volumes),
             env={**t.env, **inst.env},
+            stop_timeout=t.stop_timeout,
             labels={LABEL_MANAGED: "true", LABEL_SERVER_ID: inst.id, LABEL_GAME_ID: inst.game_id},
         )
 
@@ -283,7 +284,7 @@ class GameDockService(GameUpdateMixin):
         return replace(t, ready_log_pattern=cur.ready_log_pattern, progress_log_pattern=cur.progress_log_pattern)
 
     _HINT_KEYS = ("update_note", "backup_stop_first", "save_command", "steam_app_id", "steam_branch",
-                  "steam_manifest_dir", "version_log_pattern", "game_update_method")
+                  "steam_manifest_dir", "version_log_pattern", "game_update_method", "installed_build_file")
 
     def _with_current_hints(self, inst: Instance, t: CatalogEntry) -> CatalogEntry:
         """Servers keep a snapshot of their template. Optional hints (update note, stop-first flag, save command, the
@@ -519,7 +520,7 @@ class GameDockService(GameUpdateMixin):
     def _stop(self, inst: Instance) -> None:
         name = container_name(inst.id)
         if self.backend.get_state(name).status == Status.RUNNING:
-            self.backend.stop(name)
+            self.backend.stop(name, self._template(inst).stop_timeout or None)
 
     def start(self, server_id: str) -> ServerInfo:
         """Start a server (re-creating its container if it is missing)."""

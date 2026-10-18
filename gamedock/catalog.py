@@ -102,6 +102,19 @@ def _parse_save_command(value: object, source: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _parse_relative_path(value: object, name: str, source: str) -> str:
+    """A file inside the server's data folder (relative, no '..'), or '' when not given."""
+    if value in (None, ""):
+        return ""
+    if not isinstance(value, str):
+        raise CatalogError(f"{source}: {name} must be text")
+    pp = PurePosixPath(value.strip())
+    if (not value.strip() or pp.is_absolute() or ".." in pp.parts or "\\" in value or any(c in value for c in "\0\n\r")):
+        raise CatalogError(f"{source}: {name} must be a file inside the server's data folder "
+                           f"(relative, no '..'): {value!r}")
+    return str(pp)
+
+
 def _parse_steam(data: dict, source: str) -> tuple[str, str, str, str]:
     """(steam_app_id, steam_branch, steam_manifest_dir, game_update_method) with the default method filled in."""
     raw = data.get("steam_app_id")
@@ -201,6 +214,12 @@ def parse_definition(data: object, source: str = "<definition>") -> CatalogEntry
     save_command = _parse_save_command(data.get("save_command"), source)
     steam_app_id, steam_branch, steam_manifest_dir, game_update_method = _parse_steam(data, source)
     version_pattern = _parse_pattern(data.get("version_log_pattern"), "version_log_pattern", source, groups=1)
+    installed_file = _parse_relative_path(data.get("installed_build_file"), "installed_build_file", source)
+    stop_timeout = data.get("stop_timeout", 0)
+    if stop_timeout in (None, ""):
+        stop_timeout = 0
+    if isinstance(stop_timeout, bool) or not isinstance(stop_timeout, int) or not (0 <= stop_timeout <= 600):
+        raise CatalogError(f"{source}: stop_timeout must be a whole number of seconds from 1 to 600 (or left out)")
 
     return CatalogEntry(
         id=gid,
@@ -224,6 +243,8 @@ def parse_definition(data: object, source: str = "<definition>") -> CatalogEntry
         steam_manifest_dir=steam_manifest_dir,
         version_log_pattern=version_pattern,
         game_update_method=game_update_method,
+        installed_build_file=installed_file,
+        stop_timeout=stop_timeout,
     )
 
 
@@ -246,6 +267,8 @@ def entry_to_dict(e: CatalogEntry) -> dict:
         "steam_manifest_dir": e.steam_manifest_dir,
         "version_log_pattern": e.version_log_pattern,
         "game_update_method": e.game_update_method,
+        "installed_build_file": e.installed_build_file,
+        "stop_timeout": e.stop_timeout,
         "config_files": [
             {"path": c.path, "label": c.label, "format": c.format,
              "sensitive_keys": list(c.sensitive_keys), "hot_edit": c.hot_edit, "note": c.note}

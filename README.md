@@ -223,6 +223,7 @@ The game files of a Steam game server and the container image around them are tw
 ![Updates dialog](docs/gamedock-040-dialog.png)
 
 - **Installed:** the Steam *build id* and its date, read from `steamapps/appmanifest_<app id>.acf`, the record SteamCMD keeps in the game's folder. GameDock looks for it in the server's volumes (a bounded search, symlinks not followed), or in `steam_manifest_dir` if the entry names one. The game's own version text (for example `v1.0.5.102999`) comes from the log with the entry's `version_log_pattern`, and is remembered together with the build it belongs to.
+- **Images without a Steam record:** some images (Enshrouded's) keep no `appmanifest` file, only a small version file. The entry can name it with `installed_build_file` (a path inside the server's data folder, so the game's folder must be a volume). Its first line is the installed version: a plain number is taken as the Steam build id and compared; any other text is shown but cannot be compared, and the dialog says so. If neither the file nor a Steam record can be read, the dialog says that plainly.
 - **Newest:** the newest *public* build id (or `steam_branch`), asked of a public mirror of Steam's data (`https://api.steamcmd.net/v1/info/<app id>`, no account; change the address with `GAMEDOCK_STEAM_INFO_URL`, use `{appid}` as the placeholder). The answer is cached for one hour, in memory and in `<data>/steam-latest.json`, so restarting GameDock does not ask again. Offline, rate limited or a broken answer is never an error: the page says **Could not check**. `GAMEDOCK_UPDATE_CHECK=false` switches this check off together with the GitHub one.
 - **Status:** **Up to date**, **Update available**, **Could not check**, or **Unknown (no Steam id for this game)**. The tile has a line such as "Game version v1.0.5.102999, up to date" and, when a newer build exists, an **Update available** badge (in purple for a game update, blue for an image update; if both apply there is one badge and the **Updates** dialog has the details).
 - **Update game now** (`game_update_method: restart`, the default when a `steam_app_id` is set) needs the server to be running. It stops the server, takes a safety backup, starts it again (these images download the new game files while they start, the image setting is usually called `UPDATE_ON_BOOT`), then waits and reads the installed build id again. If the build did not change it says so plainly ("the game did not update on restart; check the logs") and leaves the server running. A stopped server updates when you start it.
@@ -294,6 +295,8 @@ steam_branch: public             # optional: Steam branch to compare with (defau
 steam_manifest_dir: palworld     # optional: folder (inside the server's data folder) holding appmanifest_<id>.acf; default: search the volumes
 version_log_pattern: "Game version is (v?[0-9.]+)"   # optional regex, ONE group: the game's version text in its log
 game_update_method: restart      # default 'restart' when steam_app_id is set: the image updates the game at start; or 'none'
+installed_build_file: game/current_version   # optional: a small file (in the server's data folder) whose text is the installed version/build
+stop_timeout: 90                 # optional: seconds this game gets to save when stopped (default: GAMEDOCK_STOP_TIMEOUT, 60)
 save_command: [rcon-cli, save]   # optional: run inside the container before a scheduled backup (list, or a quoted string)
 backup_stop_first: false         # true = stop the game briefly for scheduled and manual backups
 ready_log_pattern: "Server is ready"   # optional regex: when this appears in the log the server is Ready
@@ -310,7 +313,7 @@ fields:                  # settings shown in the deploy/edit form
   - { name: SERVER_PASSWORD, label: Password, secret: true }   # secret = password input
 ```
 
-`ready_log_pattern` and `progress_log_pattern` are optional and only matter for images that take a while to become joinable; if the image has a Docker `HEALTHCHECK` that already says `healthy` at the right moment, you do not need them. Both are checked when the catalog loads (valid regex, one line, at most 300 characters; the progress pattern needs exactly one capture group). Find the right lines with the **Logs** button after a first start. The Palworld and Enshrouded entries are examples.
+`ready_log_pattern` and `progress_log_pattern` are optional and only matter for images that take a while to become joinable; if the image has a Docker `HEALTHCHECK` that already says `healthy` at the right moment, you do not need them. Both are checked when the catalog loads (valid regex, one line, at most 300 characters; the progress pattern needs exactly one capture group). Find the right lines with the **Logs** button after a first start. The Palworld and Enshrouded entries are examples; the Enshrouded entry was checked against a real run (password variables, settings file, log lines).
 
 ### Worked example: the smoke-test entry
 
@@ -348,7 +351,7 @@ fields:                              # the form the user fills in; each becomes 
 4. Open the Catalog page (or run `python -m gamedock doctor`): a mistake in the file is reported in plain words.
 5. Deploy it with the fake engine first (`GAMEDOCK_BACKEND=fake`), then for real.
 
-Never put real passwords in catalog files (they are committed to git); users type them into the form. A server keeps a snapshot of its template from deploy time, so changes to a catalog entry only affect servers deployed afterwards.
+Never put real passwords in catalog files (they are committed to git); users type them into the form. A server keeps a snapshot of its template from deploy time, so changes to a catalog entry (fixed `env`, `fields`, `volumes`, `ports`, `stop_timeout`) only affect servers deployed afterwards; only the read-only hints (update note, Steam and version settings, `installed_build_file`) are taken from the current entry for older servers. Every setting's value is passed to the container, an **empty value too** (as `NAME=`, "present but empty"); some images, such as Enshrouded's, treat that differently from a missing variable.
 
 **The bundled games (Enshrouded, Palworld, Valheim, Minecraft Java, Satisfactory) are examples.** Their images, ports and variables were written from general knowledge of popular community images and have not been run here. Check each against the image's own documentation before real use.
 

@@ -177,7 +177,7 @@ def test_static_files_are_revalidated(client):
 def test_mcp_version_and_schedule_tools(service, deployed):
     async def go(c):
         v = await call(c, "get_gamedock_version")
-        assert not v[0] and v[1]["version"] == "0.4.0" and v[1]["update_available"] is None
+        assert not v[0] and v[1]["version"] == "0.4.1" and v[1]["update_available"] is None
         assert "install_dir" not in v[1] and "manual_commands" not in str(v[1])
         r = await call(c, "set_backup_schedule", server_id=deployed, enabled=True, frequency="daily", time="02:00", retention=3)
         assert not r[0] and r[1]["backup"]["summary"] == "daily at 02:00"
