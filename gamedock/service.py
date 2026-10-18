@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 import re
+import shlex
 from collections import deque
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -24,6 +25,7 @@ from . import configfiles as cfg
 from .backends.base import ContainerBackend, DockerDiagnosis
 from .catalog import entry_to_dict, load_catalog, parse_definition
 from .hoststats import HostMeter
+from .hostcheck import foreign_owners
 from .errors import BackendError, ConflictError, GameDockError, NotFoundError, ValidationError
 from .models import (
     BackupResult, CatalogEntry, ConfigContent, ConfigFile, ConfigFileInfo, ConfigSaveResult, ContainerSpec,
@@ -465,7 +467,15 @@ class GameDockService:
             archive = bk.backup_path(self._backup_dir(inst), name)
             self._require_stopped(inst, "restoring a backup")
             safety = self._safety_backup(inst, "pre-restore", protect={name})  # aborts the restore if it fails
+            owners, example = foreign_owners(self._data_dir_of(inst))
             warnings = bk.restore_archive(archive, self._data_dir_of(inst))
+            if owners:
+                ids = ", ".join(str(u) for u in sorted(owners))
+                warnings.append(
+                    f"Some of the old files were owned by user id {ids} (for example {example}); the restored "
+                    f"files are owned by the user running GameDock. If the game runs as another user it may not be "
+                    f"able to write to them. Fix with: sudo chown -R {sorted(owners)[0]} "
+                    f"{shlex.quote(str(self._data_dir_of(inst)))}")
             self._prepare_dirs(self._spec(inst))
             return RestoreResult(
                 name, safety,

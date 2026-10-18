@@ -199,7 +199,7 @@ def test_backup_permission_error_is_403(client, seeded, tmp_path):
     f.chmod(0)
     try:
         r = client.post("/api/servers/one/backups")
-        assert r.status_code == 403 and "owned by another user" in r.json()["error"]
+        assert r.status_code == 403 and "another user" in r.json()["error"]
     finally:
         f.chmod(0o644)
 

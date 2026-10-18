@@ -224,7 +224,7 @@ def test_write_permission_error_is_clear(srv, tmp_path):
     d = root(tmp_path) / "conf"
     d.chmod(0o555)
     try:
-        with pytest.raises(AccessError, match="owned by another user"):
+        with pytest.raises(AccessError, match="another user.*PUID"):
             srv.write_config_file("one", HOT, "x")
     finally:
         d.chmod(0o755)

@@ -6,8 +6,10 @@ be read; that is reported as a clear AccessError and nothing is saved.
 """
 from __future__ import annotations
 
+import errno
 import os
 import re
+import shlex
 import shutil
 import stat
 import tarfile
@@ -31,6 +33,14 @@ class BackupInfo:
     created_at: str  # ISO 8601, UTC
     kind: str  # "manual" or one of KINDS (automatic safety backups)
     path: str = ""
+
+
+def ownership_hint(path: Path) -> str:
+    """Plain-language fix for files the game container created as another user (usually root)."""
+    q = shlex.quote(str(path))
+    return (f"Fix it once with: sudo chown -R $(id -u):$(id -g) {q}. To stop it coming back, make the game "
+            "container run as your user: many game images accept PUID and PGID settings (use the numbers from "
+            "'id -u' and 'id -g'); otherwise the container writes files as root.")
 
 
 def _info(path: Path) -> BackupInfo | None:
@@ -84,6 +94,10 @@ def create_archive(source: Path, directory: Path, prefix: str, now: datetime, ki
     if not source.is_dir():
         raise ValidationError("There is no data folder to back up yet")
     directory.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(directory, 0o700)  # archives hold saves and config files, which can contain passwords
+    except OSError:
+        pass
     name = _unique_name(directory, prefix, kind, now)
     tmp = directory / f".{name}.partial"
     unreadable: list[str] = []
@@ -92,7 +106,8 @@ def create_archive(source: Path, directory: Path, prefix: str, now: datetime, ki
         unreadable.append(str(getattr(e, "filename", "") or e))
 
     try:
-        with tarfile.open(tmp, "w:gz") as tar:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)  # never readable by other users
+        with os.fdopen(fd, "wb") as raw, tarfile.open(fileobj=raw, mode="w:gz") as tar:
             for root, dirs, files in os.walk(source, followlinks=False, onerror=on_walk_error):
                 for entry in [*dirs, *files]:
                     full = os.path.join(root, entry)
@@ -106,15 +121,18 @@ def create_archive(source: Path, directory: Path, prefix: str, now: datetime, ki
             if unreadable:
                 raise AccessError(
                     f"Cannot back up: {len(unreadable)} file(s) could not be read, for example "
-                    f"{unreadable[0]}. They are probably owned by another user (such as root, because the game "
-                    f"container wrote them). Fix with: sudo chown -R $(id -u):$(id -g) '{source}' "
-                    f"and try again. Nothing was saved.")
+                    f"{unreadable[0]}. They belong to another user (usually root, because the game container "
+                    f"wrote them). {ownership_hint(source)} Nothing was saved.")
         os.replace(tmp, directory / name)
     except (AccessError, ValidationError):
         tmp.unlink(missing_ok=True)
         raise
     except OSError as e:
         tmp.unlink(missing_ok=True)
+        if e.errno == errno.ENOSPC:
+            raise OperationError("Not enough free disk space to save the backup. Free some space (or lower "
+                                 "GAMEDOCK_BACKUP_RETENTION and delete old backups) and try again. "
+                                 "Nothing was saved.") from e
         raise OperationError(f"Backup failed: {e.strerror or e}") from e
     except BaseException:
         tmp.unlink(missing_ok=True)
@@ -179,7 +197,11 @@ def restore_archive(archive: Path, target: Path) -> list[str]:
     except (tarfile.TarError, EOFError, OSError) as e:
         shutil.rmtree(tmp, ignore_errors=True)
         if isinstance(e, PermissionError):
-            raise AccessError(f"Cannot restore: {e}") from e
+            raise AccessError(f"Cannot restore: {e}. {ownership_hint(parent)} Your current data was not changed."
+                              ) from e
+        if isinstance(e, OSError) and e.errno == errno.ENOSPC:
+            raise OperationError("Not enough free disk space to unpack the backup. Free some space and try "
+                                 "again. Your current data was not changed.") from e
         raise OperationError(f"Backup file is damaged or unreadable: {e}") from e
     except BaseException:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -216,8 +238,8 @@ def empty_directory(target: Path) -> None:
                 child.unlink()
     except PermissionError as e:
         raise AccessError(
-            f"Could not delete {e.filename}: permission denied (owned by another user?). "
-            f"Some files may already be gone; the safety backup is intact.") from e
+            f"Could not delete {e.filename}: permission denied (it belongs to another user, usually root). "
+            f"Some files may already be gone; the safety backup is intact. {ownership_hint(target)}") from e
     except OSError as e:
         raise OperationError(f"Could not delete data: {e.strerror or e}") from e
 
@@ -229,8 +251,8 @@ def remove_tree(target: Path) -> None:
         pass
     except PermissionError as e:
         raise AccessError(
-            f"Could not delete {e.filename}: permission denied (owned by another user?). "
-            f"The safety backup is intact.") from e
+            f"Could not delete {e.filename}: permission denied (it belongs to another user, usually root). "
+            f"The safety backup is intact. {ownership_hint(target)}") from e
     except OSError as e:
         raise OperationError(f"Could not delete data: {e.strerror or e}") from e
 

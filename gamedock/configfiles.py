@@ -175,6 +175,8 @@ def write_config(data_root: Path, cf: ConfigFile, content: str, now: datetime) -
         try:
             with os.fdopen(fd, "wb") as f:
                 f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
             os.chmod(tmp, mode)
             os.replace(tmp, path)
         except BaseException:
@@ -182,9 +184,10 @@ def write_config(data_root: Path, cf: ConfigFile, content: str, now: datetime) -
                 os.unlink(tmp)
             raise
     except PermissionError as e:
+        from .backups import ownership_hint
         raise AccessError(
-            f"Cannot write {cf.path}: permission denied. The file or folder is probably owned by another user "
-            f"(such as root). Fix with: sudo chown -R $(id -u):$(id -g) '{data_root}'") from e
+            f"Cannot write {cf.path}: permission denied. The file or folder belongs to another user (usually "
+            f"root, because the game container created it). {ownership_hint(data_root)}") from e
     except OSError as e:
         raise OperationError(f"Could not save {cf.path}: {e.strerror or e}") from e
     _prune_baks(path)

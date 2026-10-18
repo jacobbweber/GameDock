@@ -97,7 +97,7 @@ def test_unreadable_file_gives_clear_error_and_saves_nothing(srv, tmp_path):
     secret.write_text("x")
     secret.chmod(0)
     try:
-        with pytest.raises(AccessError, match="owned by another user"):
+        with pytest.raises(AccessError, match="another user.*PUID"):
             srv.create_backup("one")
     finally:
         secret.chmod(0o644)
@@ -357,3 +357,48 @@ def test_backup_ops_unknown_server(service):
         service.list_backups("nope")
     with pytest.raises(NotFoundError):
         service.create_backup("nope")
+
+
+# ------------------------------------------------------------------ review pass
+def test_archives_are_private(tmp_path):
+    import os
+    from datetime import datetime, timezone
+    src = tmp_path / "d"
+    src.mkdir()
+    (src / "a.txt").write_text("secret admin password")
+    info = bk.create_archive(src, tmp_path / "b", "x", datetime(2026, 1, 1, tzinfo=timezone.utc))
+    assert os.stat(info.path).st_mode & 0o777 == 0o600
+    assert os.stat(tmp_path / "b").st_mode & 0o777 == 0o700
+
+
+def test_ownership_hint_quotes_odd_paths(tmp_path):
+    p = tmp_path / "it's a dir"
+    hint = bk.ownership_hint(p)
+    assert "chown -R $(id -u):$(id -g)" in hint and "PUID" in hint
+    import shlex
+    assert shlex.split(hint.split("with: ")[1].split(". To stop")[0])[-1] == str(p)  # copy-paste safe
+
+
+def test_disk_full_while_backing_up_is_explained(tmp_path, monkeypatch):
+    import errno
+    from datetime import datetime, timezone
+    src = tmp_path / "d"
+    src.mkdir()
+    (src / "a.txt").write_text("x")
+
+    def boom(*a, **k):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(bk.tarfile, "open", boom)
+    with pytest.raises(bk.OperationError, match="Not enough free disk space"):
+        bk.create_archive(src, tmp_path / "b", "x", datetime(2026, 1, 1, tzinfo=timezone.utc))
+    assert not list((tmp_path / "b").glob(".*partial"))
+
+
+def test_restore_warns_when_old_files_belonged_to_another_user(service, deployed, tmp_path, monkeypatch):
+    from gamedock import service as svc_mod
+    service.create_backup("one")
+    name = service.list_backups("one")[0].name
+    monkeypatch.setattr(svc_mod, "foreign_owners", lambda root: ({1234}, str(root / "saves" / "w.dat")))
+    r = service.restore_backup("one", name, confirm=True)
+    assert any("user id 1234" in w and "chown -R 1234" in w for w in r.warnings)
