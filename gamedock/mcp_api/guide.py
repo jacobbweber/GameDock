@@ -34,8 +34,15 @@ and GameDock works for any game: a game is just an entry in the catalog.
   registry has a newer version than the one the container runs, false = up to date, null = could not tell) and
   `update_note` (how this particular game really updates). `get_gamedock_version` shows GameDock's own version and
   whether a newer GameDock exists. You cannot install a GameDock update; only a person can, in the web page.
+- **Game version (SteamCMD games)**: `get_server_status` shows `game_version` (the game's own version text, when known),
+  `installed_build`, `latest_build` and `game_update_status` (`up_to_date`, `update_available`, `could_not_check`, or
+  `unknown` = no Steam id for this game). `check_game_update` asks for the newest build (read-only, cached for an hour)
+  and explains. `update_game` installs the update safely: stop, automatic backup, start (the image downloads the new game
+  files), then it waits and verifies the build id changed; if not, the result says `problem: true`. It disconnects
+  players and can take many minutes. Image updates (`update_server_image`) are a different thing: they replace the
+  container image, not the game files.
 - **Schedules**: each server can have scheduled backups (every N hours, daily or weekly) and scheduled maintenance
-  (daily or weekly: backup, apply an image update, restart). `list_schedules` shows them with next run, last result
+  (daily or weekly: backup, apply updates - image and game version - and restart). `list_schedules` shows them with next run, last result
   and recent failures. `set_backup_schedule` and `set_maintenance_schedule` change them (they run nothing now). Times
   of day are in the machine's timezone, shown by `list_schedules`. A run missed while GameDock was off runs once at the
   next start (a missed maintenance is skipped if it is more than 6 hours late). "Only when nobody is playing" does not
@@ -52,6 +59,7 @@ Tools you have: {", ".join(tool_names)}.
 - Check on things: `list_servers`, `get_server_status`, `get_server_stats`, `get_stats_history`, `get_host_stats`.
 - Something wrong or slow to start? `get_server_logs` shows the newest console lines.
 - Before risky changes: `create_backup`.
+- Is the game out of date? `check_game_update`, then (with the human's agreement, it disconnects players) `update_game`.
 - Regular safety: `set_backup_schedule` (for example daily at 03:00, keep 7), and for a weekly restart with updates
   `set_maintenance_schedule` (for example weekly on sun at 04:00). Check results with `list_schedules`.
 - Port conflicts and other problems come back as plain error messages: read them and adjust.

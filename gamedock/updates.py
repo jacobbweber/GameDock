@@ -376,6 +376,8 @@ class UpdateChecker:
                         + "; ".join(self.manual_commands()))
                 rc, names, _ = self._git("diff", "--name-only", "HEAD", "FETCH_HEAD")
                 changed_deps = [n for n in names.splitlines() if n in DEPENDENCY_FILES]
+                if changed_deps == ["pyproject.toml"] and not self._pyproject_deps_changed():
+                    changed_deps = []     # only the version line moved: no new packages, the button may go ahead
                 if changed_deps:
                     raise ConflictError(
                         "This update changes GameDock's required packages ("
@@ -401,6 +403,17 @@ class UpdateChecker:
                     unfreeze()
         finally:
             self._apply_lock.release()
+
+    def _pyproject_deps_changed(self) -> bool:
+        """True unless the only difference between HEAD and FETCH_HEAD in pyproject.toml is the `version = ...` line
+        (a release bump). Any doubt counts as changed."""
+        texts = []
+        for ref in ("HEAD", "FETCH_HEAD"):
+            rc, out, _ = self._git("show", f"{ref}:pyproject.toml")
+            if rc != 0:
+                return True
+            texts.append([ln for ln in out.splitlines() if not re.match(r"^version\s*=", ln)])
+        return texts[0] != texts[1]
 
     def _refusal(self, why: str) -> str:
         return f"{why} To update by hand, run: " + "; ".join(self.manual_commands())

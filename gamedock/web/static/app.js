@@ -95,7 +95,7 @@ const ACTIVITY_LABEL = {
   deploying: "Deploying", starting: "Starting", stopping: "Stopping", restarting: "Restarting",
   "backing up": "Backing up", restoring: "Restoring", updating: "Updating", "wiping data": "Wiping data",
   deleting: "Deleting", "saving settings": "Saving settings", "saving config": "Saving config",
-  maintenance: "Maintenance",
+  maintenance: "Maintenance", "updating game": "Updating game",
 };
 const ACTIVITY_HELP = {
   deploying: "Downloading the game image and creating the server. The first time this can take a few minutes.",
@@ -109,7 +109,8 @@ const ACTIVITY_HELP = {
   deleting: "Removing the server\u2026",
   "saving settings": "Re-creating the container with the new settings\u2026",
   "saving config": "Saving the config file\u2026",
-  maintenance: "Running maintenance: backing up, updating the game image and restarting, as chosen. This can take several minutes. Nothing else can be done to this server meanwhile.",
+  maintenance: "Running maintenance: backing up, updating the game and its image, and restarting, as chosen. This can take several minutes. Nothing else can be done to this server meanwhile.",
+  "updating game": "Stopping the server, backing it up, and starting it again so the game downloads its new files. This can take many minutes; the game cannot be joined until it is ready.",
 };
 
 const spinner = () => el("span", { class: "spinner", "aria-hidden": "true" });
@@ -178,6 +179,7 @@ function serverCard(s) {
     statusBox(st),
     el("div", { class: "meta" }, "Image: ", el("code", { textContent: s.image })),
     el("div", { class: "meta", textContent: `Host ports: ${portText(s.ports)}` }),
+    gameLine(s),
     updateFlag(s),
     schedLine(s),
     s.detail && s.status !== "not_created" ? el("div", { class: s.status === "error" ? "meta problem" : "meta", textContent: s.detail }) : null,
@@ -191,7 +193,7 @@ function serverCard(s) {
       btn("Backups", "secondary", () => openBackups(s.id), false),
       btn("Schedules", "secondary", () => openSchedules(s.id), false),
       s.config_file_count > 0 ? btn("Config", "secondary", () => openConfig(s.id), false) : null,
-      s.update_method !== "none" ? btn("Update", "secondary", () => openUpdate(s.id), false) : null,
+      s.update_method !== "none" || s.steam_app_id ? btn("Updates", "secondary", () => openUpdate(s.id), false) : null,
       el("span", { class: "spacer" }),
       btn("Edit", "secondary", () => openEdit(s), running, running ? "Stop the server to edit it" : ""),
       btn("Delete", "danger", () => openDelete(s), running, running ? "Stop the server to delete it" : "")));
@@ -250,7 +252,8 @@ function liveSig(s) {
 function syncCard(key, s, build) {
   const st = serverState(s);
   const structSig = JSON.stringify([s.name, s.status, s.detail, s.ports, s.image, s.config_file_count, s.update_method,
-    s.game_name, st.kind === "busy", s.id, s.env && s.env.length, s.update_available, !!s.activity]);
+    s.game_name, st.kind === "busy", s.id, s.env && s.env.length, s.update_available, !!s.activity,
+    s.steam_app_id, s.game_version, s.installed_build, s.latest_build, s.game_update_status]);
   const badgeSig = `${st.working ? 1 : 0}|${st.kind}|${st.label}`;
   const statusSig = JSON.stringify([st.kind, st.working, st.progress, st.sub, st.ready]);
   const lsig = liveSig(s);
@@ -683,8 +686,100 @@ function confirmWipe(id) {
   }));
 }
 
-// -------------------------------------------------------------------- image update
+// -------------------------------------------------------------------- updates dialog (game version + image)
+const GAME_BADGE = { update_available: ["Update available", "update"], up_to_date: ["Up to date", "running"],
+  could_not_check: ["Could not check", "stopped"], unknown: ["Unknown (no Steam id for this game)", "stopped"] };
+const fmtDay = (iso) => { const d = new Date(iso); return isNaN(d) ? "" : d.toLocaleString([], { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }); };
+
 async function openUpdate(id, message) {
+  await refresh();
+  const s = findServer(id);
+  if (!s) return;
+  if (!s.steam_app_id) return openImageUpdate(id, message);   // games without a Steam id: only the image can be updated
+  let g;
+  try { g = await api(`/api/servers/${sid(id)}/game-update`); }
+  catch (e) { return openDialog(resultView("Updates", [[e.message, "warn"]])); }
+  const err = el("div", { class: "form-error", hidden: true });
+  const [label, cls] = GAME_BADGE[g.status] || GAME_BADGE.unknown;
+  const checkBtn = el("button", { type: "button", class: "secondary small", id: "game-check", textContent: "Check now" });
+  checkBtn.addEventListener("click", async () => {
+    checkBtn.disabled = true; checkBtn.replaceChildren(spinner(), "Checking\u2026");
+    try { await api(`/api/servers/${sid(id)}/game-update/check`, "POST"); await refresh(); openUpdate(id); }
+    catch (e) { err.textContent = e.message; err.hidden = false; checkBtn.disabled = false; checkBtn.textContent = "Check now"; }
+  });
+  const row = (k, v) => el("tr", {}, el("th", { textContent: k }), el("td", { textContent: v }));
+  const inst = g.installed, late = g.latest;
+  const facts = el("table", { class: "about game-facts", id: "game-facts" },
+    row("Installed version", g.game_version || (g.running ? "not shown in the log yet" : "shown once the server runs")),
+    row("Installed build", inst.build ? `${inst.build}${inst.updated_at ? ` (updated ${fmtDay(inst.updated_at)})` : ""}` : "not found"),
+    row("Newest build", late.build ? `${late.build}${late.updated_at ? ` (released ${fmtDay(late.updated_at)})` : ""}${g.branch && g.branch !== "public" ? ` on branch ${g.branch}` : ""}` : "not known"),
+    row("Checked", late.checked_at ? fmtDay(late.checked_at) : "not yet"));
+  const running = s.status === "running";
+  const canUpdate = g.can_update && running && g.status !== "up_to_date" && !s.activity;
+  const why = !g.can_update ? "GameDock cannot update this game's files by itself."
+    : !running ? "The server is stopped. This game updates itself when it starts, so just start it."
+    : g.status === "up_to_date" ? "Nothing to update: the game is already the newest version." : "";
+  const updateBtn = el("button", { type: "button", class: "primary", id: "game-update-now", disabled: !canUpdate, title: why,
+    textContent: g.status === "update_available" ? "Update game now" : "Update game anyway" });
+  updateBtn.addEventListener("click", () => confirmGameUpdate(id, s, g));
+  const explain = el("details", { class: "how-updates", open: g.status !== "update_available" },
+    el("summary", { textContent: "How game updates work" }),
+    el("p", { class: "hint", textContent: "GameDock compares the Steam build number stored in the game's own files with the newest public build number from a public copy of Steam's data. Nothing is downloaded to check, and the answer is kept for an hour." }),
+    el("p", { class: "hint", textContent: "Update game now stops the server, backs it up, and starts it again. This game's image downloads the new files while it starts. GameDock then checks that the build number really changed and tells you if it did not." }),
+    g.update_note ? el("p", { class: "hint", textContent: g.update_note }) : null);
+  const imgBadge = s.update_available === true ? ["Update available", "update"] : s.update_available === false ? ["Up to date", "running"] : ["Not known", "stopped"];
+  const image = s.update_method !== "none" ? el("section", { class: "update-section" },
+    el("h4", { textContent: "Container image" }),
+    el("div", { class: "update-status" }, el("span", { class: `badge ${imgBadge[1]}`, textContent: imgBadge[0] }),
+      el("span", { class: "hint", textContent: "The helper program around the game (not the game files). Replacing it keeps your world." }),
+      el("button", { type: "button", class: "secondary small", id: "open-image-update", textContent: "Image update\u2026", onclick: () => openImageUpdate(id) }))) : null;
+  openWide(el("div", { class: "panel update-panel", id: "update-panel" },
+    el("h3", { textContent: `Updates \u2013 ${s.name}` }),
+    message ? el("div", { class: "okmsg", textContent: message }) : null,
+    el("section", { class: "update-section" },
+      el("h4", { textContent: "Game" }),
+      el("div", { class: "update-status" }, el("span", { class: `badge ${cls}`, id: "game-status-badge", textContent: label }),
+        el("span", { class: "hint", textContent: g.summary }), checkBtn),
+      facts, explain),
+    image, err,
+    el("div", { class: "dialog-actions" },
+      el("button", { type: "button", class: "secondary", textContent: "Close", onclick: closeDialog }), el("span", { class: "spacer" }), updateBtn)));
+}
+
+function confirmGameUpdate(id, s, g) {
+  openDialog(confirmView({
+    title: `Update the game on ${s.name}?`,
+    paragraphs: [
+      g.status === "update_available"
+        ? `A newer game version is available (build ${g.installed.build} \u2192 ${g.latest.build}).`
+        : "GameDock does not see a newer game version right now; this restarts the server and checks again.",
+      "The server will be stopped (with time to save), backed up, and started again. Players are disconnected. While it starts, the game downloads its new files, which can take many minutes.",
+      "If the backup fails, nothing is changed. Afterwards GameDock checks that the installed build number changed and tells you plainly if it did not.",
+    ],
+    checkboxLabel: "Yes, restart the server and update the game.", confirmText: "Update game now", danger: false,
+    workingText: "Stopping, backing up, restarting, and waiting for the game to update. This can take many minutes\u2026",
+    onBack: () => openUpdate(id),
+    onConfirm: async () => {
+      busy.set(id, "updating game");
+      renderServers();
+      let r;
+      try { r = await api(`/api/servers/${sid(id)}/update-game?confirm=true`, "POST"); }
+      finally { busy.delete(id); await refresh(); }
+      const title = r.outcome === "changed" ? "Game updated" : r.outcome === "up_to_date" ? "Already up to date"
+        : r.problem ? "The game was not confirmed as updated" : "Restarted";
+      openDialog(resultView(title, [
+        [r.note, r.problem ? "warn" : ""],
+        r.before_build ? [`Build before: ${r.before_build}`] : null,
+        r.after_build ? [`Build after: ${r.after_build}`] : null,
+        r.game_version ? [`Game version: ${r.game_version}`] : null,
+        ...(r.warnings || []).map((w) => [w, "warn"]),
+      ]));
+    },
+  }));
+}
+
+// -------------------------------------------------------------------- image update
+async function openImageUpdate(id, message) {
   await refresh();
   const s = findServer(id);
   if (!s) return;
@@ -698,7 +793,7 @@ async function openUpdate(id, message) {
   const checkBtn = el("button", { type: "button", class: "secondary small", id: "image-check", textContent: "Check now", disabled: chk.supported === false });
   checkBtn.addEventListener("click", async () => {
     checkBtn.disabled = true; checkBtn.replaceChildren(spinner(), "Checking\u2026");
-    try { await api(`/api/servers/${sid(id)}/image-update/check`, "POST"); await refresh(); openUpdate(id); }
+    try { await api(`/api/servers/${sid(id)}/image-update/check`, "POST"); await refresh(); openImageUpdate(id); }
     catch (e) { err.textContent = e.message; err.hidden = false; checkBtn.disabled = false; checkBtn.textContent = "Check now"; }
   });
   const verdict = chk.update_available === true ? ["Update available", "update"] :
@@ -1369,11 +1464,23 @@ function schedLine(s) {
   node.dataset.sig = txt;
   return node;
 }
+function gameLine(s) {
+  if (!s.steam_app_id) return null;
+  const what = s.game_version ? `Game version ${s.game_version}` : s.installed_build ? `Game build ${s.installed_build}` : "Game version not known yet";
+  const how = { up_to_date: ", up to date", update_available: ", newer version available", could_not_check: ", could not check for updates" }[s.game_update_status] || "";
+  return el("div", { class: `meta game-line ${s.game_update_status}`, id: `game-line-${s.id}`,
+    title: s.installed_build ? `Steam build ${s.installed_build}${s.latest_build ? `, newest ${s.latest_build}` : ""}` : "" }, what + how);
+}
+
 function updateFlag(s) {
-  if (s.update_available !== true) return null;
+  const image = s.update_available === true, game = s.game_update_status === "update_available";
+  if (!image && !game) return null;
+  const text = image && game ? "A newer game version and a newer game image are available. Open Updates for details."
+    : game ? `A newer game version is available (build ${s.installed_build} \u2192 ${s.latest_build}).`
+    : "A newer version of the game image is ready.";
   return el("div", { class: "update-flag" },
-    el("span", { class: "badge update", textContent: "Update available" }),
-    el("span", { class: "hint", textContent: "A newer version of the game image is ready." }),
+    el("span", { class: `badge update ${game && !image ? "game" : ""}`, textContent: "Update available" }),
+    el("span", { class: "hint", textContent: text }),
     el("button", { type: "button", class: "primary small", textContent: "Update now", disabled: !!(busy.get(s.id) || s.activity),
       onclick: () => openUpdate(s.id), "aria-label": `Update ${s.name} now` }));
 }
@@ -1619,7 +1726,7 @@ async function openSchedules(id, message, kind = "ok") {
   const mOn = el("input", { type: "checkbox", id: "sched-maint-on", checked: m.enabled });
   const mRec = recurrenceControls("sm", ["daily", "weekly"], m.frequency === "interval" ? { ...m, frequency: "weekly" } : m);
   const mBackup = el("input", { type: "checkbox", id: "sched-m-backup", checked: m.backup_first });
-  const mImage = el("input", { type: "checkbox", id: "sched-m-image", checked: m.update_image && m.image_update_supported, disabled: !m.image_update_supported });
+  const mImage = el("input", { type: "checkbox", id: "sched-m-image", checked: m.update_image && (m.image_update_supported || m.game_update_supported), disabled: !(m.image_update_supported || m.game_update_supported) });
   const mRestart = el("input", { type: "checkbox", id: "sched-m-restart", checked: m.restart });
   const mEmpty = el("input", { type: "checkbox", id: "sched-m-empty", checked: false, disabled: true });
   const mErr = el("div", { class: "form-error", hidden: true });
@@ -1658,8 +1765,9 @@ async function openSchedules(id, message, kind = "ok") {
       mRec.node,
       el("div", { class: "opts" },
         opt(mBackup, "Take a backup first", "Saved as an automatic backup before anything changes."),
-        opt(mImage, "Check for a newer game image and apply it",
-          m.image_update_supported ? (s.update_note || "Downloads the newest image, then recreates the container with it. Your data and settings are kept.")
+        opt(mImage, m.game_update_supported ? "Check for updates and apply them" : "Check for a newer game image and apply it",
+          m.game_update_supported ? "Looks for a newer game version (Steam build) and, if there is one, installs it as part of the restart, after a safety backup. The result says which build the game moved from and to." + (m.image_update_supported ? " A newer game image is applied too." : "")
+            : m.image_update_supported ? (s.update_note || "Downloads the newest image, then recreates the container with it. Your data and settings are kept.")
             : "Not available: this game updates its files inside the container, so there is no image to apply. Restarting is how it updates."),
         opt(mRestart, "Restart the server", "Players are disconnected for a short time."),
         opt(mEmpty, "Only when nobody is playing", `Not available: ${m.only_when_empty.reason}`)),
@@ -1674,7 +1782,8 @@ async function openSchedules(id, message, kind = "ok") {
 function confirmMaintenanceNow(id, s, m) {
   const steps = [];
   if (m.backup_first) steps.push("take a backup");
-  if (m.update_image && m.image_update_supported) steps.push("download a newer game image if there is one and recreate the container with it");
+  if (m.update_image && m.game_update_supported) steps.push("check for a newer game version and install it with the restart" + (m.image_update_supported ? ", and apply a newer game image" : ""));
+  else if (m.update_image && m.image_update_supported) steps.push("download a newer game image if there is one and recreate the container with it");
   if (m.restart) steps.push("restart the server");
   const running = s.status === "running";
   openDialog(confirmView({

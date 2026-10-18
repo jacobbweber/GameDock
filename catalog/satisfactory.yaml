@@ -4,10 +4,13 @@ name: Satisfactory Dedicated Server
 image: wolveix/satisfactory-server:latest
 description: Satisfactory dedicated server using a popular community image.
 notes: Example values. Check the image documentation before real use.
+steam_app_id: 1690800                # Satisfactory Dedicated Server (this image keeps the files in /config/gamefiles; verify before use)
+game_update_method: restart          # the image updates the game when the container starts
 update_note: >-
   This image downloads the newest Satisfactory server files with SteamCMD when the container starts, so restarting the
-  server is how the game itself gets updated. "Update available" only means the image has a newer version; Update now
-  replaces it and keeps your saves.
+  server is how the game itself gets updated. GameDock compares the installed Steam build with the newest public one;
+  "Update game" backs up, restarts and checks that the build changed. A separate "image update" only replaces the helper
+  program around the game and keeps your saves.
 ports:
   - { protocol: udp, host: 7777, container: 7777 }
   - { protocol: tcp, host: 7777, container: 7777 }

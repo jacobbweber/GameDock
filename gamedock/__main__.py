@@ -17,6 +17,7 @@ from .mcp_api.guard import allowed_host_patterns
 from .sampler import Sampler
 from .scheduler import Scheduler
 from .service import GameDockService
+from .steam import SteamInfo
 from .updates import UpdateChecker
 from .web.app import create_app
 
@@ -31,7 +32,9 @@ def build_service(settings: Settings) -> GameDockService:
                            stats_history_seconds=settings.stats_history_seconds,
                            port_probe=port_free if settings.backend == "docker" else None,
                            updater=UpdateChecker(repo=settings.update_repo, enabled=settings.update_check,
-                                                 self_update=settings.self_update))
+                                                 self_update=settings.self_update),
+                           steam_info=SteamInfo(settings.data_dir / "steam-latest.json", settings.steam_info_url,
+                                                enabled=settings.update_check))
 
 
 def build_app(settings: Settings | None = None):

@@ -8,8 +8,9 @@ from pathlib import Path, PurePosixPath
 import yaml
 
 from .errors import CatalogError
+from .steam import APP_ID_RE, BRANCH_RE
 from .models import (
-    CONFIG_FORMATS, ENV_NAME_RE, ID_RE, IMAGE_RE, UPDATE_METHODS, CatalogEntry, ConfigFile, EnvField, PortMapping,
+    CONFIG_FORMATS, ENV_NAME_RE, GAME_UPDATE_METHODS, ID_RE, IMAGE_RE, UPDATE_METHODS, CatalogEntry, ConfigFile, EnvField, PortMapping,
     VolumeMapping, is_reserved_env_name,
 )
 
@@ -101,6 +102,36 @@ def _parse_save_command(value: object, source: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _parse_steam(data: dict, source: str) -> tuple[str, str, str, str]:
+    """(steam_app_id, steam_branch, steam_manifest_dir, game_update_method) with the default method filled in."""
+    raw = data.get("steam_app_id")
+    app_id = "" if raw in (None, "") else str(raw).strip()
+    if isinstance(raw, bool) or (app_id and not APP_ID_RE.match(app_id)):
+        raise CatalogError(f"{source}: steam_app_id must be a number such as 2394010 (got {raw!r})")
+    branch = str(data.get("steam_branch") or "").strip()
+    if branch and not BRANCH_RE.match(branch):
+        raise CatalogError(f"{source}: steam_branch must be a plain branch name such as public or beta (got {branch!r})")
+    mdir = str(data.get("steam_manifest_dir") or "").strip()
+    if mdir:
+        pp = PurePosixPath(mdir)
+        if pp.is_absolute() or ".." in pp.parts or "\\" in mdir or "\0" in mdir or "\n" in mdir:
+            raise CatalogError(f"{source}: steam_manifest_dir must be a folder inside the server's data folder "
+                               f"(relative, no '..'): {mdir!r}")
+        mdir = str(pp)
+    if (branch or mdir) and not app_id:
+        raise CatalogError(f"{source}: steam_branch and steam_manifest_dir only make sense together with steam_app_id")
+    method = data.get("game_update_method")
+    if method in (None, ""):
+        method = "restart" if app_id else "none"
+    method = str(method)
+    if method not in GAME_UPDATE_METHODS:
+        raise CatalogError(f"{source}: game_update_method must be one of {GAME_UPDATE_METHODS}, got {method!r}")
+    if method == "restart" and not app_id:
+        raise CatalogError(f"{source}: game_update_method 'restart' needs steam_app_id (GameDock must know which game "
+                           "version to look for)")
+    return app_id, branch, mdir, method
+
+
 def parse_definition(data: object, source: str = "<definition>") -> CatalogEntry:
     if not isinstance(data, dict):
         raise CatalogError(f"{source}: expected a mapping at top level")
@@ -168,6 +199,8 @@ def parse_definition(data: object, source: str = "<definition>") -> CatalogEntry
     if not isinstance(stop_first, bool):
         raise CatalogError(f"{source}: backup_stop_first must be true or false")
     save_command = _parse_save_command(data.get("save_command"), source)
+    steam_app_id, steam_branch, steam_manifest_dir, game_update_method = _parse_steam(data, source)
+    version_pattern = _parse_pattern(data.get("version_log_pattern"), "version_log_pattern", source, groups=1)
 
     return CatalogEntry(
         id=gid,
@@ -186,6 +219,11 @@ def parse_definition(data: object, source: str = "<definition>") -> CatalogEntry
         update_note=update_note,
         backup_stop_first=stop_first,
         save_command=save_command,
+        steam_app_id=steam_app_id,
+        steam_branch=steam_branch,
+        steam_manifest_dir=steam_manifest_dir,
+        version_log_pattern=version_pattern,
+        game_update_method=game_update_method,
     )
 
 
@@ -203,6 +241,11 @@ def entry_to_dict(e: CatalogEntry) -> dict:
         "update_note": e.update_note,
         "backup_stop_first": e.backup_stop_first,
         "save_command": list(e.save_command),
+        "steam_app_id": e.steam_app_id,
+        "steam_branch": e.steam_branch,
+        "steam_manifest_dir": e.steam_manifest_dir,
+        "version_log_pattern": e.version_log_pattern,
+        "game_update_method": e.game_update_method,
         "config_files": [
             {"path": c.path, "label": c.label, "format": c.format,
              "sensitive_keys": list(c.sensitive_keys), "hot_edit": c.hot_edit, "note": c.note}

@@ -22,6 +22,8 @@ def catalog_to_dict(e: CatalogEntry) -> dict:
         "update_method": e.update_method, "update_note": e.update_note,
         "backup_stop_first": e.backup_stop_first, "save_command": list(e.save_command),
         "ready_log_pattern": e.ready_log_pattern, "progress_log_pattern": e.progress_log_pattern,
+        "steam_app_id": e.steam_app_id, "steam_branch": e.steam_branch or ("public" if e.steam_app_id else ""),
+        "version_log_pattern": e.version_log_pattern, "game_update_method": e.game_update_method,
         "config_files": [{"path": c.path, "label": c.label, "format": c.format, "hot_edit": c.hot_edit,
                           "note": c.note} for c in e.config_files],
         "fields": [asdict(f) for f in e.fields],  # defaults of secret fields are not secret values

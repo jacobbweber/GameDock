@@ -40,7 +40,21 @@ The button runs `git pull --ff-only` in the install folder, then restarts GameDo
 - a service manager that restarts GameDock. **The shipped units need no change.** GameDock first asks systemd to restart it (`systemctl --user restart gamedock`, or `systemctl restart gamedock` when allowed). If that is not possible it exits with status 75, which makes `Restart=on-failure` (what both example units use, with `RestartSec=5`) start it again; `Restart=always` works too. Outside systemd it starts itself again in place. A unit with `Restart=no` or `Restart=on-abnormal` will leave GameDock stopped after an update: do not use those.
 - GameDock finds its own systemd unit name when it restarts, so a different unit name works. The manual commands the dialog displays assume the name `gamedock`.
 
-It refuses (and changes nothing) while a backup, update, restore, deploy or scheduled job is running, with local changes, when the pull is not a fast-forward, and when the update changes the required packages (run `.venv/bin/pip install -e .` by hand, then restart). Turn the check off with `GAMEDOCK_UPDATE_CHECK=false` and only the button with `GAMEDOCK_SELF_UPDATE=false`.
+It refuses (and changes nothing) while a backup, update, restore, deploy or scheduled job is running, with local changes, when the pull is not a fast-forward, and when the update changes the required packages (run `.venv/bin/pip install -e .` by hand, then restart; a release that only changes the `version` line of `pyproject.toml` does not count, from 0.4.0 on). Turn the check off with `GAMEDOCK_UPDATE_CHECK=false` and only the button with `GAMEDOCK_SELF_UPDATE=false`.
+
+### Moving an existing install from 0.3.0 to 0.4.0
+
+0.4.0 changes only the version line in `pyproject.toml` and adds no packages, **but the 0.3.0 button refuses any change to `pyproject.toml`**, so update this one by hand (once). From 0.4.0 on the button looks at what changed in `pyproject.toml` and only refuses when the required packages changed, so ordinary version bumps no longer block it.
+
+```bash
+cd ~/GameDock
+git pull --ff-only
+.venv/bin/pip install -e .      # harmless; 0.4.0 adds no new packages
+systemctl --user restart gamedock
+journalctl --user -u gamedock -n 20 --no-pager     # should say it started
+```
+
+Game containers keep running. Servers you deployed earlier keep working and pick up the Steam settings (app id, version pattern) from the current catalog entry of the same game, so Palworld shows its game version without a redeploy. (A new Palworld deploy also gets `UPDATE_ON_BOOT=true`; the image already defaults to it, so an existing one does not need it.) Outbound questions go to `api.steamcmd.net` (change with `GAMEDOCK_STEAM_INFO_URL`, or switch everything off with `GAMEDOCK_UPDATE_CHECK=false`).
 
 ### Moving an existing install from 0.2.0 to 0.3.0
 

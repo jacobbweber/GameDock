@@ -292,6 +292,20 @@ def test_refuses_when_required_packages_change(svc, checker, repos):
     assert repos.head() == before and not svc._frozen
 
 
+def test_version_only_pyproject_bump_does_not_block(svc, checker, repos):
+    repos.remote_commit(files={"pyproject.toml": "[project]\nname='x'\nversion = '0.4.0'\n"})
+    r = apply(svc, checker)
+    assert r["updated"] and repos.head() == repos.head("seed")
+
+
+def test_pyproject_dependency_change_still_blocks(svc, checker, repos):
+    repos.remote_commit(files={"pyproject.toml": "[project]\nname='x'\nversion = '0.4.0'\ndependencies = ['newdep']\n"})
+    before = repos.head()
+    with pytest.raises(ConflictError, match="required packages"):
+        apply(svc, checker)
+    assert repos.head() == before and not svc._frozen
+
+
 def test_refuses_on_detached_head(svc, checker, repos):
     git(repos.local, "checkout", "-q", "--detach")
     checker._git_cache = None
@@ -331,7 +345,7 @@ def client(svc):
 def test_version_endpoint_and_health(client, repos):
     v = client.get("/api/version").json()
     assert v["version"] == "0.3.0" and v["commit_short"] == repos.head()[:7] and v["self_update"]["possible"] is True
-    assert client.get("/api/health").json() == {"ok": True, "version": "0.3.0"}
+    assert client.get("/api/health").json() == {"ok": True, "version": "0.4.0"}
     assert "update_available" in client.get("/api/status").json()
 
 

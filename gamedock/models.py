@@ -63,6 +63,7 @@ class EnvField:
 
 CONFIG_FORMATS = ("ini", "json", "yaml", "text")
 UPDATE_METHODS = ("pull_recreate", "none")
+GAME_UPDATE_METHODS = ("restart", "none")
 
 
 @dataclass(frozen=True)
@@ -98,6 +99,12 @@ class CatalogEntry:
     update_note: str = ""            # plain-language note shown with the update button (how this game really updates)
     backup_stop_first: bool = False  # True = scheduled backups stop the game briefly instead of copying it while it runs
     save_command: tuple[str, ...] = ()  # command run inside the container (no shell) to make the game save before a live backup
+    # Optional game version tracking for SteamCMD based games (see gamedock/steam.py).
+    steam_app_id: str = ""           # Steam app id of the *dedicated server*; enables "installed build / newest build"
+    steam_branch: str = ""           # Steam branch to compare against ("" = public)
+    steam_manifest_dir: str = ""     # folder (relative to the server's data folder) holding appmanifest_<id>.acf; "" = search the volumes
+    version_log_pattern: str = ""    # regex with ONE capture group: the game's own version in its log, e.g. "Game version is (v[0-9.]+)"
+    game_update_method: str = "none"  # "restart" = the image updates the game when the container starts; "none" = GameDock cannot update it
 
 
 @dataclass
@@ -168,6 +175,14 @@ class ServerInfo:
     # Short schedule overview for the tile: {"backup": "daily 03:00", "maintenance": "Sun 04:00", "next_run": iso|None,
     # "next_kind": "backup"|"maintenance"|""}. Empty strings mean no schedule.
     schedule: dict = field(default_factory=dict)
+    # Game version (SteamCMD games only; see gamedock/steam.py). All empty when the catalog entry has no steam_app_id.
+    # game_update_status: up_to_date | update_available | could_not_check | unknown (no Steam id for this game).
+    steam_app_id: str = ""
+    game_version: str = ""        # the game's own version text from its log (for example v1.0.5.102999), if known
+    installed_build: str = ""     # Steam build id installed in the server's files
+    latest_build: str = ""        # newest public build id (from the last check; no network is used to show this)
+    game_update_status: str = "unknown"
+    game_update_method: str = "none"
 
 
 # ----------------------------------------------------------------------- operation results

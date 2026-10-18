@@ -11,10 +11,16 @@ notes: Example values. Check the image documentation before real use.
 ready_log_pattern: "'HostOnline' \\(up\\)!"
 progress_log_pattern: "progress: *([0-9]+(?:[.][0-9]+)?)"
 # update_method: pull_recreate   (default) pull the newest image and recreate the container; "none" disables it
+# Game version tracking. 2278520 is the Enshrouded *Dedicated Server* Steam app id. VERIFY BEFORE USE: this image keeps
+# the server files (and so steamapps/appmanifest_2278520.acf) inside the container unless its install folder is a volume,
+# in which case GameDock can read the installed build. Without such a volume it says it cannot find the Steam record.
+steam_app_id: 2278520
+game_update_method: restart          # the image updates the game when the container starts
 update_note: >-
   This image downloads the newest Enshrouded server files with SteamCMD when the container starts, so restarting the
-  server is how the game itself gets updated. "Update available" only means the image (the helper program around the
-  game) has a newer version; Update now replaces it and keeps your world.
+  server is how the game itself gets updated. GameDock compares the installed Steam build with the newest public one
+  (it needs the game's install folder to be one of the server's folders; verify before use). A separate "image update"
+  only replaces the helper program around the game and keeps your world.
 ports:                       # default host ports; each instance can choose its own
   - { protocol: udp, host: 15637, container: 15637 }
 volumes:

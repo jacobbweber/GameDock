@@ -349,3 +349,16 @@ label.check.day { font-size: 13.5px; }
 header { flex-wrap: wrap; gap: 8px 16px; }
 header nav a { white-space: nowrap; }
 .hdr-right { margin-left: auto; }
+
+/* ---- 0.4.0: game version ---- */
+.game-line { font-size: 13px; }
+.game-line.up_to_date { color: #56d364; }
+.game-line.update_available { color: #79b8ff; font-weight: 600; }
+.game-line.could_not_check { color: var(--muted); }
+.badge.update.game { background: rgba(163,113,247,.22); color: #d2a8ff; }
+.update-panel { display: flex; flex-direction: column; gap: 12px; }
+.update-section { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+.update-section h4 { margin: 0; font-size: 15px; }
+table.game-facts { border-collapse: collapse; }
+table.game-facts th { padding-top: 2px; padding-bottom: 2px; }
+table.game-facts td { padding: 2px 0; overflow-wrap: anywhere; }

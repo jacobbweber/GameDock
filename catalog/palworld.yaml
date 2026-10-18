@@ -14,11 +14,15 @@ notes: >-
 ready_log_pattern: "Running Palworld dedicated server on"      # used when there is no health check or it lags behind
 progress_log_pattern: "progress: *([0-9]+(?:[.][0-9]+)?)"      # SteamCMD: "Update state (0x61) downloading, progress: 51.68"
 # How updates work for this image (shown next to the Update button), and optional backup hints.
+# Game version tracking (see docs/ARCHITECTURE.md): Steam's server app id, and a log line that shows the game's own version.
+steam_app_id: 2394010                                          # Palworld Dedicated Server
+version_log_pattern: "Game version is (v?[0-9.]+)"             # log line: "Game version is v1.0.5.102999"
+game_update_method: restart                                    # the image updates the game when the container starts
 update_note: >-
-  This image downloads the newest Palworld server files with SteamCMD every time the container starts (its setting
-  UPDATE_ON_BOOT is on by default), so restarting the server is how the game itself gets updated. "Update available"
-  only means the image (the helper program around the game) has a newer version; Update now replaces it and keeps your
-  world.
+  This image downloads the newest Palworld server files with SteamCMD every time the container starts (UPDATE_ON_BOOT
+  is switched on below), so restarting the server is how the game itself gets updated. GameDock compares the installed
+  Steam build with the newest public one: "Update game" backs up, restarts and checks that the build changed. A
+  separate "image update" only replaces the helper program around the game and keeps your world.
 # Run inside the game container before a backup that does not stop the server, so the world is written to disk first.
 # Unverified: it needs the image's RCON to be enabled (the image's default). A failure only adds a note.
 save_command: [rcon-cli, save]
@@ -28,6 +32,7 @@ ports:
 volumes:
   - { host: ./palworld, container: /palworld }
 env:
+  UPDATE_ON_BOOT: "true"       # the image runs SteamCMD at every start, which is how "Update game" works
   PORT: "8211"
   QUERY_PORT: "27015"
 config_files:               # editable from the Config button (example path; verify)

@@ -303,6 +303,22 @@ def create_app(service: GameDockService, sampler=None, metrics_enabled: bool = F
         """The server's Check now button: asks the registry (nothing is downloaded)."""
         return service.check_image_update(server_id, force=True)
 
+    # ---- game version (SteamCMD games)
+    @app.get("/api/servers/{server_id}/game-update")
+    def game_update_status(server_id: str):
+        """Installed and newest game version (cached; asks nothing)."""
+        return service.get_game_update_status(server_id)
+
+    @app.post("/api/servers/{server_id}/game-update/check")
+    def game_update_check(server_id: str):
+        """The Check now button: asks the Steam data service for the newest build (read-only)."""
+        return service.check_game_update(server_id, force=True)
+
+    @app.post("/api/servers/{server_id}/update-game")
+    def update_game(server_id: str, confirm: bool = False):
+        """Safety backup, restart so the game files update, then verify the installed build changed."""
+        return service.update_game(server_id, confirm)
+
     # ---- schedules
     @app.get("/api/schedules")
     def all_schedules():

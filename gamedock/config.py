@@ -5,6 +5,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .steam import DEFAULT_INFO_URL, SteamInfo
 from .updates import parse_repo
 
 
@@ -63,6 +64,7 @@ class Settings:
     update_check: bool = True        # look on GitHub for a newer GameDock (GAMEDOCK_UPDATE_CHECK=false: never contact it)
     update_repo: str = "jacobbweber/GameDock"   # GitHub repository checked for updates (GAMEDOCK_UPDATE_REPO)
     self_update: bool = True         # show the Update GameDock button (GAMEDOCK_SELF_UPDATE=false hides it)
+    steam_info_url: str = "https://api.steamcmd.net/v1/info/{appid}"   # where newest game build ids come from (GAMEDOCK_STEAM_INFO_URL)
 
     def effective_mcp_mode(self) -> tuple[str, str]:
         """(mode actually used, plain-language reason if it differs from the configured mode).
@@ -99,4 +101,5 @@ class Settings:
             update_check=_bool(env.get("GAMEDOCK_UPDATE_CHECK", "true")),
             update_repo=parse_repo(env.get("GAMEDOCK_UPDATE_REPO", "jacobbweber/GameDock") or "jacobbweber/GameDock"),
             self_update=_bool(env.get("GAMEDOCK_SELF_UPDATE", "true")),
+            steam_info_url=SteamInfo.check_template(env.get("GAMEDOCK_STEAM_INFO_URL") or DEFAULT_INFO_URL),
         )

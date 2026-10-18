@@ -106,7 +106,9 @@ def make_tools(service: GameDockService, confirms: ConfirmationStore) -> list[To
         settings. Secret settings are never shown, only whether they are set. `status: running` only means the
         container is up: check `ready` (true = the game can be joined) and `phase` (starting, installing with
         `progress` percent, ready, unhealthy). `activity` shows what GameDock is doing right now (e.g. deploying).
-        `update_available` says whether a newer game image exists (null = unknown) and `schedule` summarises the
+        `update_available` says whether a newer game image exists (null = unknown). For SteamCMD games
+        `game_version`, `installed_build`, `latest_build` and `game_update_status` (up_to_date, update_available,
+        could_not_check, unknown) describe the game's own version; see check_game_update. `schedule` summarises the
         server's scheduled backups and maintenance."""
         return {"servers": [server_to_dict(s) for s in service.list_servers()]}
 
@@ -116,7 +118,8 @@ def make_tools(service: GameDockService, confirms: ConfirmationStore) -> list[To
         be joined when `ready` is true. `phase` is starting, installing (with `progress` percent), ready or
         unhealthy; `phase_detail` explains it in plain words. `activity` is what GameDock is doing right now.
         `update_available` is true when the registry has a newer image than the container runs, false when it is current
-        and null when unknown; `update_note` explains how this game really updates."""
+        and null when unknown; `update_note` explains how this game really updates. `game_version`, `installed_build`,
+        `latest_build` and `game_update_status` describe the game's own version (SteamCMD games)."""
         return server_to_dict(service.get_status(server_id))
 
     @tool(READ, _ann(read=True))
@@ -179,6 +182,15 @@ def make_tools(service: GameDockService, confirms: ConfirmationStore) -> list[To
         why a server is not ready, what it is downloading, or why it stopped. Read-only."""
         return to_plain(service.get_logs(server_id, lines, max_chars=40_000))
 
+    @tool(READ, ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+    def check_game_update(server_id: ServerId) -> Result:
+        """The game's own version and whether a newer game version exists (SteamCMD games). Returns `status`
+        (up_to_date, update_available, could_not_check or unknown = no Steam id for this game), the installed Steam build
+        id and date, the newest public build id and date, the game's version text when the log shows it (`game_version`),
+        and a plain `summary`. Read-only: it asks a public Steam data service for the newest build (answers are cached
+        for an hour; nothing is downloaded or changed). To install an update use update_game."""
+        return service.check_game_update(server_id, force=True)
+
     @tool(READ, _ann(read=True))
     def get_gamedock_version() -> Result:
         """GameDock's own version, git commit and whether a newer GameDock exists on GitHub (`update_available` is
@@ -234,13 +246,14 @@ def make_tools(service: GameDockService, confirms: ConfirmationStore) -> list[To
         days: Annotated[list[Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]] | None, Field(
             max_length=7, description="For 'weekly': the weekdays")] = None,
         backup_first: Annotated[bool, Field(description="Take a backup before changing anything")] = True,
-        update_image: Annotated[bool, Field(description="Download a newer game image if there is one and recreate the "
-                                                        "container with it (not for games that update inside the container)")] = True,
+        update_image: Annotated[bool, Field(description="Apply updates: download a newer game image and recreate the container, and for "
+                                                        "SteamCMD games install a newer game version (it restarts the "
+                                                        "server to do so)")] = True,
         restart: Annotated[bool, Field(description="Restart the server (players are disconnected briefly)")] = True,
     ) -> Result:
         """Create, change, switch on or switch off a server's scheduled maintenance: at the chosen time GameDock can back
-        up, apply an image update and restart the server. Only the schedule changes now; nothing runs and nothing is
-        deleted. There is no 'only when nobody is playing' option because GameDock cannot see player counts."""
+        up, apply updates (a newer game image and, for SteamCMD games, a newer game version, which the restart installs)
+        and restart the server. Only the schedule changes now; nothing runs and nothing is deleted. There is no 'only when nobody is playing' option because GameDock cannot see player counts."""
         return service.set_maintenance_schedule(server_id, enabled, frequency, time, list(days) if days else None,
                                                 backup_first, update_image, restart)
 
@@ -287,6 +300,16 @@ def make_tools(service: GameDockService, confirms: ConfirmationStore) -> list[To
         """Pull the newest game image and recreate the container. A running server is stopped, backed up
         automatically first, then started again. Does nothing if the image has not changed."""
         return to_plain(service.update_server_image(server_id, confirm=True))
+
+    @tool(STANDARD, _ann())
+    def update_game(server_id: ServerId) -> Result:
+        """Update the game itself to the newest public version (SteamCMD games where check_game_update says
+        `can_update`). Safe flow: the running server is stopped, backed up automatically, started again (the image then
+        downloads the new game files), and GameDock waits to confirm that the installed build id changed. Players are
+        disconnected for the duration; it can take many minutes and the call returns when it is over. If the build did not
+        change, `problem` is true and `note` says so. Does nothing if the game is already up to date. The server must be
+        running (a stopped server updates when it is started)."""
+        return service.update_game(server_id, confirm=True)
 
     @tool(STANDARD, _ann())
     def create_backup(server_id: ServerId,

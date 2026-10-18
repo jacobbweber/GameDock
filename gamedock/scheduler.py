@@ -1,8 +1,8 @@
 """The in-process scheduler: one small background thread, no cron and no extra program.
 
 Every TICK seconds it asks the service to start whatever is due (backups, maintenance), asks GitHub whether a newer
-GameDock exists (at most every 6 hours) and asks the image registry about one server whose answer is old (answers
-are kept for hours). Jobs run in their own threads, so a long image download never delays the next tick.
+GameDock exists (at most every 6 hours) and asks the image registry and the Steam data service about one server whose
+answer is old (answers are kept for hours). Jobs run in their own threads, so a long image download never delays the next tick.
 """
 from __future__ import annotations
 
@@ -54,6 +54,10 @@ class Scheduler:
             self.service.check_image_updates_due(limit=1)
         except Exception:  # noqa: BLE001
             log.exception("image update check failed")
+        try:
+            self.service.check_game_updates_due(limit=1)
+        except Exception:  # noqa: BLE001
+            log.exception("game update check failed")
 
     def _run(self) -> None:
         delay = self.first_delay

@@ -29,10 +29,12 @@ from . import configfiles as cfg
 from . import configforms as forms
 from . import readiness as rd
 from . import schedule as sch
+from . import steam as stm
 from .backends.base import ContainerBackend, DockerDiagnosis
 from .catalog import entry_to_dict, load_catalog, parse_definition
 from .hoststats import HostMeter
 from .hostcheck import foreign_owners
+from .game_updates import GameUpdateMixin
 from .errors import BackendError, BusyError, ConflictError, GameDockError, NotFoundError, ValidationError
 from .models import (
     BackupResult, CatalogEntry, ConfigContent, ConfigFile, ConfigFileInfo, ConfigForm, ConfigFormResult, ConfigSaveResult,
@@ -90,13 +92,15 @@ def slugify(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:40].strip("-")
 
 
-class GameDockService:
+class GameDockService(GameUpdateMixin):
     def __init__(self, backend: ContainerBackend, catalog_dir: Path, data_dir: Path,
                  backup_retention: int = 10, clock: Callable[[], datetime] | None = None,
                  stats_interval: float = 10.0, stats_history_seconds: int = 3600,
                  port_probe: Callable[[str, int], bool | None] | None = None,
                  tz: tzinfo | None = None, tz_name: str | None = None,
-                 updater: UpdateChecker | None = None) -> None:
+                 updater: UpdateChecker | None = None, steam_info: stm.SteamInfo | None = None,
+                 game_update_wait: float = 1200.0, game_update_poll: float = 5.0,
+                 game_update_settle: float = 120.0) -> None:
         """`port_probe(protocol, port)` returns False when the host port is taken by another program (checked
         before a server starts); None/True mean "free or unknown". Tests leave it out."""
         self.backend = backend
@@ -110,6 +114,7 @@ class GameDockService:
         self.tz, self.tz_name = tz, tz_name or getattr(tz, "key", None) or str(tz)
         self.schedules = sch.ScheduleStore(self.data_dir / "schedules.json")
         self.updater = updater or UpdateChecker(enabled=False, self_update=False)
+        self._init_game_updates(steam_info, game_update_wait, game_update_poll, game_update_settle)
         self.audit_hook: Callable[[str, dict, str, str], None] | None = None  # set by the web app (writes the audit file)
         self._frozen = ""                                  # non-empty while GameDock is about to restart for an update
         self._image_checks: dict[str, ImageCheck] = {}
@@ -236,6 +241,7 @@ class GameDockService:
         )
         hints = self._with_current_hints(inst, t)
         chk = self._image_checks.get(inst.id)
+        game = self._game_report(inst, hints, status == Status.RUNNING, started) if hints.steam_app_id else None
         return ServerInfo(inst.id, inst.name, inst.game_id, t.name, t.image, t.description,
                           status, inst.ports, env, detail, inst.created_at, t.update_method, len(t.config_files),
                           activity=self._activity.get(inst.id, "") if show_activity else "",
@@ -243,7 +249,13 @@ class GameDockService:
                           progress=r.progress if r else None, phase_detail=r.detail if r else "",
                           update_available=chk.available if chk and t.update_method != "none" else None,
                           update_checked_at=sch.iso(datetime.fromtimestamp(chk.checked_at, timezone.utc)) or "" if chk else "",
-                          update_note=hints.update_note, schedule=self._schedule_overview(inst.id))
+                          update_note=hints.update_note, schedule=self._schedule_overview(inst.id),
+                          steam_app_id=hints.steam_app_id,
+                          game_version=(game["game_version"] or "") if game else "",
+                          installed_build=(game["installed"]["build"] or "") if game else "",
+                          latest_build=(game["latest"]["build"] or "") if game else "",
+                          game_update_status=game["status"] if game else stm.UNKNOWN,
+                          game_update_method=hints.game_update_method)
 
     # --------------------------------------------------------------- readiness
     def _current_entries(self) -> dict[str, CatalogEntry]:
@@ -270,11 +282,12 @@ class GameDockService:
             return t
         return replace(t, ready_log_pattern=cur.ready_log_pattern, progress_log_pattern=cur.progress_log_pattern)
 
-    _HINT_KEYS = ("update_note", "backup_stop_first", "save_command")
+    _HINT_KEYS = ("update_note", "backup_stop_first", "save_command", "steam_app_id", "steam_branch",
+                  "steam_manifest_dir", "version_log_pattern", "game_update_method")
 
     def _with_current_hints(self, inst: Instance, t: CatalogEntry) -> CatalogEntry:
-        """Servers keep a snapshot of their template. Three optional hints (update note, stop-first flag, save command)
-        did not exist in snapshots made by older versions; for those, take the current catalog entry's values. Hints
+        """Servers keep a snapshot of their template. Optional hints (update note, stop-first flag, save command, the
+        Steam game version settings) did not exist in snapshots made by older versions; for those, take the current catalog entry's values. Hints
         that the snapshot does have are never overridden."""
         if all(k in inst.template for k in self._HINT_KEYS):
             return t
@@ -1190,6 +1203,7 @@ class GameDockService:
                 "update_image": m.update_image, "restart": m.restart,
                 "summary": sch.describe(m.rule) if m.enabled else "off",
                 "image_update_supported": t.update_method != "none",
+                "game_update_supported": bool(t.steam_app_id) and t.game_update_method == "restart",
                 "only_when_empty": {"available": False, "reason": ONLY_WHEN_EMPTY_REASON},
                 **run_info(m.state, self._next_of(m.rule, m.enabled, m.state)),
             },
@@ -1254,9 +1268,9 @@ class GameDockService:
         if enabled:
             if not (backup_first or update_image or restart):
                 raise ValidationError("Choose at least one thing for maintenance to do: back up, update the image or restart.")
-            if update_image and t.update_method == "none":
+            if update_image and t.update_method == "none" and not (t.steam_app_id and t.game_update_method == "restart"):
                 raise ValidationError(f"{t.name} updates its game files inside the container, so there is no image update "
-                                      "to apply. Turn 'update the image' off (restarting is how this game updates).")
+                                      "to apply. Turn 'apply updates' off (restarting is how this game updates).")
         now = sch.iso(self._now()) or ""
 
         def change(s: sch.ServerSchedules) -> sch.ServerSchedules:
@@ -1361,7 +1375,26 @@ class GameDockService:
                     notes.append("A newer image was downloaded." if changed else "The image was already the newest.")
                 except GameDockError as e:
                     problems.append(f"The image update could not be checked ({e}); the other steps were still done.")
-            will_stop = was_running and (m.restart or changed)
+            # The game itself (SteamCMD games): "apply updates" asks whether a newer game version exists and, if so, the
+            # restart below is what installs it (the image downloads new game files when the container starts).
+            game_check = bool(m.update_image and t.steam_app_id and t.game_update_method == "restart")
+            game_needed, game_before = False, None
+            if game_check:
+                latest = self.steam.get(t.steam_app_id, t.steam_branch or "public", force=True)
+                installed, why = self._read_game_installed(inst, t, fresh=True)
+                game_before = installed.build if installed else None
+                gstatus, gtext = stm.compute_status(True, installed, latest, why)
+                game_needed = gstatus == stm.UPDATE_AVAILABLE
+                if game_needed:
+                    notes.append(f"A newer game version is available (build {game_before} -> {latest.build}).")
+                elif gstatus == stm.UP_TO_DATE:
+                    notes.append(f"The game is up to date (build {game_before}).")
+                else:
+                    notes.append(f"Could not check for a game update ({gtext.rstrip('.')}).")
+                if game_needed and not was_running:
+                    notes.append("The server is stopped; the game will update the next time it starts.")
+            game_needed = game_needed and was_running
+            will_stop = was_running and (m.restart or changed or game_needed)
             stopped = False
             backed_up = False
             try:
@@ -1373,7 +1406,7 @@ class GameDockService:
                 if will_stop:
                     self._stop(inst)
                     stopped = True
-                if (m.backup_first or changed) and not backed_up:
+                if (m.backup_first or changed or game_needed) and not backed_up:
                     if self._is_running(inst):
                         raise ConflictError("The server is still running, so a consistent backup cannot be made.")
                     files, _, _ = bk.folder_usage(self._data_dir_of(inst))
@@ -1389,12 +1422,18 @@ class GameDockService:
             except GameDockError as e:
                 problems.append(f"{e} Maintenance stopped before changing anything further.")
                 changed = False
+                game_needed = False
             if stopped:
                 try:
                     self._start(inst)
                     notes.append("The server was restarted.")
                 except GameDockError as e:
                     problems.append(f"The server could not be started again: {e}")
+                    game_needed = False
+                if game_needed:
+                    outcome, after = self._wait_for_game_build(inst, t, game_before)
+                    sentence, is_problem = self._describe_outcome(outcome, game_before, after, None)
+                    (problems if is_problem else notes).append(sentence)
             elif m.restart and not was_running:
                 notes.append("The server was not running, so it was left stopped.")
             if m.update_image and t.update_method != "none":

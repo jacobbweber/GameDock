@@ -2,6 +2,37 @@
 
 All notable changes. Dates are 2026.
 
+## 0.4.0: each game's own version, and updating the game
+
+Asked for: per game, show the game's version and whether a newer one is out, with an Update now button (scheduled maintenance already applies updates). Before this, GameDock only compared container image digests, which for SteamCMD games says nothing about the game files (the image downloads those at every start).
+
+### Added
+
+- **Game version panel per Steam server.** Installed Steam build id and its date (from `steamapps/appmanifest_<app id>.acf`, found by a bounded search of the server's volumes or the entry's `steam_manifest_dir`), the game's own version text from the log (`version_log_pattern`, last match, remembered with the build it belongs to in `<data>/game-versions.json`), the newest public build id and its date, and one status: **Up to date**, **Update available**, **Could not check**, **Unknown (no Steam id for this game)**.
+- **Newest build lookup.** `GET https://api.steamcmd.net/v1/info/<app id>` (a public third-party mirror of Steam data; `data.<appid>.depots.branches.<branch>.{buildid,timeupdated}`). Address from `GAMEDOCK_STEAM_INFO_URL` (`{appid}` placeholder). Cached 1 hour in memory and in `<data>/steam-latest.json` (so a restart does not ask again), failures retried after 10 minutes, one **Check now** per 20 seconds, failures and rate limits are quiet ("Could not check"). Showing a tile never uses the network; the scheduler refreshes one stale game per tick. `GAMEDOCK_UPDATE_CHECK=false` switches it off.
+- **Tile and Updates dialog.** A tile line such as "Game version v1.0.5.102999, up to date" and an **Update available** badge for a game update (purple), distinct from the image update badge (blue); with both, one badge and the dialog has the details. The **Update** button is now **Updates**: the dialog shows the game section (status, facts, Check now, how it works, **Update game now**) and an *image* section that opens the existing image update.
+- **Update game now** (`game_update_method: restart`): stop, safety backup, start, then wait and re-read the installed build id. Reports plainly when the build did not change ("the game did not update on restart; check the logs"), when the server stopped, or when the wait ran out. Needs a running server (a stopped one updates when started). Shows an "Updating game" activity on the tile.
+- **Scheduled maintenance** with *apply updates*: asks for the game status; if a newer game version exists the restart installs it (backup first, even when *restart* is not ticked) and the run result records "updated from build A to build B" or that it did not update (a failed run). With no update it just restarts when *restart* is ticked. A failed check does not stop the run.
+- **Catalog fields** (all optional, validated when the catalog loads): `steam_app_id`, `steam_branch`, `steam_manifest_dir`, `version_log_pattern` (one capture group), `game_update_method` (`restart`, the default when a `steam_app_id` is set, or `none`). Added to Palworld (2394010, with the version pattern and `UPDATE_ON_BOOT=true`), Enshrouded (2278520, **verify before use**: its install folder must be a volume for the installed build to be readable), Valheim (896660) and Satisfactory (1690800, **verify before use**: files live in `/config/gamefiles`). Minecraft is not a Steam game and has none. Servers deployed by older versions pick the new settings up from the current catalog entry.
+- **API and MCP.** Server status gains `steam_app_id`, `game_version`, `installed_build`, `latest_build`, `game_update_status`, `game_update_method`. Endpoints `GET /api/servers/{id}/game-update`, `POST .../game-update/check`, `POST .../update-game?confirm=true`. MCP tools `check_game_update` (read-only and above) and `update_game` (standard and full; the safe flow, nothing destructive). Tool counts are now 14 (`read_only`), 25 (`standard`), 29 (`full`). The guide resource explains game versus image updates. Calls are in the audit log as before.
+- Settings: `GAMEDOCK_STEAM_INFO_URL`.
+- The fake backend can pretend a self-updating Steam game (`simulate_steam_game`). Screenshots: `docs/gamedock-040-*.png` from `scripts/make_screenshots_game.py`.
+
+### Changed
+
+- Version 0.4.0. The catalog `update_note` texts of the Steam games now describe both kinds of update. The maintenance option *apply updates* is available for games that have either an image update or a game update.
+- **GameDock's own update button** now refuses a `pyproject.toml` change only when the dependency lines changed, not when only the `version` line moved. (The 0.3.0 button still refuses this release, see below.)
+
+### Decisions and known gaps
+
+- **Updating to 0.4.0 has to be done by hand** (`git pull --ff-only`, restart): `pyproject.toml` changed (version line) and the 0.3.0 button refuses any such change. No new packages. See docs/DEPLOYMENT.md.
+- The newest build comes from a third-party mirror of Steam's data, not Valve; if it is down or changes shape the status says "Could not check". The public branch is compared unless `steam_branch` says otherwise. Builds are compared as numbers: an installed build newer than the public one (a beta) counts as up to date.
+- The installed build is only readable when the game's `steamapps` folder is inside one of the server's volumes. The Enshrouded entry's current volumes do not include the install folder, so its installed build will show "could not find the Steam record" until the folder is added as a volume; the entry is marked *verify before use*. GameDock does not read files inside the container.
+- The game version text depends on a log line: only Palworld has a pattern; the others show the build id (add `version_log_pattern` after checking the game's log).
+- *Update game now* relies on the image updating the game at start. It checks the result and says when that did not happen; it cannot install a game update by itself. Players are disconnected; "only when nobody is playing" still does not exist.
+- The call waits up to 20 minutes for the new files (a first big download); the web page and MCP call stay open meanwhile and the tile shows "Updating game". If the wait runs out the result says so and the game's status updates later by itself.
+- Tested with the fake engine, real Palworld manifest and Steam JSON samples, not with a real Steam update or Docker.
+
 ## 0.3.0: schedules, update indicators and self-update
 
 Asked for: backups and maintenance on a schedule, an update indicator, and a version display with an update button.

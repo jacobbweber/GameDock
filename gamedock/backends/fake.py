@@ -31,11 +31,37 @@ class FakeBackend:
         self.offline = False                # True = the pretend registry cannot be reached
         self.exec_log: list[tuple[str, list[str]]] = []  # (container, command) of every exec_in
         self.delays: dict[str, float] = {}  # action name -> seconds to wait (demos: make create/stop look slow)
+        self._start_hooks: dict[str, Callable[[], None]] = {}  # container name -> called each time it starts
 
     def _pause(self, action: str) -> None:
         d = self.delays.get(action, 0)
         if d:
             time.sleep(d)  # outside the lock so other requests keep working, like a real slow docker call
+
+    # -- SteamCMD game pretend ---------------------------------------------
+    def simulate_steam_game(self, name: str, app_id: str, build: Callable[[], tuple[str, int | None]],
+                            version: Callable[[str], str] | None = None) -> None:
+        """Pretend the container holds a SteamCMD game that updates itself every time it starts, like the real images
+        do (UPDATE_ON_BOOT). Each start writes Steam's appmanifest_<app id>.acf into the first volume's host folder
+        with the build id given by `build()` -> (build id, unix time of that build), then logs a version line from
+        `version(build id)` (default: ``Game version is v1.<build id>``). Make `build()` return an older id to pretend
+        that the game did not update on restart."""
+        from pathlib import Path
+
+        from ..steam import render_manifest
+
+        def write() -> None:
+            entry = self._containers.get(name)
+            if entry is None or not entry[0].volumes:
+                return
+            folder = Path(entry[0].volumes[0].host) / "steamapps"
+            folder.mkdir(parents=True, exist_ok=True)
+            b, when = build()
+            (folder / f"appmanifest_{app_id}.acf").write_text(render_manifest(app_id, b, when), encoding="utf-8")
+            self._logs.setdefault(name, []).append(
+                "[fake engine] " + (version(b) if version else f"Game version is v1.{b}"))
+
+        self._start_hooks[name] = write
 
     # -- logs (pretend) ----------------------------------------------------
     def set_logs(self, name: str, text: str) -> None:
@@ -91,6 +117,9 @@ class FakeBackend:
             if self._containers[name][1] != Status.RUNNING:
                 self._started[name] = self.clock()
                 self._logs.setdefault(name, []).append("[fake engine] container started")
+                hook = self._start_hooks.get(name)
+                if hook:
+                    hook()
             self._containers[name] = (self._containers[name][0], Status.RUNNING)
 
     def stop(self, name: str) -> None:

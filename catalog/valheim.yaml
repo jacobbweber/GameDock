@@ -4,10 +4,13 @@ name: Valheim Dedicated Server
 image: lloesche/valheim-server:latest
 description: Valheim dedicated server using a popular community image.
 notes: Example values. Check the image documentation before real use. The server password must be at least 5 characters.
+steam_app_id: 896660                 # Valheim Dedicated Server (the install lives in ./server, so the Steam record is readable)
+game_update_method: restart          # the image updates the game when the container starts
 update_note: >-
   This image checks for a new Valheim server version while it runs and when it starts (its UPDATE_CRON, on by default),
-  so a restart also brings the game up to date. "Update available" only means the image itself has a newer version;
-  Update now replaces it and keeps your world.
+  so a restart also brings the game up to date. GameDock compares the installed Steam build with the newest public one;
+  "Update game" backs up, restarts and checks that the build changed. A separate "image update" only replaces the helper
+  program around the game and keeps your world.
 ports:
   - { protocol: udp, host: 2456, container: 2456 }
   - { protocol: udp, host: 2457, container: 2457 }
