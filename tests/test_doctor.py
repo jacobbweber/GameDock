@@ -223,3 +223,32 @@ def test_doctor_never_prints_secrets(service, settings, tmp_path):
     service.deploy("sample", "One", env={"ADMIN_PASSWORD": "pw-super-secret"})
     blob = json.dumps(run_doctor(service, settings).to_dict())
     assert "pw-super-secret" not in blob
+
+
+def test_deploy_files_are_present_and_sane():
+    import pathlib
+    import yaml
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    compose = yaml.safe_load((root / "docker-compose.yml").read_text())
+    svc = compose["services"]["gamedock"]
+    assert all(p.startswith("127.0.0.1:") for p in svc["ports"])  # never published to the whole network
+    # data folder is mounted at the same path inside and out
+    data_mount = [v for v in svc["volumes"] if "GAMEDOCK_DATA_HOST" in v][0]
+    left, right = data_mount.split("}:", 1)
+    assert left.split(":-")[1] == right.split(":-")[1].rstrip("}")
+    for unit in ("gamedock.service", "gamedock-user.service"):
+        text = (root / "deploy" / unit).read_text()
+        assert "[Service]" in text and "ExecStart=" in text and "NoNewPrivileges=true" in text
+        assert "TOKEN=" not in text.replace("GAMEDOCK_MCP_TOKEN", "")  # no secrets in unit files
+
+
+def test_smoke_test_catalog_entry_is_marked_as_test():
+    from gamedock.catalog import load_catalog
+    import pathlib
+
+    cat = load_catalog(pathlib.Path(__file__).resolve().parent.parent / "catalog")
+    game = cat["smoke-test"]
+    assert game.name.startswith("TEST")
+    busy = {8211, 15637, 11434, 9090, 3001, 9256, 8080}
+    assert not busy & {p.host for p in game.ports}

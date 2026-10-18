@@ -1,0 +1,41 @@
+# GameDock as a systemd USER service (recommended for a single-person home server).
+# It runs as you, from your home folder, and needs no root access except for the one-time setup below.
+# This is an EXAMPLE. Nothing in this repository installs it. To use it:
+#
+#   1. Make sure you can run docker without sudo:   docker ps
+#      (if not: sudo usermod -aG docker $USER, then log out and back in. This group is equal to root on this
+#       machine; that is how Docker works.)
+#   2. Clone and install (any folder works; this unit assumes ~/GameDock):
+#        git clone <repo url> ~/GameDock && cd ~/GameDock
+#        python3 -m venv .venv && . .venv/bin/activate && pip install -e .
+#        cp .env.example .env && nano .env        # GAMEDOCK_BACKEND=docker, GAMEDOCK_HOST=127.0.0.1 ...
+#        python -m gamedock doctor               # fix anything it reports first
+#   3. Install and start it (as yourself, no sudo):
+#        mkdir -p ~/.config/systemd/user
+#        cp deploy/gamedock-user.service ~/.config/systemd/user/gamedock.service
+#        systemctl --user daemon-reload
+#        systemctl --user enable --now gamedock
+#        journalctl --user -u gamedock -f          # logs
+#   4. Keep it running when you are logged out and start it at boot (one command, needs sudo):
+#        sudo loginctl enable-linger $USER
+#
+# GameDock reads settings from the .env file in WorkingDirectory. Stopping this service does not stop your
+# game servers: they are separate Docker containers.
+
+[Unit]
+Description=GameDock (game server manager, user service)
+After=network-online.target
+
+[Service]
+Type=simple
+# %h is your home folder. Change the path if you cloned GameDock somewhere else.
+WorkingDirectory=%h/GameDock
+ExecStart=%h/GameDock/.venv/bin/python -m gamedock
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=60
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,66 @@
+# GameDock as a SYSTEM service (starts at boot, runs as its own user).
+# This is an EXAMPLE. Nothing in this repository installs it. To use it you copy it yourself:
+#
+#   1. Create the user and give it Docker access. NOTE: being in the "docker" group is equal to being root on
+#      this machine (anyone who can start containers can mount the whole disk). Use a dedicated user.
+#        sudo useradd --system --create-home --home-dir /opt/gamedock --shell /usr/sbin/nologin gamedock
+#        sudo usermod -aG docker gamedock
+#   2. Put the code and a virtualenv in /opt/gamedock/app (clone the repo there), as that user:
+#        sudo -u gamedock git clone <repo url> /opt/gamedock/app
+#        sudo -u gamedock python3 -m venv /opt/gamedock/app/.venv
+#        sudo -u gamedock /opt/gamedock/app/.venv/bin/pip install /opt/gamedock/app
+#   3. Create the data folder and the settings file (the token and other settings go in the env file, which is
+#      kept out of the unit file and out of git):
+#        sudo install -d -o gamedock -g gamedock -m 700 /var/lib/gamedock
+#        sudo install -d -m 755 /etc/gamedock
+#        sudo cp /opt/gamedock/app/deploy/gamedock.env.example /etc/gamedock/gamedock.env
+#        sudo chown root:gamedock /etc/gamedock/gamedock.env && sudo chmod 640 /etc/gamedock/gamedock.env
+#        sudoedit /etc/gamedock/gamedock.env
+#   4. Check the machine, then install and start:
+#        sudo -u gamedock bash -c 'set -a; . /etc/gamedock/gamedock.env; exec /opt/gamedock/app/.venv/bin/python -m gamedock doctor'
+#        sudo cp /opt/gamedock/app/deploy/gamedock.service /etc/systemd/system/gamedock.service
+#        sudo systemctl daemon-reload
+#        sudo systemctl enable --now gamedock
+#        journalctl -u gamedock -f          # logs
+#
+# Stopping or restarting THIS service does not stop your game servers: they are separate Docker containers
+# (with restart policy "unless-stopped"), so they keep running while GameDock restarts or is updated.
+
+[Unit]
+Description=GameDock (game server manager)
+Documentation=https://github.com/jacobbweber/GameDock
+# Docker must be up first, or the first status checks report "not reachable".
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=gamedock
+Group=gamedock
+WorkingDirectory=/opt/gamedock/app
+# Settings (GAMEDOCK_HOST, GAMEDOCK_PORT, GAMEDOCK_DATA_DIR, GAMEDOCK_MCP_TOKEN ...). One KEY=value per line.
+EnvironmentFile=/etc/gamedock/gamedock.env
+ExecStart=/opt/gamedock/app/.venv/bin/python -m gamedock
+Restart=on-failure
+RestartSec=5
+# GameDock shuts down quickly; this only matters if it is busy with a long backup or image download.
+TimeoutStopSec=60
+
+# ---- Hardening (safe for GameDock; loosen only if something here gets in your way) ----
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+# GameDock may write only here. Backups and server data live under the data folder.
+# (If you set GAMEDOCK_DATA_DIR somewhere else, add that path here.)
+ReadWritePaths=/var/lib/gamedock
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# The docker socket (/run/docker.sock) stays reachable; GameDock needs it.
+
+[Install]
+WantedBy=multi-user.target

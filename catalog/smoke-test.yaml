@@ -1,0 +1,29 @@
+# TEST ENTRY, NOT A GAME. A tiny, harmless web server used to try GameDock itself
+# (deploy, start, stop, backup, edit a config file, delete) before touching real game servers.
+# It uses about 5 MB of disk and almost no memory, and listens only on host port 18080 (TCP).
+# After start, open  http://127.0.0.1:18080  on the machine to see its answer.
+# Delete the server (and this file, if you like) when you are done testing.
+id: smoke-test
+name: "TEST: tiny web server (not a game)"
+image: traefik/whoami:latest
+description: A tiny harmless web server for testing GameDock. Not a game.
+notes: >-
+  Test entry only. Port 18080/tcp is chosen to stay clear of common game and tool ports. The image name and
+  the WHOAMI_* settings come from general knowledge of the public traefik/whoami image; if anything differs, the
+  container simply uses its defaults. Verify before relying on it.
+ports:
+  - { protocol: tcp, host: 18080, container: 80 }
+volumes:
+  - { host: ./data, container: /data }
+config_files:
+  - path: data/notes.txt
+    label: Test notes (edit me)
+    format: text
+    hot_edit: true
+    sensitive_keys: [api_key]
+fields:
+  - { name: WHOAMI_NAME, label: Name shown in the answer, default: "gamedock-smoke-test" }
+  - name: TEST_PASSWORD
+    label: Test password (not used by the container)
+    secret: true
+    description: Only here to check that passwords are hidden after saving and never shown or logged.

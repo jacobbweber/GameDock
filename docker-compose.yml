@@ -1,0 +1,46 @@
+# OPTIONAL way to run GameDock in a container. The recommended default is the systemd/venv route (deploy/).
+#
+# !! SECURITY !! This file gives the GameDock container the Docker socket. Anyone who can control GameDock
+# (or break into it) can then start a container that mounts the whole host disk, which is root on the host.
+# GameDock listens only on 127.0.0.1 here and has no login, so keep it that way. See docs/DEPLOYMENT.md.
+#
+# Before the first start, create .env next to this file (never commit it) with these two lines:
+#   GAMEDOCK_UID=<output of: id -u>
+#   DOCKER_GID=<output of: getent group docker | cut -d: -f3>
+# and choose a data folder (the same path is used on the host and inside the container, see below):
+#   GAMEDOCK_DATA_HOST=/srv/gamedock/data      (create it first: mkdir -p /srv/gamedock/data)
+#
+# Start:  docker compose up -d --build        Check:  docker compose exec gamedock python -m gamedock doctor
+services:
+  gamedock:
+    build: .
+    image: gamedock:local
+    container_name: gamedock
+    restart: unless-stopped
+    # Run as you (not root) and as a member of the host's docker group, so the socket is usable.
+    user: "${GAMEDOCK_UID:-1000}:${GAMEDOCK_UID:-1000}"
+    group_add:
+      - "${DOCKER_GID:?set DOCKER_GID in .env}"
+    ports:
+      # Host side is 127.0.0.1 ONLY. Do not remove the 127.0.0.1 part.
+      - "127.0.0.1:8080:8080"
+    environment:
+      GAMEDOCK_BACKEND: docker
+      GAMEDOCK_DATA_DIR: "${GAMEDOCK_DATA_HOST:-/srv/gamedock/data}"
+      # Rebinding protection: only these names may be used in the browser address bar.
+      GAMEDOCK_ALLOWED_HOSTS: "localhost:8080,127.0.0.1:8080"
+      GAMEDOCK_MCP_MODE: "${GAMEDOCK_MCP_MODE:-standard}"
+      GAMEDOCK_MCP_TOKEN: "${GAMEDOCK_MCP_TOKEN:-}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # IMPORTANT: the data folder is mounted at the SAME path as on the host. GameDock tells the Docker engine
+      # (which runs on the host) where each game's files are, so the path must mean the same thing on both sides.
+      # Using "/data:/data" here would make game servers look in the host's /data instead.
+      - "${GAMEDOCK_DATA_HOST:-/srv/gamedock/data}:${GAMEDOCK_DATA_HOST:-/srv/gamedock/data}"
+      # Game definitions, read-only. Add your own YAML files in ./catalog on the host.
+      - ./catalog:/app/catalog:ro
+    # Not a perfect sandbox (the socket defeats most of it) but it removes needless extras.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL

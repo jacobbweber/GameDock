@@ -96,6 +96,12 @@ def check_platform(r: DoctorReport) -> None:
         who = getpass.getuser() if _has_user() else "?"
         r.add("python", "Python and system", OK, f"Python {py} on Linux, running as user '{who}'"
               + (f" (id {os.getuid()})" if hasattr(os, "getuid") else "") + ".")
+    if os.path.exists("/.dockerenv"):
+        r.add("in_container", "Running inside a container", INFO,
+              "GameDock itself is running in a container. Game servers are started by the host's Docker engine, so the "
+              "data folder must have the same path on the host and in this container "
+              f"(now: {os.environ.get('GAMEDOCK_DATA_DIR', './data')}).",
+              "Mount the data folder at the identical path (see docker-compose.yml), not at a different one.")
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         r.add("root", "Running as root", WARN, "GameDock is running as root. That works, but any bug or leaked "
               "token then has full control of this machine.", "Run it as a normal user that is in the docker group.")
