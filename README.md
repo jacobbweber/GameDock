@@ -80,8 +80,6 @@ A catalog entry can declare config files; each server then gets a **Config** but
 - Saving is refused while the server runs unless the catalog marks the file `hot_edit: true`. Most games need a restart to pick up changes; the editor says so.
 - `sensitive_keys` values (passwords) are shown as `********`. Leave the placeholder to keep the real value; type over it to change it. Works for `key=value`, `key: value`, JSON and inline `Key="value"` styles.
 
-## Server data and settings
-
 ## Adding a game
 
 Drop a `.yaml` (or `.json`) file in `catalog/`; it appears in the Catalog page without a restart.
