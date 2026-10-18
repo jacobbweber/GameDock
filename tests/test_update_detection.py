@@ -133,16 +133,16 @@ def test_web_image_update_endpoints(client, service, backend, deployed):
 def test_web_schedule_endpoints(client, service, deployed):
     r = client.put(f"/api/servers/{deployed}/schedules/backup",
                    json={"enabled": True, "frequency": "weekly", "time": "03:30", "days": ["sun", "wed"], "retention": 4})
-    assert r.status_code == 200 and r.json()["backup"]["summary"] == "Wed, Sun 03:30"
+    assert r.status_code == 200 and r.json()["backup"]["summary"] == "Wednesday, Sunday at 03:30"
     b = client.get(f"/api/servers/{deployed}/schedules").json()["backup"]
     assert b["days"] == ["wed", "sun"] and b["time"] == "03:30" and b["retention"] == 4
     m = client.put(f"/api/servers/{deployed}/schedules/maintenance",
                    json={"enabled": True, "frequency": "daily", "time": "04:00", "backup_first": True, "update_image": False,
                          "restart": True})
-    assert m.json()["maintenance"]["summary"] == "daily 04:00"
+    assert m.json()["maintenance"]["summary"] == "daily at 04:00"
     allv = client.get("/api/schedules").json()
     assert allv["timezone"]["name"] and allv["servers"][0]["server_id"] == deployed
-    assert client.get(f"/api/servers/{deployed}").json()["schedule"]["maintenance"] == "daily 04:00"
+    assert client.get(f"/api/servers/{deployed}").json()["schedule"]["maintenance"] == "daily at 04:00"
 
 
 @pytest.mark.parametrize("body", [{"enabled": "yes"}, {"enabled": True, "frequency": "hourly"},
@@ -180,14 +180,14 @@ def test_mcp_version_and_schedule_tools(service, deployed):
         assert not v[0] and v[1]["version"] == "0.3.0" and v[1]["update_available"] is None
         assert "install_dir" not in v[1] and "manual_commands" not in str(v[1])
         r = await call(c, "set_backup_schedule", server_id=deployed, enabled=True, frequency="daily", time="02:00", retention=3)
-        assert not r[0] and r[1]["backup"]["summary"] == "daily 02:00"
+        assert not r[0] and r[1]["backup"]["summary"] == "daily at 02:00"
         m = await call(c, "set_maintenance_schedule", server_id=deployed, enabled=True, frequency="weekly", time="05:00",
                        days=["sun"], update_image=False)
-        assert not m[0] and m[1]["maintenance"]["summary"] == "Sun 05:00" and m[1]["maintenance"]["update_image"] is False
+        assert not m[0] and m[1]["maintenance"]["summary"] == "Sunday at 05:00" and m[1]["maintenance"]["update_image"] is False
         lst = await call(c, "list_schedules")
         assert lst[1]["servers"][0]["backup"]["retention"] == 3 and lst[1]["timezone"]["name"]
         st = await call(c, "get_server_status", server_id=deployed)
-        assert "update_available" in st[1] and st[1]["schedule"]["backup"] == "daily 02:00"
+        assert "update_available" in st[1] and st[1]["schedule"]["backup"] == "daily at 02:00"
         return True
 
     assert run(make_app(service, "standard"), go)

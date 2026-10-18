@@ -94,10 +94,10 @@ def test_system_timezone_when_none_given():
 def test_describe_texts():
     assert sc.describe(sc.Recurrence("interval", every_hours=6)) == "every 6 hours"
     assert sc.describe(sc.Recurrence("interval", every_hours=1)) == "every hour"
-    assert sc.describe(sc.Recurrence("daily", time="03:00")) == "daily 03:00"
-    assert sc.describe(sc.Recurrence("weekly", time="04:00", days=("sun",))) == "Sun 04:00"
-    assert sc.describe(sc.Recurrence("weekly", time="04:00", days=("mon", "thu"))) == "Mon, Thu 04:00"
-    assert sc.describe(sc.Recurrence("weekly", time="04:00", days=sc.DAY_NAMES)) == "daily 04:00"
+    assert sc.describe(sc.Recurrence("daily", time="03:00")) == "daily at 03:00"
+    assert sc.describe(sc.Recurrence("weekly", time="04:00", days=("sun",))) == "Sunday at 04:00"
+    assert sc.describe(sc.Recurrence("weekly", time="04:00", days=("mon", "thu"))) == "Monday, Thursday at 04:00"
+    assert sc.describe(sc.Recurrence("weekly", time="04:00", days=sc.DAY_NAMES)) == "daily at 04:00"
 
 
 @pytest.mark.parametrize("bad", ["3:00", "24:00", "12:60", "", "03:00:00", "ab:cd", None, 300, "03:5"])

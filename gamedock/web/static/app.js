@@ -95,6 +95,7 @@ const ACTIVITY_LABEL = {
   deploying: "Deploying", starting: "Starting", stopping: "Stopping", restarting: "Restarting",
   "backing up": "Backing up", restoring: "Restoring", updating: "Updating", "wiping data": "Wiping data",
   deleting: "Deleting", "saving settings": "Saving settings", "saving config": "Saving config",
+  maintenance: "Maintenance",
 };
 const ACTIVITY_HELP = {
   deploying: "Downloading the game image and creating the server. The first time this can take a few minutes.",
@@ -108,6 +109,7 @@ const ACTIVITY_HELP = {
   deleting: "Removing the server\u2026",
   "saving settings": "Re-creating the container with the new settings\u2026",
   "saving config": "Saving the config file\u2026",
+  maintenance: "Running maintenance: backing up, updating the game image and restarting, as chosen. This can take several minutes. Nothing else can be done to this server meanwhile.",
 };
 
 const spinner = () => el("span", { class: "spinner", "aria-hidden": "true" });
@@ -176,6 +178,8 @@ function serverCard(s) {
     statusBox(st),
     el("div", { class: "meta" }, "Image: ", el("code", { textContent: s.image })),
     el("div", { class: "meta", textContent: `Host ports: ${portText(s.ports)}` }),
+    updateFlag(s),
+    schedLine(s),
     s.detail && s.status !== "not_created" ? el("div", { class: s.status === "error" ? "meta problem" : "meta", textContent: s.detail }) : null,
     liveBlock(s),
     el("div", { class: "actions" },
@@ -185,6 +189,7 @@ function serverCard(s) {
     el("div", { class: "actions tools" },
       btn("Logs", "secondary", () => openLogs(s.id), s.status === "not_created"),
       btn("Backups", "secondary", () => openBackups(s.id), false),
+      btn("Schedules", "secondary", () => openSchedules(s.id), false),
       s.config_file_count > 0 ? btn("Config", "secondary", () => openConfig(s.id), false) : null,
       s.update_method !== "none" ? btn("Update", "secondary", () => openUpdate(s.id), false) : null,
       el("span", { class: "spacer" }),
@@ -245,7 +250,7 @@ function liveSig(s) {
 function syncCard(key, s, build) {
   const st = serverState(s);
   const structSig = JSON.stringify([s.name, s.status, s.detail, s.ports, s.image, s.config_file_count, s.update_method,
-    s.game_name, st.kind === "busy", s.id, s.env && s.env.length]);
+    s.game_name, st.kind === "busy", s.id, s.env && s.env.length, s.update_available, !!s.activity]);
   const badgeSig = `${st.working ? 1 : 0}|${st.kind}|${st.label}`;
   const statusSig = JSON.stringify([st.kind, st.working, st.progress, st.sub, st.ready]);
   const lsig = liveSig(s);
@@ -277,6 +282,8 @@ function syncCard(key, s, build) {
     c.node.querySelector(".live").replaceWith(liveBlock(s));
     c.liveSig = lsig;
   }
+  const line = c.node.querySelector(".sched-line");   // "next in 5 hours" changes with the clock: update in place
+  if (line && line.dataset.sig !== schedText(s) + ((s.schedule || {}).last_problem ? "|problem" : "")) line.replaceWith(schedLine(s));
   return c.node;
 }
 
@@ -521,7 +528,7 @@ function openDelete(s) {
 }
 
 // ------------------------------------------------------- shared confirm / result views
-function confirmView({ title, paragraphs, checkboxLabel, confirmText, workingText, danger, onConfirm, onBack }) {
+function confirmView({ title, paragraphs, checkboxLabel, confirmText, workingText, danger, onConfirm, onBack, extra }) {
   const err = el("div", { class: "form-error", hidden: true });
   const working = el("div", { class: "statusbox busy", hidden: true, role: "status" },
     el("div", { class: "progress indeterminate" }, el("div", { class: "fill" })),
@@ -532,6 +539,7 @@ function confirmView({ title, paragraphs, checkboxLabel, confirmText, workingTex
   const form = el("form", { method: "dialog" },
     el("h3", { textContent: title }),
     ...paragraphs.map((t) => el("p", { textContent: t })),
+    ...(extra || []),
     cb ? el("label", { class: "check" }, cb, checkboxLabel) : null,
     working, err,
     el("div", { class: "dialog-actions" },
@@ -599,7 +607,7 @@ async function openBackups(id, message) {
 
   const rows = data.backups.map((b) => el("tr", {},
     el("td", {}, el("code", { textContent: b.name })),
-    el("td", {}, el("span", { class: `kind ${b.kind === "manual" ? "" : "auto"}`, textContent: b.kind === "manual" ? "manual" : b.kind.replace("pre-", "auto: before ") })),
+    el("td", {}, el("span", { class: `kind ${b.kind === "manual" ? "" : "auto"}`, textContent: b.kind === "manual" ? "manual" : b.kind === "scheduled" ? "scheduled" : b.kind.replace("pre-", "auto: before ") })),
     el("td", { textContent: fmtTime(b.created_at) }),
     el("td", { textContent: fmtSize(b.size) }),
     el("td", { class: "rowactions" },
@@ -676,17 +684,37 @@ function confirmWipe(id) {
 }
 
 // -------------------------------------------------------------------- image update
-async function openUpdate(id) {
+async function openUpdate(id, message) {
   await refresh();
   const s = findServer(id);
   if (!s) return;
-  let info;
-  try { info = await api(`/api/servers/${sid(id)}/image`); }
-  catch (e) { return openDialog(resultView("Update", [[e.message, "warn"]])); }
+  let info, chk;
+  try {
+    info = await api(`/api/servers/${sid(id)}/image`);
+    chk = await api(`/api/servers/${sid(id)}/image-update`);
+  } catch (e) { return openDialog(resultView("Update", [[e.message, "warn"]])); }
   const running = s.status === "running";
+  const err = el("div", { class: "form-error", hidden: true });
+  const checkBtn = el("button", { type: "button", class: "secondary small", id: "image-check", textContent: "Check now", disabled: chk.supported === false });
+  checkBtn.addEventListener("click", async () => {
+    checkBtn.disabled = true; checkBtn.replaceChildren(spinner(), "Checking\u2026");
+    try { await api(`/api/servers/${sid(id)}/image-update/check`, "POST"); await refresh(); openUpdate(id); }
+    catch (e) { err.textContent = e.message; err.hidden = false; checkBtn.disabled = false; checkBtn.textContent = "Check now"; }
+  });
+  const verdict = chk.update_available === true ? ["Update available", "update"] :
+    chk.update_available === false ? ["Up to date", "running"] : ["Not known", "stopped"];
+  const status = el("div", { class: "update-status" },
+    el("span", { class: `badge ${verdict[1]}`, textContent: verdict[0] }),
+    el("span", { class: "hint", textContent: ` ${chk.message || ""}${chk.checked_at ? ` Checked ${fmtWhen(chk.checked_at)}.` : ""}` }),
+    checkBtn);
+  const explain = el("details", { class: "how-updates", open: chk.update_available !== true },
+    el("summary", { textContent: "How updating works for this game" }),
+    el("p", { class: "hint", textContent: s.update_note || "GameDock compares the image this server was created from with the newest one in the online registry (nothing is downloaded to check). Update now downloads the newest image and recreates the container from it." }),
+    el("p", { class: "hint", textContent: "Many game images that use SteamCMD download the newest game files by themselves each time the container starts. For those, restarting the server is what updates the game, and \u201cUpdate available\u201d only refers to the image around it." }));
   openDialog(confirmView({
     title: `Update ${s.name}?`,
     paragraphs: [
+      ...(message ? [message] : []),
       `This downloads the newest version of ${info.image} and recreates the container from it. Your data and settings are kept.`,
       `Current image id: ${shortId(info.image_id)}.`,
       running
@@ -694,7 +722,8 @@ async function openUpdate(id) {
         : "The server is stopped and will stay stopped.",
       "A backup of the data is taken automatically before the update. If the backup fails, the update is cancelled. If the image is already the newest, nothing is changed.",
     ],
-    confirmText: "Update", danger: false,
+    extra: [status, explain, err],
+    confirmText: chk.update_available === true ? "Update now" : "Update anyway", danger: false,
     workingText: "Downloading the newest image, backing up and recreating the container. This can take several minutes\u2026",
     onConfirm: async () => {
       const r = await api(`/api/servers/${sid(id)}/update-image?confirm=true`, "POST");
@@ -1298,13 +1327,385 @@ async function runDoctor() {
 }
 $("run-doctor").addEventListener("click", runDoctor);
 
+// ---------------------------------------------------------- times in words
+let hostTz = null;                 // the machine's timezone name, from the schedules API
+function fmtWhen(iso) {
+  if (!iso) return "\u2013";
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  const opts = { weekday: "long", month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" };
+  try { return d.toLocaleString([], hostTz ? { ...opts, timeZone: hostTz } : opts); }
+  catch (_) { return d.toLocaleString([], opts); }
+}
+function inWords(iso) {
+  const ms = new Date(iso) - Date.now();
+  if (isNaN(ms)) return "";
+  if (ms <= 0) return "due now";
+  const m = Math.round(ms / 60000);
+  if (m < 60) return `in ${Math.max(1, m)} minute${m === 1 ? "" : "s"}`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `in ${h} hour${h === 1 ? "" : "s"}`;
+  return `in ${Math.round(h / 24)} days`;
+}
+const RESULT_LABEL = { ok: "Worked", failed: "Failed", skipped: "Skipped", waiting: "Waiting" };
+const TRIGGER_LABEL = { schedule: "on schedule", "catch-up": "catch-up after GameDock was off", manual: "started by hand" };
+const resultBadge = (r) => r ? el("span", { class: `badge result-${r}`, textContent: RESULT_LABEL[r] || r }) : null;
+
+// ------------------------------------------------- schedule line on a server tile
+function schedText(s) {
+  const sc = s.schedule || {};
+  if (!sc.backup && !sc.maintenance) return "Schedules: none set up";
+  const parts = [`Backups: ${sc.backup || "off"}`, `Maintenance: ${sc.maintenance || "off"}`];
+  if (sc.next_run) parts.push(`next ${inWords(sc.next_run)}`);
+  return parts.join(" | ");
+}
+function schedLine(s) {
+  const sc = s.schedule || {};
+  const txt = schedText(s) + (sc.last_problem ? "|problem" : "");
+  const node = el("button", { type: "button", class: "sched-line", title: "Open the schedules of this server",
+    onclick: () => openSchedules(s.id), "aria-label": `Schedules of ${s.name}` },
+    el("span", { textContent: schedText(s) }),
+    sc.last_problem ? el("span", { class: "sched-problem", textContent: " \u2013 the last scheduled run failed" }) : null);
+  node.dataset.sig = txt;
+  return node;
+}
+function updateFlag(s) {
+  if (s.update_available !== true) return null;
+  return el("div", { class: "update-flag" },
+    el("span", { class: "badge update", textContent: "Update available" }),
+    el("span", { class: "hint", textContent: "A newer version of the game image is ready." }),
+    el("button", { type: "button", class: "primary small", textContent: "Update now", disabled: !!(busy.get(s.id) || s.activity),
+      onclick: () => openUpdate(s.id), "aria-label": `Update ${s.name} now` }));
+}
+
+// ------------------------------------------------------------------ GameDock version and update
+let versionInfo = null;
+function renderVersion() {
+  const v = versionInfo;
+  const box = $("version-box");
+  if (!v) { box.replaceChildren(); return; }
+  const chip = el("button", { type: "button", class: "version-chip", id: "version-chip",
+    title: "About this GameDock, and check for updates", onclick: openAbout },
+    `Version ${v.version}`, v.commit_short ? el("span", { class: "commit", textContent: ` (${v.commit_short})` }) : null);
+  const nodes = [chip];
+  if (v.update_available === true) {
+    nodes.push(el("button", { type: "button", class: "update-pill", id: "update-pill", onclick: openAbout,
+      title: v.latest && v.latest.message ? `Newest change: ${v.latest.message}` : "A newer GameDock is available" },
+      "Update available", v.latest && v.latest.version ? ` \u2013 ${v.latest.version}` : ""));
+  }
+  box.replaceChildren(...nodes);
+}
+async function refreshVersion() {
+  try { versionInfo = await api("/api/version"); } catch (_) { /* the connection indicator covers this */ }
+  renderVersion();
+}
+
+function aboutBody(v) {
+  const rows = [
+    ["Version", v.version],
+    ["Commit", v.commit ? `${v.commit_short}${v.branch ? ` on ${v.branch}` : ""}${v.dirty ? " (has local changes)" : ""}` : "not a git checkout"],
+    ["Repository", v.repo],
+    ["Install folder", v.install_dir],
+    ["Running since", fmtWhen(v.started_at)],
+  ];
+  return el("table", { class: "list about" }, el("tbody", {}, ...rows.map(([k, val]) => el("tr", {},
+    el("th", { textContent: k }), el("td", { class: k === "Install folder" ? "mono small" : "", textContent: val })))));
+}
+
+function updateStatusBlock(v) {
+  if (!v.check_enabled) return el("p", { class: "hint", textContent: "Update checks are switched off on this machine (GAMEDOCK_UPDATE_CHECK=false), so GameDock never contacts GitHub." });
+  const when = v.checked_at ? `Last checked ${fmtWhen(v.checked_at)}.` : "Not checked yet.";
+  if (v.update_available === true) {
+    const l = v.latest || {};
+    const n = l.ahead_by ? `${l.ahead_by} newer change${l.ahead_by === 1 ? "" : "s"}` : "A newer version";
+    return el("div", { class: "update-box" },
+      el("strong", { textContent: `Update available${l.version ? `: GameDock ${l.version}` : ""}` }),
+      el("div", { textContent: `${n} on GitHub.${l.message ? ` Newest: \u201c${l.message}\u201d.` : ""}` }),
+      el("div", { class: "hint", textContent: when }));
+  }
+  if (v.update_available === false) {
+    return el("p", { class: "okmsg", textContent: `GameDock is up to date. ${when}` });
+  }
+  return el("p", { class: "hint", textContent: `${v.check_error || "Could not tell whether a newer GameDock exists."} ${when}` });
+}
+
+function openAbout(note) {
+  const v = versionInfo;
+  if (!v) return;
+  const err = el("div", { class: "form-error", hidden: true });
+  const check = el("button", { type: "button", class: "secondary", id: "about-check", textContent: "Check now", disabled: !v.check_enabled });
+  check.addEventListener("click", async () => {
+    check.disabled = true; check.replaceChildren(spinner(), "Checking\u2026");
+    try { versionInfo = await api("/api/gamedock/update-check", "POST"); renderVersion(); openAbout(); }
+    catch (e) { err.textContent = e.message; err.hidden = false; check.disabled = false; check.textContent = "Check now"; }
+  });
+  const su = v.self_update || {};
+  const canUpdate = v.update_available === true && su.possible;
+  const manual = v.update_available === true && !su.possible;
+  const doUpdate = el("button", { type: "button", class: "primary", id: "about-update", textContent: "Update GameDock", disabled: !canUpdate,
+    title: canUpdate ? "" : (su.reason || "No update to install") });
+  doUpdate.addEventListener("click", confirmGameDockUpdate);
+  const cmds = (su.manual_commands || []).join("\n");
+  const copyBtn = el("button", { type: "button", class: "small", textContent: "Copy" });
+  copyBtn.addEventListener("click", () => copyText(cmds, copyBtn));
+  openDialog(el("div", { class: "panel" },
+    el("h3", { textContent: `GameDock ${v.version}` }),
+    typeof note === "string" ? el("div", { class: "okmsg", textContent: note }) : null,
+    aboutBody(v),
+    updateStatusBlock(v),
+    manual ? el("p", { class: "warn", textContent: `The Update button is not available here: ${su.reason}` }) : null,
+    err,
+    el("details", { open: manual }, el("summary", { textContent: "Update by hand (on the machine that runs GameDock)" }),
+      el("pre", { class: "logbox short", textContent: cmds }), copyBtn,
+      el("p", { class: "hint", textContent: "The last command restarts GameDock only. Your game servers keep running. If the update changes required packages, also run: .venv/bin/pip install -e ." })),
+    el("div", { class: "dialog-actions" },
+      check, el("span", { class: "spacer" }), doUpdate,
+      el("button", { type: "button", class: "secondary", textContent: "Close", onclick: closeDialog }))));
+}
+
+function confirmGameDockUpdate() {
+  openDialog(confirmView({
+    title: "Update GameDock?",
+    paragraphs: [
+      "GameDock will download the newest version from GitHub (git pull) and then restart itself. Only GameDock restarts: your game servers keep running and players stay connected.",
+      "This page reconnects by itself after a few seconds and shows the new version.",
+      "GameDock refuses to update while it is busy (a backup, update or scheduled job is running) or when its own files have local changes. Nothing is changed in that case.",
+    ],
+    confirmText: "Update GameDock", danger: false,
+    workingText: "Downloading the update\u2026",
+    onBack: openAbout,
+    onConfirm: async () => {
+      const before = versionInfo && versionInfo.started_at;
+      const r = await api("/api/gamedock/update?confirm=true", "POST");
+      if (!r.updated) { await refreshVersion(); return openAbout(r.message); }
+      openDialog(el("div", { class: "panel", id: "restart-panel", role: "status" },
+        el("h3", { textContent: "Restarting GameDock\u2026" }),
+        el("p", { textContent: r.message }),
+        el("div", { class: "statusbox busy" }, el("div", { class: "progress indeterminate" }, el("div", { class: "fill" })),
+          el("div", { class: "status-text", id: "restart-text", textContent: "Waiting for GameDock to come back\u2026" }))));
+      waitForRestart(before);
+    },
+  }));
+}
+
+async function waitForRestart(startedBefore) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < 120000) {
+    await sleep(1500);
+    try {
+      const res = await fetch("/api/version", { cache: "no-store" });
+      if (res.ok) {
+        const v = await res.json();
+        if (v.started_at !== startedBefore) {
+          const t = $("restart-text"); if (t) t.textContent = `Back up as version ${v.version}. Reloading\u2026`;
+          await sleep(600);
+          location.reload();
+          return;
+        }
+      }
+    } catch (_) { /* still restarting */ }
+  }
+  const t = $("restart-text");
+  if (t) t.textContent = "GameDock has not come back after two minutes. Check the service on the machine (systemctl --user status gamedock), then reload this page.";
+}
+
+// ---------------------------------------------------------------------- schedules
+let schedulesData = null;
+async function refreshSchedules() {
+  try { schedulesData = await api("/api/schedules"); hostTz = schedulesData.timezone && schedulesData.timezone.name; }
+  catch (_) { /* connection indicator covers it */ }
+  if (location.hash.startsWith("#/schedules")) renderSchedulesPage();
+}
+
+function runLine(label, st) {
+  const row = el("div", { class: "run-row" }, el("span", { class: "run-label", textContent: label }));
+  if (!st.enabled) { row.append(el("span", { class: "hint", textContent: "Off" })); }
+  else row.append(el("span", { textContent: st.summary }),
+    el("span", { class: "hint", textContent: st.next_run ? ` \u2013 next ${fmtWhen(st.next_run)} (${inWords(st.next_run)})` : "" }));
+  const last = el("div", { class: "run-last" });
+  if (st.last_result) {
+    last.append(resultBadge(st.last_result), el("span", { class: "hint", textContent: ` ${fmtWhen(st.last_run)}` }));
+    if (st.last_message) last.append(el("div", { class: st.last_result === "failed" ? "run-msg bad" : "run-msg", textContent: st.last_message }));
+  } else last.append(el("span", { class: "hint", textContent: "Has not run yet." }));
+  return el("div", { class: "run" }, row, last);
+}
+
+function renderSchedulesPage() {
+  const d = schedulesData;
+  if (!d) return;
+  const tz = d.timezone;
+  $("sched-tz").textContent = `Times of day are in this machine's timezone: ${tz.name} (${tz.utc_offset}).`;
+  $("sched-problem").hidden = !d.problem;
+  $("sched-problem").textContent = d.problem || "";
+  $("sched-empty").hidden = d.servers.length > 0;
+  $("sched-list").replaceChildren(...d.servers.map((s) => el("article", { class: "card", id: `sched-${s.server_id}` },
+    el("div", { class: "card-head" }, el("h2", { textContent: s.server_name }),
+      el("button", { type: "button", class: "primary", textContent: "Edit schedules", "aria-label": `Edit schedules of ${s.server_name}`,
+        onclick: () => openSchedules(s.server_id) })),
+    el("div", { class: "run-block" }, el("h4", { textContent: "Backups" }), runLine("", s.backup)),
+    el("div", { class: "run-block" }, el("h4", { textContent: "Maintenance" }), runLine("", s.maintenance)))));
+}
+
+// A "how often" control: frequency select + hours / time / weekdays. kinds: which frequencies to offer.
+const DAYS = [["mon", "Monday"], ["tue", "Tuesday"], ["wed", "Wednesday"], ["thu", "Thursday"], ["fri", "Friday"], ["sat", "Saturday"], ["sun", "Sunday"]];
+function recurrenceControls(prefix, kinds, init) {
+  const labels = { interval: "Every few hours", daily: "Every day at a set time", weekly: "On chosen days of the week" };
+  const sel = el("select", { id: `${prefix}-freq`, "aria-label": "How often" },
+    ...kinds.map((k) => el("option", { value: k, textContent: labels[k], selected: init.frequency === k })));
+  const hours = el("input", { type: "number", min: 1, max: 168, value: init.every_hours || 6, id: `${prefix}-hours`, "aria-label": "Hours between backups" });
+  const time = el("input", { type: "time", value: init.time || "03:00", id: `${prefix}-time`, "aria-label": "Time of day", required: true });
+  const days = DAYS.map(([k, label]) => {
+    const cb = el("input", { type: "checkbox", checked: (init.days || []).includes(k), id: `${prefix}-day-${k}` });
+    return el("label", { class: "check day" }, cb, label);
+  });
+  const hoursRow = el("label", { class: "field" }, el("span", { textContent: "Hours between backups" }), hours);
+  const timeRow = el("label", { class: "field" }, el("span", { textContent: "Time of day (this machine's timezone)" }), time);
+  const daysRow = el("div", { class: "days", role: "group", "aria-label": "Days of the week" }, ...days);
+  const show = () => {
+    hoursRow.hidden = sel.value !== "interval";
+    timeRow.hidden = sel.value === "interval";
+    daysRow.hidden = sel.value !== "weekly";
+  };
+  sel.addEventListener("change", show);
+  show();
+  return {
+    node: el("div", { class: "recur" }, el("label", { class: "field" }, el("span", { textContent: "How often" }), sel), hoursRow, timeRow, daysRow),
+    read() {
+      const f = sel.value;
+      return { frequency: f, every_hours: f === "interval" ? Number(hours.value) : null, time: f === "interval" ? null : time.value,
+        days: f === "weekly" ? DAYS.filter(([k]) => $(`${prefix}-day-${k}`).checked).map(([k]) => k) : null };
+    },
+  };
+}
+
+function historyTable(history) {
+  if (!history.length) return el("p", { class: "empty-small", textContent: "No scheduled or manual runs yet." });
+  return el("table", { class: "list history" },
+    el("thead", {}, el("tr", {}, ...["When", "What", "Started", "Result"].map((h) => el("th", { textContent: h })))),
+    el("tbody", {}, ...history.slice(0, 8).map((h) => el("tr", {},
+      el("td", { class: "nowrap", textContent: fmtWhen(h.time) }),
+      el("td", { textContent: h.kind === "backup" ? "Backup" : "Maintenance" }),
+      el("td", { textContent: TRIGGER_LABEL[h.trigger] || h.trigger }),
+      el("td", {}, resultBadge(h.result), el("div", { class: h.result === "failed" ? "run-msg bad" : "run-msg", textContent: h.message }))))));
+}
+
+async function openSchedules(id, message, kind = "ok") {
+  await refresh();
+  const s = findServer(id);
+  if (!s) return closeDialog();
+  let v;
+  try { v = await api(`/api/servers/${sid(id)}/schedules`); hostTz = v.timezone.name; }
+  catch (e) { return openDialog(resultView("Schedules", [[e.message, "warn"]])); }
+  const b = v.backup, m = v.maintenance;
+  const msg = el("div", { class: kind === "ok" ? "okmsg" : "form-error", hidden: !message, textContent: message || "" });
+
+  // ---- backups section
+  const bOn = el("input", { type: "checkbox", id: "sched-backup-on", checked: b.enabled });
+  const bRec = recurrenceControls("sb", ["interval", "daily", "weekly"], b);
+  const keep = el("input", { type: "number", min: 1, max: 100, id: "sched-keep", value: b.retention || "", placeholder: `${b.retention_in_use} (usual)` });
+  const bErr = el("div", { class: "form-error", hidden: true });
+  const bSave = el("button", { type: "button", class: "primary", id: "sched-backup-save", textContent: "Save backup schedule" });
+  bSave.addEventListener("click", async () => {
+    bSave.disabled = true; bErr.hidden = true;
+    try {
+      await api(`/api/servers/${sid(id)}/schedules/backup`, "PUT", { enabled: bOn.checked, ...bRec.read(),
+        retention: keep.value === "" ? null : Number(keep.value) });
+      await refresh(); refreshSchedules();
+      openSchedules(id, "Backup schedule saved.");
+    } catch (e) { bErr.textContent = e.message; bErr.hidden = false; bSave.disabled = false; }
+  });
+
+  // ---- maintenance section
+  const mOn = el("input", { type: "checkbox", id: "sched-maint-on", checked: m.enabled });
+  const mRec = recurrenceControls("sm", ["daily", "weekly"], m.frequency === "interval" ? { ...m, frequency: "weekly" } : m);
+  const mBackup = el("input", { type: "checkbox", id: "sched-m-backup", checked: m.backup_first });
+  const mImage = el("input", { type: "checkbox", id: "sched-m-image", checked: m.update_image && m.image_update_supported, disabled: !m.image_update_supported });
+  const mRestart = el("input", { type: "checkbox", id: "sched-m-restart", checked: m.restart });
+  const mEmpty = el("input", { type: "checkbox", id: "sched-m-empty", checked: false, disabled: true });
+  const mErr = el("div", { class: "form-error", hidden: true });
+  const mSave = el("button", { type: "button", class: "primary", id: "sched-maint-save", textContent: "Save maintenance schedule" });
+  mSave.addEventListener("click", async () => {
+    mSave.disabled = true; mErr.hidden = true;
+    try {
+      await api(`/api/servers/${sid(id)}/schedules/maintenance`, "PUT", { enabled: mOn.checked, ...mRec.read(),
+        backup_first: mBackup.checked, update_image: mImage.checked, restart: mRestart.checked });
+      await refresh(); refreshSchedules();
+      openSchedules(id, "Maintenance schedule saved.");
+    } catch (e) { mErr.textContent = e.message; mErr.hidden = false; mSave.disabled = false; }
+  });
+  const runNow = el("button", { type: "button", class: "secondary", id: "sched-run-now", textContent: "Run maintenance now\u2026",
+    disabled: !!s.activity, onclick: () => confirmMaintenanceNow(id, s, m) });
+  const opt = (input, label, help) => el("div", { class: "opt" }, el("label", { class: "check" }, input, label),
+    help ? el("div", { class: "hint opt-help", textContent: help }) : null);
+
+  openWide(el("div", { class: "panel sched-panel", id: "sched-panel" },
+    el("h3", { textContent: `Schedules \u2013 ${s.name}` }),
+    el("p", { class: "hint", textContent: `Times of day are in this machine's timezone: ${v.timezone.name} (${v.timezone.utc_offset}). If GameDock is switched off at the time, a missed backup runs once when it starts again.` }),
+    msg,
+    el("section", { class: "sched-section", "aria-labelledby": "sb-title" },
+      el("h4", { id: "sb-title", textContent: "Scheduled backups" }),
+      el("label", { class: "check" }, bOn, "Back up this server automatically"),
+      bRec.node,
+      el("label", { class: "field" }, el("span", { textContent: "Backups to keep" }), keep,
+        el("span", { class: "hint", textContent: "Older ones are removed automatically. Leave empty for GameDock's usual number." })),
+      el("p", { class: "hint", textContent: b.how }),
+      runLine("", b), bErr,
+      el("div", { class: "dialog-actions" }, bSave)),
+    el("section", { class: "sched-section", "aria-labelledby": "sm-title" },
+      el("h4", { id: "sm-title", textContent: "Scheduled maintenance" }),
+      el("p", { class: "hint", textContent: "Maintenance is the regular tidy-up: it can back up, bring the game up to date and restart the server, one step after another, never alongside anything else on this server." }),
+      el("label", { class: "check" }, mOn, "Run maintenance on this server automatically"),
+      mRec.node,
+      el("div", { class: "opts" },
+        opt(mBackup, "Take a backup first", "Saved as an automatic backup before anything changes."),
+        opt(mImage, "Check for a newer game image and apply it",
+          m.image_update_supported ? (s.update_note || "Downloads the newest image, then recreates the container with it. Your data and settings are kept.")
+            : "Not available: this game updates its files inside the container, so there is no image to apply. Restarting is how it updates."),
+        opt(mRestart, "Restart the server", "Players are disconnected for a short time."),
+        opt(mEmpty, "Only when nobody is playing", `Not available: ${m.only_when_empty.reason}`)),
+      el("p", { class: "hint", textContent: "A maintenance run that was missed because GameDock was off is skipped when it is more than 6 hours late, so the game is never restarted at a surprise time." }),
+      runLine("", m), mErr,
+      el("div", { class: "dialog-actions" }, runNow, el("span", { class: "spacer" }), mSave)),
+    el("section", { class: "sched-section" }, el("h4", { textContent: "Recent runs" }), historyTable(v.history)),
+    el("div", { class: "dialog-actions" }, el("span", { class: "spacer" }),
+      el("button", { type: "button", class: "secondary", textContent: "Close", onclick: closeDialog }))));
+}
+
+function confirmMaintenanceNow(id, s, m) {
+  const steps = [];
+  if (m.backup_first) steps.push("take a backup");
+  if (m.update_image && m.image_update_supported) steps.push("download a newer game image if there is one and recreate the container with it");
+  if (m.restart) steps.push("restart the server");
+  const running = s.status === "running";
+  openDialog(confirmView({
+    title: `Run maintenance for ${s.name} now?`,
+    paragraphs: [
+      steps.length ? `GameDock will ${steps.join(", then ")}. It uses the options saved in the schedule (switched on or not).`
+        : "The saved maintenance options do nothing yet. Close this, choose at least one option and save.",
+      running && (m.restart || m.update_image)
+        ? "The server is running: players are disconnected while it restarts, which can take a few minutes if a new image is downloaded."
+        : running ? "The server keeps running." : "The server is stopped and stays stopped.",
+      "Nothing else can be done to this server until maintenance has finished.",
+    ],
+    checkboxLabel: steps.length ? "Yes, run maintenance now." : undefined, confirmText: "Run maintenance now", danger: false,
+    workingText: "Running maintenance. This can take several minutes\u2026",
+    onBack: () => openSchedules(id),
+    onConfirm: async () => {
+      const r = await api(`/api/servers/${sid(id)}/schedules/maintenance/run?confirm=true`, "POST");
+      await refresh();
+      await openSchedules(id, `${r.result === "ok" ? "Maintenance finished." : "Maintenance finished with a problem."} ${r.message}`, r.result === "ok" ? "ok" : "warn");
+    },
+  }));
+}
+
 // -------------------------------------------------------------------- routing
 function route() {
   const page = location.hash.startsWith("#/catalog") ? "catalog"
     : location.hash.startsWith("#/mcp") ? "mcp"
     : location.hash.startsWith("#/health") ? "health"
+    : location.hash.startsWith("#/schedules") ? "schedules"
     : location.hash.startsWith("#/monitoring") ? "monitoring" : "dashboard";
-  const titles = { dashboard: "Dashboard", catalog: "Catalog", monitoring: "Monitoring", mcp: "AI agents (MCP)", health: "Health" };
+  const titles = { dashboard: "Dashboard", catalog: "Catalog", monitoring: "Monitoring", schedules: "Schedules", mcp: "AI agents (MCP)", health: "Health" };
   for (const p of Object.keys(titles)) {
     $(`page-${p}`).hidden = page !== p;
     $(`nav-${p}`).classList.toggle("active", page === p);
@@ -1314,6 +1715,7 @@ function route() {
   if (page === "health" && !doctorShown) runDoctor();
   if (page === "monitoring") renderMonitoring();
   if (page === "mcp") refreshMcp();
+  if (page === "schedules") { renderSchedulesPage(); refreshSchedules(); }
   showError("");
 }
 
@@ -1348,8 +1750,12 @@ route();
 loadCatalog();
 refresh().then(refreshStats);
 refreshStatus();
+refreshVersion();
+refreshSchedules();
 setInterval(() => { if (!document.hidden) refreshStatus(); }, 15000);
+setInterval(() => { if (!document.hidden) refreshVersion(); }, 60000);
 setInterval(() => {
   if (!document.hidden) refresh().then(refreshStats);
   if (location.hash.startsWith("#/mcp") && !document.hidden) refreshMcp();
+  if (location.hash.startsWith("#/schedules") && !document.hidden) refreshSchedules();
 }, POLL_MS);

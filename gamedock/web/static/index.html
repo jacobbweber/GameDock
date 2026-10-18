@@ -17,11 +17,15 @@
     <nav aria-label="Main">
       <a href="#/" id="nav-dashboard">Dashboard</a>
       <a href="#/monitoring" id="nav-monitoring">Monitoring</a>
+      <a href="#/schedules" id="nav-schedules">Schedules</a>
       <a href="#/catalog" id="nav-catalog">Catalog</a>
       <a href="#/mcp" id="nav-mcp">AI agents (MCP)</a>
       <a href="#/health" id="nav-health">Health</a>
     </nav>
-    <div id="conn" class="conn" title="Connection to GameDock" role="status">connecting&hellip;</div>
+    <div class="hdr-right">
+      <div id="version-box" class="version-box"></div>
+      <div id="conn" class="conn" title="Connection to GameDock" role="status">connecting&hellip;</div>
+    </div>
   </header>
   <main id="main" tabindex="-1">
     <div id="banners" aria-live="polite"></div>
@@ -42,12 +46,19 @@
       <div id="rank-wrap"></div>
       <p class="intro small">CPU is shown like Docker does: 100% is one full core. &ldquo;Of host&rdquo; is the share of the whole machine. Updated every few seconds.</p>
     </section>
+    <section id="page-schedules" hidden>
+      <p class="intro">Automatic backups and maintenance for each server. <strong>Maintenance</strong> is the regular tidy-up: back up, bring the game up to date and restart. GameDock does these itself: nothing else needs to be set up on the machine.</p>
+      <p id="sched-tz" class="hint"></p>
+      <div id="sched-problem" class="error" role="alert" hidden></div>
+      <section id="sched-list" class="grid" aria-label="Schedules of your servers"></section>
+      <p id="sched-empty" class="empty" hidden>No servers yet. Deploy a game first, then set up its schedules here.</p>
+    </section>
     <section id="page-mcp" hidden>
       <p class="intro">GameDock can be driven by AI agents over the Model Context Protocol (MCP). They use exactly the same actions as this page, and every call is written to the activity log below.</p>
       <section id="mcp-status" class="mcp-status"></section>
       <h2 class="section-title">Connect an agent</h2>
       <div id="mcp-snippets"></div>
-      <h2 class="section-title">Recent MCP activity</h2>
+      <h2 class="section-title">Recent activity (AI agents and scheduled runs)</h2>
       <div id="mcp-audit"></div>
     </section>
     <section id="page-health" hidden>

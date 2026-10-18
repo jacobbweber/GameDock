@@ -30,7 +30,7 @@ log = logging.getLogger("gamedock.schedule")
 
 FORMAT_VERSION = 1
 DAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
-DAY_LABELS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+DAY_LABELS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 MAX_EVERY_HOURS = 168          # one week
 MAX_RETENTION = 100
 HISTORY_LIMIT = 30             # recent runs kept per server
@@ -141,8 +141,8 @@ def describe(rec: Recurrence) -> str:
     if rec.kind == "interval":
         return "every hour" if rec.every_hours == 1 else f"every {rec.every_hours} hours"
     if rec.kind == "daily" or len(rec.days) == 7:
-        return f"daily {rec.time}"
-    return f"{', '.join(DAY_LABELS[DAY_NAMES.index(d)] for d in rec.days)} {rec.time}"
+        return f"daily at {rec.time}"
+    return f"{', '.join(DAY_LABELS[DAY_NAMES.index(d)] for d in rec.days)} at {rec.time}"
 
 
 def parse_iso(value: str | None) -> datetime | None:

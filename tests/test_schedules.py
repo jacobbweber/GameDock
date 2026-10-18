@@ -118,10 +118,10 @@ def test_set_backup_schedule_and_next_run(service):
     sid = make(service)
     v = service.set_backup_schedule(sid, True, "daily", time_of_day="03:00", retention=5)
     b = v["backup"]
-    assert b["enabled"] and b["summary"] == "daily 03:00" and b["retention"] == 5 and b["retention_in_use"] == 5
+    assert b["enabled"] and b["summary"] == "daily at 03:00" and b["retention"] == 5 and b["retention_in_use"] == 5
     assert b["next_run"] == "2026-05-11T07:00:00Z"        # 03:00 New York time (UTC-4)
     ov = service.get_status(sid).schedule
-    assert ov["backup"] == "daily 03:00" and ov["maintenance"] == "" and ov["next_kind"] == "backup"
+    assert ov["backup"] == "daily at 03:00" and ov["maintenance"] == "" and ov["next_kind"] == "backup"
 
 
 def test_first_enable_needs_a_frequency(service):
@@ -167,7 +167,7 @@ def test_image_update_option_refused_for_self_updating_games(service):
     with pytest.raises(ValidationError, match="no image update"):
         service.set_maintenance_schedule(sid, True, "weekly", "04:00", ["sun"], update_image=True)
     v = service.set_maintenance_schedule(sid, True, "weekly", "04:00", ["sun"], update_image=False)
-    assert v["maintenance"]["image_update_supported"] is False and v["maintenance"]["summary"] == "Sun 04:00"
+    assert v["maintenance"]["image_update_supported"] is False and v["maintenance"]["summary"] == "Sunday at 04:00"
 
 
 def test_unknown_server(service):
@@ -181,7 +181,7 @@ def test_overview_picks_the_earlier_job(service):
     service.set_backup_schedule(sid, True, "daily", time_of_day="03:00")
     service.set_maintenance_schedule(sid, True, "weekly", "04:00", ["mon", "sun"])
     ov = service.get_status(sid).schedule
-    assert ov["next_kind"] == "backup" and ov["maintenance"] == "Mon, Sun 04:00"
+    assert ov["next_kind"] == "backup" and ov["maintenance"] == "Monday, Sunday at 04:00"
 
 
 # ------------------------------------------------------------------ persistence
@@ -196,7 +196,7 @@ def test_schedules_survive_a_restart_in_a_consistent_file(service, backend, tmp_
     assert raw["servers"][sid]["maintenance"]["backup_first"] is False
     again = GameDockService(backend, service.catalog_dir, service.data_dir, clock=clock, tz=NY, tz_name="x")
     assert again.get_server_schedules(sid)["backup"]["days"] == ["mon", "sat"]
-    assert again.get_server_schedules(sid)["maintenance"]["summary"] == "daily 05:00"
+    assert again.get_server_schedules(sid)["maintenance"]["summary"] == "daily at 05:00"
     assert oct((service.data_dir / "schedules.json").stat().st_mode & 0o777) == "0o600"
     assert not list(service.data_dir.glob(".schedules-*"))      # no temporary files left behind
 
@@ -222,7 +222,7 @@ def test_one_invalid_entry_does_not_hide_the_others(service, backend, clock):
     raw["servers"][a]["backup"]["time"] = "99:99"
     p.write_text(json.dumps(raw))
     fresh = GameDockService(backend, service.catalog_dir, service.data_dir, clock=clock, tz=NY, tz_name="x")
-    assert fresh.get_server_schedules(b)["backup"]["summary"] == "daily 04:00"
+    assert fresh.get_server_schedules(b)["backup"]["summary"] == "daily at 04:00"
     assert fresh.get_server_schedules(a)["backup"]["enabled"] is False
     assert fresh.schedules.problem
 
