@@ -8,6 +8,14 @@ ports:
   - { protocol: tcp, host: 25565, container: 25565 }
 volumes:
   - { host: ./data, container: /data }
+config_files:               # editable from the Config button (example path; verify)
+  - path: data/server.properties
+    label: server.properties
+    format: ini
+    sensitive_keys: [rcon.password]
+  - path: data/ops.json
+    label: Operators (ops.json)
+    format: json
 fields:
   - { name: EULA, label: Accept Minecraft EULA (TRUE or FALSE), default: "FALSE", required: true }
   - { name: VERSION, label: Minecraft version, default: LATEST }

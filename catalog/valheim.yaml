@@ -10,6 +10,11 @@ ports:
 volumes:
   - { host: ./config, container: /config }
   - { host: ./server, container: /opt/valheim }
+config_files:               # editable from the Config button (example path; verify)
+  - path: config/adminlist.txt
+    label: Admin list (Steam IDs)
+    format: text
+    hot_edit: true
 fields:
   - { name: SERVER_NAME, label: Server name, default: "My Valheim Server", required: true }
   - { name: WORLD_NAME, label: World name, default: "Dedicated", required: true }

@@ -46,6 +46,21 @@ class EnvField:
     description: str = ""
 
 
+CONFIG_FORMATS = ("ini", "json", "yaml", "text")
+UPDATE_METHODS = ("pull_recreate", "none")
+
+
+@dataclass(frozen=True)
+class ConfigFile:
+    """A config file a catalog entry lets users edit. `path` is relative to the server's data folder."""
+
+    path: str
+    label: str = ""
+    format: str = "text"  # hint for the editor; "json" files are validated on save
+    sensitive_keys: tuple[str, ...] = ()  # values of these keys are masked in the editor
+    hot_edit: bool = False  # True = safe to edit while the server runs
+
+
 @dataclass(frozen=True)
 class CatalogEntry:
     id: str
@@ -57,6 +72,8 @@ class CatalogEntry:
     fields: tuple[EnvField, ...] = ()  # editable values
     description: str = ""
     notes: str = ""
+    update_method: str = "pull_recreate"  # or "none" (the game updates itself inside the container)
+    config_files: tuple[ConfigFile, ...] = ()
 
 
 @dataclass

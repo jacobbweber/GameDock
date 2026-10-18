@@ -1,12 +1,16 @@
 """Load catalog entries (game templates) from YAML/JSON files in the catalog directory."""
 from __future__ import annotations
 
-from pathlib import Path
+import re
+from pathlib import Path, PurePosixPath
 
 import yaml
 
 from .errors import CatalogError
-from .models import ENV_NAME_RE, ID_RE, CatalogEntry, EnvField, PortMapping, VolumeMapping
+from .models import (
+    CONFIG_FORMATS, ENV_NAME_RE, ID_RE, UPDATE_METHODS, CatalogEntry, ConfigFile, EnvField, PortMapping,
+    VolumeMapping,
+)
 
 
 def _parse_port(p: object, source: str) -> PortMapping:
@@ -33,6 +37,26 @@ def _parse_field(f: object, source: str) -> EnvField:
         required=bool(f.get("required", False)),
         description=str(f.get("description", "")),
     )
+
+
+KEY_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
+
+
+def _parse_config_file(c: object, source: str) -> ConfigFile:
+    if not isinstance(c, dict) or not isinstance(c.get("path"), str) or not c["path"].strip():
+        raise CatalogError(f"{source}: bad config file entry {c!r}")
+    path = c["path"].strip()
+    pp = PurePosixPath(path)
+    if pp.is_absolute() or ".." in pp.parts or "\\" in path or "\0" in path:
+        raise CatalogError(f"{source}: config path must be relative and stay inside the data folder: {path!r}")
+    fmt = str(c.get("format", "text")).lower()
+    if fmt not in CONFIG_FORMATS:
+        raise CatalogError(f"{source}: config format must be one of {CONFIG_FORMATS}, got {fmt!r}")
+    keys = c.get("sensitive_keys") or []
+    if not isinstance(keys, list) or not all(isinstance(k, str) and KEY_RE.match(k) for k in keys):
+        raise CatalogError(f"{source}: bad sensitive_keys in config file {path!r}")
+    return ConfigFile(path=str(pp), label=str(c.get("label") or path), format=fmt,
+                      sensitive_keys=tuple(keys), hot_edit=bool(c.get("hot_edit", False)))
 
 
 def parse_definition(data: object, source: str = "<definition>") -> CatalogEntry:
@@ -73,6 +97,13 @@ def parse_definition(data: object, source: str = "<definition>") -> CatalogEntry
     if clash:
         raise CatalogError(f"{source}: {sorted(clash)} listed in both 'env' and 'fields'")
 
+    update_method = str(data.get("update_method", "pull_recreate"))
+    if update_method not in UPDATE_METHODS:
+        raise CatalogError(f"{source}: update_method must be one of {UPDATE_METHODS}, got {update_method!r}")
+    config_files = [_parse_config_file(c, source) for c in data.get("config_files") or []]
+    if len({c.path for c in config_files}) != len(config_files):
+        raise CatalogError(f"{source}: duplicate config file path")
+
     return CatalogEntry(
         id=gid,
         name=data["name"],
@@ -83,6 +114,8 @@ def parse_definition(data: object, source: str = "<definition>") -> CatalogEntry
         fields=tuple(fields),
         description=str(data.get("description", "")),
         notes=str(data.get("notes", "")),
+        update_method=update_method,
+        config_files=tuple(config_files),
     )
 
 
@@ -94,6 +127,12 @@ def entry_to_dict(e: CatalogEntry) -> dict:
         "image": e.image,
         "description": e.description,
         "notes": e.notes,
+        "update_method": e.update_method,
+        "config_files": [
+            {"path": c.path, "label": c.label, "format": c.format,
+             "sensitive_keys": list(c.sensitive_keys), "hot_edit": c.hot_edit}
+            for c in e.config_files
+        ],
         "ports": [{"protocol": p.protocol, "host": p.host, "container": p.container} for p in e.ports],
         "volumes": [{"host": v.host, "container": v.container} for v in e.volumes],
         "env": dict(e.env),

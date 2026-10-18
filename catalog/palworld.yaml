@@ -12,6 +12,12 @@ volumes:
 env:
   PORT: "8211"
   QUERY_PORT: "27015"
+config_files:               # editable from the Config button (example path; verify)
+  - path: palworld/Pal/Saved/Config/LinuxServer/PalWorldSettings.ini
+    label: Palworld settings
+    format: ini
+    sensitive_keys: [AdminPassword, ServerPassword]
+    # hot_edit: false  -> the server must be stopped before saving
 fields:
   - { name: SERVER_NAME, label: Server name, default: "My Palworld Server", required: true }
   - { name: PLAYERS, label: Max players, default: "16" }
