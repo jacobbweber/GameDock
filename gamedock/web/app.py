@@ -20,6 +20,8 @@ from ..errors import (
 )
 from ..models import PortMapping
 from ..serialize import catalog_to_dict, delete_result_to_dict, server_to_dict
+from ..config import Settings
+from ..doctor import run_doctor
 from ..mcp_api import McpConfig, build_mcp
 from ..mcp_api.guard import host_allowed
 from ..mcp_api.confirm import ConfirmationStore
@@ -71,7 +73,7 @@ def _is_loopback(host: str | None) -> bool:
 def create_app(service: GameDockService, sampler=None, metrics_enabled: bool = False,
                metrics_allow_remote: bool = False, mcp_config: McpConfig | None = None,
                mcp_confirmations: ConfirmationStore | None = None,
-               allowed_host_patterns: list[str] | None = None) -> FastAPI:
+               allowed_host_patterns: list[str] | None = None, settings: Settings | None = None) -> FastAPI:
     """`sampler` (optional) is started and stopped with the app. /metrics exists only if metrics_enabled.
     /mcp is served only if mcp_config asks for a mode other than "off".
     `allowed_host_patterns` (optional) restricts the Host header of web/API requests, which stops DNS-rebinding
@@ -164,6 +166,21 @@ def create_app(service: GameDockService, sampler=None, metrics_enabled: bool = F
     @app.get("/api/health")
     def health():
         return {"ok": True, "version": __version__}
+
+    @app.get("/api/status")
+    def status():
+        """Cheap summary for the banner at the top of the UI (Docker reachable? catalog problems?)."""
+        d = service.docker_status()
+        fake = settings is not None and settings.backend == "fake"
+        service.list_catalog()  # refreshes service.catalog_problems
+        return {"version": __version__, "docker": {"ok": d.reachable, "kind": d.kind, "message": d.message,
+                                                   "version": d.server_version, "fake": fake},
+                "catalog_problems": [{"file": f, "problem": p} for f, p in service.catalog_problems]}
+
+    @app.get("/api/doctor")
+    def doctor():
+        """The full health check (same as `python -m gamedock doctor`). Does a few quick local checks."""
+        return run_doctor(service, settings).to_dict()
 
     @app.get("/api/servers")
     def list_servers():

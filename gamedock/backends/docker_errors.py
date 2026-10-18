@@ -62,3 +62,16 @@ def friendly(command: str, stderr: str) -> BackendError:
     if "no such container" in low:
         return BackendError(f"The container does not exist ({text}). Start the server to create it again.")
     return BackendError(f"docker {command} failed: {text}" if text else f"docker {command} failed")
+
+
+# Short problem / fix pairs for the doctor and the status banner.
+SHORT = {
+    "not_installed": ("The docker command is not installed (or not on PATH).",
+                      "Install Docker Engine: https://docs.docker.com/engine/install/ . Then check: docker --version"),
+    "daemon_down": ("Docker is installed but the Docker service is not running or not reachable.",
+                    "sudo systemctl enable --now docker   (then check: docker ps)"),
+    "permission": ("Docker is running, but this user is not allowed to use it.",
+                   "sudo usermod -aG docker $USER   then log out and back in (or restart the GameDock service). "
+                   "Check with: docker ps"),
+    "error": ("Docker did not answer as expected.", "Run 'docker version' in a terminal and read what it says."),
+}

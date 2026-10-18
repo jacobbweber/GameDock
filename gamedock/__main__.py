@@ -1,12 +1,16 @@
 """Entry point: `python -m gamedock` or the `gamedock` command."""
 from __future__ import annotations
 
+import argparse
+import json
 import logging
+import sys
 
 import uvicorn
 
 from .backends import make_backend
 from .config import Settings, load_dotenv
+from .doctor import run_doctor
 from .hostcheck import port_free
 from .mcp_api import McpConfig
 from .mcp_api.guard import allowed_host_patterns
@@ -17,23 +21,45 @@ from .web.app import create_app
 log = logging.getLogger("gamedock")
 
 
+def build_service(settings: Settings) -> GameDockService:
+    return GameDockService(make_backend(settings.backend, settings.stop_timeout), settings.catalog_dir,
+                           settings.data_dir,
+                           backup_retention=settings.backup_retention,
+                           stats_interval=settings.stats_interval,
+                           stats_history_seconds=settings.stats_history_seconds,
+                           port_probe=port_free if settings.backend == "docker" else None)
+
+
 def build_app(settings: Settings | None = None):
     settings = settings or Settings.from_env()
-    service = GameDockService(make_backend(settings.backend, settings.stop_timeout), settings.catalog_dir,
-                              settings.data_dir,
-                              backup_retention=settings.backup_retention,
-                              stats_interval=settings.stats_interval,
-                              stats_history_seconds=settings.stats_history_seconds,
-                              port_probe=port_free if settings.backend == "docker" else None)
+    service = build_service(settings)
     sampler = Sampler(service) if settings.stats_enabled else None
-    return create_app(service, sampler=sampler, metrics_enabled=settings.metrics_enabled,
+    return create_app(service, sampler=sampler, settings=settings, metrics_enabled=settings.metrics_enabled,
                       metrics_allow_remote=settings.metrics_allow_remote,
                       mcp_config=McpConfig.from_settings(settings),
                       allowed_host_patterns=allowed_host_patterns(
                           settings.host, (*settings.allowed_hosts, *settings.mcp_allowed_hosts)))
 
 
+def doctor_main(argv: list[str]) -> int:
+    """`python -m gamedock doctor [--json]`: exit status 0 when nothing must be fixed, 1 otherwise."""
+    parser = argparse.ArgumentParser(prog="gamedock doctor", description="Check that this machine is ready for GameDock.")
+    parser.add_argument("--json", action="store_true", help="print the report as JSON")
+    args = parser.parse_args(argv)
+    load_dotenv()
+    settings = Settings.from_env()
+    report = run_doctor(build_service(settings), settings)
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        print("GameDock doctor\n")
+        print(report.to_text(color=sys.stdout.isatty()))
+    return 0 if report.ok else 1
+
+
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "doctor":
+        sys.exit(doctor_main(sys.argv[2:]))
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     load_dotenv()
     settings = Settings.from_env()
