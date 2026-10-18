@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import os
 import re
 import shutil
@@ -232,6 +233,64 @@ class DockerCliBackend:
         proc = self._run(["image", "inspect", "--format", "{{.Id}}", "--", image], check=False,
                          timeout=QUICK_TIMEOUT_SECONDS)
         return proc.stdout.strip() or None if proc.returncode == 0 else None
+
+    def remote_image_digest(self, image: str) -> str | None:
+        """Ask the registry which digest `image` has now, without pulling it. Tries `docker buildx imagetools
+        inspect` (prints the digest of the whole multi-platform image, which is what a pull records), then the
+        older `docker manifest inspect`."""
+        self.check_image_name(image)
+        digest_re = re.compile(r"sha256:[0-9a-f]{64}")
+        last = ""
+        proc = self._run(["buildx", "imagetools", "inspect", image, "--format", "{{.Manifest.Digest}}"], check=False,
+                         timeout=QUICK_TIMEOUT_SECONDS * 2)
+        if proc.returncode == 0 and digest_re.fullmatch(proc.stdout.strip()):
+            return proc.stdout.strip()
+        last = proc.stderr or proc.stdout or last
+        proc = self._run(["buildx", "imagetools", "inspect", image], check=False, timeout=QUICK_TIMEOUT_SECONDS * 2)
+        if proc.returncode == 0:
+            m = re.search(r"^Digest:\s*(sha256:[0-9a-f]{64})\s*$", proc.stdout, re.M)
+            if m:
+                return m.group(1)
+        last = proc.stderr or proc.stdout or last
+        proc = self._run(["manifest", "inspect", "-v", image], check=False, timeout=QUICK_TIMEOUT_SECONDS * 2)
+        if proc.returncode == 0:
+            try:
+                data = json.loads(proc.stdout)
+            except ValueError:
+                data = None
+            if isinstance(data, dict):  # a single-platform image: its manifest digest is what a pull records
+                d = (data.get("Descriptor") or {}).get("digest", "")
+                if digest_re.fullmatch(d):
+                    return d
+            return None  # a multi-platform list: this command cannot give the digest of the list
+        last = proc.stderr or proc.stdout or last
+        first = (last.strip().splitlines() or ["no answer"])[0][:200]
+        raise BackendError(f"Could not ask the registry about {image} ({first}). Are you online, and is the image "
+                           "name right?")
+
+    def local_image_digests(self, ref: str) -> tuple[str, ...]:
+        self.check_image_name(ref)
+        proc = self._run(["image", "inspect", "--format", "{{json .RepoDigests}}", "--", ref], check=False,
+                         timeout=QUICK_TIMEOUT_SECONDS)
+        if proc.returncode != 0:
+            return ()
+        try:
+            items = json.loads(proc.stdout.strip() or "[]") or []
+        except ValueError:
+            return ()
+        return tuple(sorted({s.split("@", 1)[1] for s in items if isinstance(s, str) and "@sha256:" in s}))
+
+    def exec_in(self, name: str, argv: list[str], timeout: int = 60) -> str:
+        found = self._ours(name)
+        if found is None or found.raw != "running":
+            raise BackendError(f"The container '{name}' is not running, so a command cannot be run in it.")
+        if not argv or any(not isinstance(a, str) or "\0" in a for a in argv):
+            raise BackendError("Invalid command.")
+        proc = self._run(["exec", name, *argv], check=False, timeout=timeout, merge_stderr=True)
+        if proc.returncode != 0:
+            tail = " ".join((proc.stdout or "").split())[-300:]
+            raise BackendError(f"The command exited with status {proc.returncode}: {tail or 'no output'}")
+        return proc.stdout or ""
 
     def get_container_image_id(self, name: str) -> str | None:
         proc = self._run(["container", "inspect", "--format", "{{.Image}}", name], check=False,

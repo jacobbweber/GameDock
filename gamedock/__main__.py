@@ -15,7 +15,9 @@ from .hostcheck import port_free
 from .mcp_api import McpConfig
 from .mcp_api.guard import allowed_host_patterns
 from .sampler import Sampler
+from .scheduler import Scheduler
 from .service import GameDockService
+from .updates import UpdateChecker
 from .web.app import create_app
 
 log = logging.getLogger("gamedock")
@@ -27,14 +29,17 @@ def build_service(settings: Settings) -> GameDockService:
                            backup_retention=settings.backup_retention,
                            stats_interval=settings.stats_interval,
                            stats_history_seconds=settings.stats_history_seconds,
-                           port_probe=port_free if settings.backend == "docker" else None)
+                           port_probe=port_free if settings.backend == "docker" else None,
+                           updater=UpdateChecker(repo=settings.update_repo, enabled=settings.update_check,
+                                                 self_update=settings.self_update))
 
 
 def build_app(settings: Settings | None = None):
     settings = settings or Settings.from_env()
     service = build_service(settings)
     sampler = Sampler(service) if settings.stats_enabled else None
-    return create_app(service, sampler=sampler, settings=settings, metrics_enabled=settings.metrics_enabled,
+    scheduler = Scheduler(service, background_checks=settings.update_check) if settings.scheduler_enabled else None
+    return create_app(service, sampler=sampler, scheduler=scheduler, settings=settings, metrics_enabled=settings.metrics_enabled,
                       metrics_allow_remote=settings.metrics_allow_remote,
                       mcp_config=McpConfig.from_settings(settings),
                       allowed_host_patterns=allowed_host_patterns(

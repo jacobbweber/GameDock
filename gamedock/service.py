@@ -10,14 +10,16 @@ Vocabulary:
 """
 from __future__ import annotations
 
+import logging
 import math
 import re
 import shlex
+import threading
 import time
 from collections import deque
 from contextlib import contextmanager
-from dataclasses import replace
-from datetime import datetime, timezone
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from threading import Lock, RLock
 from typing import Callable, Iterable, Iterator, Mapping
@@ -26,11 +28,12 @@ from . import backups as bk
 from . import configfiles as cfg
 from . import configforms as forms
 from . import readiness as rd
+from . import schedule as sch
 from .backends.base import ContainerBackend, DockerDiagnosis
 from .catalog import entry_to_dict, load_catalog, parse_definition
 from .hoststats import HostMeter
 from .hostcheck import foreign_owners
-from .errors import BackendError, ConflictError, GameDockError, NotFoundError, ValidationError
+from .errors import BackendError, BusyError, ConflictError, GameDockError, NotFoundError, ValidationError
 from .models import (
     BackupResult, CatalogEntry, ConfigContent, ConfigFile, ConfigFileInfo, ConfigForm, ConfigFormResult, ConfigSaveResult,
     ContainerSpec, FormField, LogsResult,
@@ -38,6 +41,9 @@ from .models import (
     StatsHistory, StatsPoint, StatsSnapshot, Status, UpdateResult, VolumeMapping, WipeResult,
 )
 from .store import InstanceStore
+from .updates import UpdateChecker
+
+log = logging.getLogger("gamedock.service")
 
 CONTAINER_PREFIX = "gamedock-"
 LABEL_MANAGED = "gamedock.managed"
@@ -54,6 +60,26 @@ MAX_LOG_LINES = 1000                 # most lines one log request may return
 DEFAULT_LOG_LINES = 200
 MAX_LOG_CHARS = 200_000              # cap on the text of one log answer (the newest part is kept)
 MIN_SECRET_LEN = 3                   # secret setting values shorter than this are not searched for in logs
+IMAGE_CHECK_TTL = 6 * 3600           # a registry answer is reused this long
+IMAGE_CHECK_RETRY = 30 * 60          # ...and a failed question is asked again after this long
+IMAGE_CHECK_GAP = 30                 # seconds between two presses of "Check now" for one server
+SCHEDULE_TICK_GRACE = 300            # a run more than this many seconds late is called a catch-up run
+MAINTENANCE_CATCHUP_SECONDS = 6 * 3600   # a missed maintenance (it restarts the game) is skipped when later than this
+BUSY_GIVE_UP_SECONDS = 2 * 3600      # a scheduled run that finds the server busy keeps trying this long, then skips
+SAVE_COMMAND_TIMEOUT = 60
+SAVE_COMMAND_PAUSE = 3.0             # seconds the game gets to write its files after the save command
+ONLY_WHEN_EMPTY_REASON = ("GameDock cannot see how many players are online for this game, so 'only when nobody is "
+                          "playing' is not available. Pick a quiet time instead.")
+
+
+@dataclass
+class ImageCheck:
+    """The last answer to "does the registry have a newer image than the one this server runs?"."""
+
+    checked_at: float                 # wall clock seconds
+    available: bool | None            # None = could not tell
+    message: str = ""
+    failed: bool = False
 
 
 def container_name(server_id: str) -> str:
@@ -68,7 +94,9 @@ class GameDockService:
     def __init__(self, backend: ContainerBackend, catalog_dir: Path, data_dir: Path,
                  backup_retention: int = 10, clock: Callable[[], datetime] | None = None,
                  stats_interval: float = 10.0, stats_history_seconds: int = 3600,
-                 port_probe: Callable[[str, int], bool | None] | None = None) -> None:
+                 port_probe: Callable[[str, int], bool | None] | None = None,
+                 tz: tzinfo | None = None, tz_name: str | None = None,
+                 updater: UpdateChecker | None = None) -> None:
         """`port_probe(protocol, port)` returns False when the host port is taken by another program (checked
         before a server starts); None/True mean "free or unknown". Tests leave it out."""
         self.backend = backend
@@ -77,6 +105,18 @@ class GameDockService:
         self.store = InstanceStore(self.data_dir / "instances.json")
         self.backup_retention = max(1, int(backup_retention))
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        if tz is None and tz_name is None:
+            tz, tz_name = sch.host_timezone()
+        self.tz, self.tz_name = tz, tz_name or getattr(tz, "key", None) or str(tz)
+        self.schedules = sch.ScheduleStore(self.data_dir / "schedules.json")
+        self.updater = updater or UpdateChecker(enabled=False, self_update=False)
+        self.audit_hook: Callable[[str, dict, str, str], None] | None = None  # set by the web app (writes the audit file)
+        self._frozen = ""                                  # non-empty while GameDock is about to restart for an update
+        self._image_checks: dict[str, ImageCheck] = {}
+        self._image_check_lock = Lock()
+        self._jobs_running: set[tuple[str, str]] = set()
+        self._jobs_lock = Lock()
+        self._waiting_since: dict[tuple[str, str], float] = {}
         self.catalog_problems: list[tuple[str, str]] = []  # (file, problem) from the last catalog load
         self._port_probe = port_probe
         self._deploy_lock = Lock()  # deploys check names/ports and then store: do that one at a time
@@ -106,9 +146,11 @@ class GameDockService:
         """Only one state-changing operation per server at a time (e.g. no start during a backup).
         `activity` is shown to everyone who looks at the server meanwhile ("stopping", "backing up", ...)."""
         with self._locks_guard:
+            if self._frozen:
+                raise BusyError(f"{self._frozen}: please wait a moment and try again")
             lock = self._locks.setdefault(server_id, Lock())
         if not lock.acquire(blocking=False):
-            raise ConflictError("Another operation is already running on this server; wait for it to finish")
+            raise BusyError("Another operation is already running on this server; wait for it to finish")
         if activity:
             self._activity[server_id] = activity
         try:
@@ -192,11 +234,16 @@ class GameDockService:
             )
             for f in t.fields
         )
+        hints = self._with_current_hints(inst, t)
+        chk = self._image_checks.get(inst.id)
         return ServerInfo(inst.id, inst.name, inst.game_id, t.name, t.image, t.description,
                           status, inst.ports, env, detail, inst.created_at, t.update_method, len(t.config_files),
                           activity=self._activity.get(inst.id, "") if show_activity else "",
                           phase=r.phase if r else "", ready=bool(r and r.ready),
-                          progress=r.progress if r else None, phase_detail=r.detail if r else "")
+                          progress=r.progress if r else None, phase_detail=r.detail if r else "",
+                          update_available=chk.available if chk and t.update_method != "none" else None,
+                          update_checked_at=sch.iso(datetime.fromtimestamp(chk.checked_at, timezone.utc)) or "" if chk else "",
+                          update_note=hints.update_note, schedule=self._schedule_overview(inst.id))
 
     # --------------------------------------------------------------- readiness
     def _current_entries(self) -> dict[str, CatalogEntry]:
@@ -222,6 +269,22 @@ class GameDockService:
         if cur is None or not (cur.ready_log_pattern or cur.progress_log_pattern):
             return t
         return replace(t, ready_log_pattern=cur.ready_log_pattern, progress_log_pattern=cur.progress_log_pattern)
+
+    _HINT_KEYS = ("update_note", "backup_stop_first", "save_command")
+
+    def _with_current_hints(self, inst: Instance, t: CatalogEntry) -> CatalogEntry:
+        """Servers keep a snapshot of their template. Three optional hints (update note, stop-first flag, save command)
+        did not exist in snapshots made by older versions; for those, take the current catalog entry's values. Hints
+        that the snapshot does have are never overridden."""
+        if all(k in inst.template for k in self._HINT_KEYS):
+            return t
+        try:
+            cur = self._current_entries().get(inst.game_id)
+        except Exception:  # noqa: BLE001 - a broken catalog must never break the server list
+            return t
+        if cur is None:
+            return t
+        return replace(t, **{k: getattr(cur, k) for k in self._HINT_KEYS if k not in inst.template})
 
     def _forget_readiness(self, server_id: str) -> None:
         self._ready_seen.pop(server_id, None)
@@ -342,6 +405,8 @@ class GameDockService:
     def deploy(self, game_id: str, name: str, ports: Iterable[PortMapping] | None = None,
                env: Mapping[str, str] | None = None, start: bool = False) -> ServerInfo:
         """Create a server from a catalog entry: store it and create its container (stopped)."""
+        if self._frozen:
+            raise BusyError(f"{self._frozen}: please wait a moment and try again")
         with self._deploy_lock:
             return self._deploy(game_id, name, ports, env, start)
 
@@ -508,10 +573,15 @@ class GameDockService:
         inst = self._instance(server_id)
         return bk.list_backups(self._backup_dir(inst))
 
+    def _retention_for(self, inst: Instance) -> int:
+        """How many backups to keep for this server: its schedule's own number, else GameDock's normal setting."""
+        r = self.schedules.get(inst.id).backup.retention
+        return r if r else self.backup_retention
+
     def _safety_backup(self, inst: Instance, kind: str, protect: set[str] | None = None) -> bk.BackupInfo:
         """Back up a stopped server's data into its backups folder (retention applied)."""
         info = bk.create_archive(self._data_dir_of(inst), self._backup_dir(inst), inst.id, self._clock(), kind)
-        bk.prune(self._backup_dir(inst), self.backup_retention, protect=(protect or set()) | {info.name})
+        bk.prune(self._backup_dir(inst), self._retention_for(inst), protect=(protect or set()) | {info.name})
         return info
 
     def create_backup(self, server_id: str, live: bool = False) -> BackupResult:
@@ -521,41 +591,64 @@ class GameDockService:
         consistent. With live=True a running server is backed up as it runs (files may be mid-write).
         """
         with self._operation(server_id, "backing up"):
-            inst = self._instance(server_id)
-            was_running = self._is_running(inst)
-            stop_first = was_running and not live
-            if stop_first:
-                self._stop(inst)
-            try:
-                info = bk.create_archive(self._data_dir_of(inst), self._backup_dir(inst), inst.id, self._clock())
-            except BaseException:
-                if stop_first:
-                    try:
-                        self._start(inst)  # the backup failed; do not leave the server down
-                    except GameDockError:
-                        pass
-                raise
-            warnings: list[str] = []
-            restarted = False
+            return self._backup_locked(self._instance(server_id), live)
+
+    def _run_save_command(self, inst: Instance, t: CatalogEntry) -> str:
+        """Ask a running game to save (the catalog's optional save_command) before a live copy. A failure is only
+        reported: the backup still goes ahead. Returns a plain sentence about it, or ''."""
+        if not t.save_command:
+            return ""
+        try:
+            self.backend.exec_in(container_name(inst.id), list(t.save_command), SAVE_COMMAND_TIMEOUT)
+        except GameDockError as e:
+            return f"The game's save command did not work ({e}); the backup was taken anyway."
+        if SAVE_COMMAND_PAUSE:
+            time.sleep(SAVE_COMMAND_PAUSE)
+        return "The game was asked to save first."
+
+    def _backup_locked(self, inst: Instance, live: bool, kind: str | None = None) -> BackupResult:
+        """The backup itself; the caller holds the server's operation lock."""
+        t = self._with_current_hints(inst, self._template(inst))
+        was_running = self._is_running(inst)
+        stop_first = was_running and not live
+        save_note = ""
+        if was_running and live:
+            save_note = self._run_save_command(inst, t)
+        if stop_first:
+            self._stop(inst)
+        try:
+            info = bk.create_archive(self._data_dir_of(inst), self._backup_dir(inst), inst.id, self._clock(), kind)
+        except BaseException:
             if stop_first:
                 try:
-                    self._start(inst)
-                    restarted = True
-                except GameDockError as e:
-                    warnings.append(f"The backup succeeded but the server could not be started again: {e}")
-            removed = bk.prune(self._backup_dir(inst), self.backup_retention, protect={info.name})
-            if not was_running:
-                note = "The server was stopped, so the backup is consistent."
-            elif stop_first:
-                note = ("The server was running, so it was stopped for a consistent backup"
-                        + (" and has been started again." if restarted else "."))
-            else:
-                note = ("The server was running and was NOT stopped (live backup). Files being written during "
-                        "the backup may be inconsistent; prefer a stopped backup for anything important.")
-            if removed:
-                note += f" Removed {len(removed)} old backup(s) to keep the newest {self.backup_retention}."
-            return BackupResult(info, was_running, stop_first, restarted, was_running and live,
-                                tuple(removed), note, tuple(warnings))
+                    self._start(inst)  # the backup failed; do not leave the server down
+                except GameDockError:
+                    pass
+            raise
+        warnings: list[str] = []
+        restarted = False
+        if stop_first:
+            try:
+                self._start(inst)
+                restarted = True
+            except GameDockError as e:
+                warnings.append(f"The backup succeeded but the server could not be started again: {e}")
+        keep = self._retention_for(inst)
+        removed = bk.prune(self._backup_dir(inst), keep, protect={info.name})
+        if not was_running:
+            note = "The server was stopped, so the backup is consistent."
+        elif stop_first:
+            note = ("The server was running, so it was stopped for a consistent backup"
+                    + (" and has been started again." if restarted else "."))
+        else:
+            note = ("The server was running and was NOT stopped (live backup). Files being written during "
+                    "the backup may be inconsistent; prefer a stopped backup for anything important.")
+            if save_note:
+                note += " " + save_note
+        if removed:
+            note += f" Removed {len(removed)} old backup(s) to keep the newest {keep}."
+        return BackupResult(info, was_running, stop_first, restarted, was_running and live,
+                            tuple(removed), note, tuple(warnings))
 
     def restore_backup(self, server_id: str, name: str, confirm: bool = False) -> RestoreResult:
         """Replace a stopped server's data with a backup, after taking a safety backup of the current data."""
@@ -630,6 +723,8 @@ class GameDockService:
             if delete_data:
                 bk.remove_tree(self._data_dir_of(inst))  # on failure the server entry is kept so you can retry
             self.store.remove(inst.id)
+            self.schedules.remove(inst.id)
+            self._image_checks.pop(inst.id, None)
             if delete_data:
                 note = (f"Server deleted together with its data. A backup was saved at {backup.path}." if backup
                         else "Server deleted together with its (empty) data folder.")
@@ -658,41 +753,47 @@ class GameDockService:
                 raise ValidationError("Updating needs explicit confirmation (confirm=true)")
             if t.update_method == "none":
                 raise ValidationError(f"{t.name} does not support image updates from GameDock")
-            cname = container_name(inst.id)
-            was_running = self._is_running(inst)
-            before = self.backend.get_container_image_id(cname)
-            self.backend.pull_image(t.image)  # nothing has been touched yet if this fails
-            newest = self.backend.get_image_id(t.image)
-            if before is not None and newest is not None and before == newest:
-                return UpdateResult(t.image, before, before, False, was_running, False, None,
-                                    "Already up to date. Nothing was changed.")
-            stopped = False
-            if was_running:
-                self._stop(inst)
-                stopped = True
-            try:
-                backup = self._safety_backup(inst, "pre-update")
-            except BaseException:
-                if stopped:
-                    try:
-                        self._start(inst)
-                    except GameDockError:
-                        pass
-                raise  # no backup, no update
-            self.backend.remove(cname)
-            self.backend.create(self._spec(inst))
-            after = self.backend.get_container_image_id(cname)
-            warnings: list[str] = []
-            restarted = False
-            if was_running:
+            result = self._update_image_locked(inst, t)
+            self._image_checks[inst.id] = ImageCheck(time.time(), False, "Up to date.")
+            return result
+
+    def _update_image_locked(self, inst: Instance, t: CatalogEntry) -> UpdateResult:
+        """The image update itself; the caller holds the server's operation lock."""
+        cname = container_name(inst.id)
+        was_running = self._is_running(inst)
+        before = self.backend.get_container_image_id(cname)
+        self.backend.pull_image(t.image)  # nothing has been touched yet if this fails
+        newest = self.backend.get_image_id(t.image)
+        if before is not None and newest is not None and before == newest:
+            return UpdateResult(t.image, before, before, False, was_running, False, None,
+                                "Already up to date. Nothing was changed.")
+        stopped = False
+        if was_running:
+            self._stop(inst)
+            stopped = True
+        try:
+            backup = self._safety_backup(inst, "pre-update")
+        except BaseException:
+            if stopped:
                 try:
-                    self.backend.start(cname)
-                    restarted = True
-                except GameDockError as e:
-                    warnings.append(f"Updated, but the server could not be started again: {e}")
-            note = (f"Updated to the newest image. Data was backed up first as '{backup.name}'."
-                    + (" The server was restarted." if restarted else ""))
-            return UpdateResult(t.image, before, after, True, was_running, restarted, backup, note, tuple(warnings))
+                    self._start(inst)
+                except GameDockError:
+                    pass
+            raise  # no backup, no update
+        self.backend.remove(cname)
+        self.backend.create(self._spec(inst))
+        after = self.backend.get_container_image_id(cname)
+        warnings: list[str] = []
+        restarted = False
+        if was_running:
+            try:
+                self.backend.start(cname)
+                restarted = True
+            except GameDockError as e:
+                warnings.append(f"Updated, but the server could not be started again: {e}")
+        note = (f"Updated to the newest image. Data was backed up first as '{backup.name}'."
+                + (" The server was restarted." if restarted else ""))
+        return UpdateResult(t.image, before, after, True, was_running, restarted, backup, note, tuple(warnings))
 
     # ------------------------------------------------------------ config files
     def _config_file(self, inst: Instance, path: str) -> ConfigFile:
@@ -932,3 +1033,437 @@ class GameDockService:
         cutoff = self._clock().timestamp() - w
         return ({k: StatsHistory(k, self.stats_interval, w, self._points(v, w)) for k, v in rings.items()},
                 [p for p in host if p[0] >= cutoff])
+
+    # ------------------------------------------------------------ freezing (self-update)
+    def freeze(self, reason: str) -> None:
+        """Refuse new actions and scheduled runs, but only if nothing is running right now (raises BusyError with the
+        list of what is). Used by the GameDock self-update just before it restarts GameDock."""
+        with self._locks_guard:
+            work = self._busy_work_unlocked()
+            if work:
+                raise BusyError("GameDock cannot update while it is busy (" + "; ".join(work) + "). "
+                                "Wait for that to finish and try again.")
+            self._frozen = reason
+
+    def unfreeze(self) -> None:
+        with self._locks_guard:
+            self._frozen = ""
+
+    def _busy_work_unlocked(self) -> list[str]:
+        work = [f"{sid}: {self._activity.get(sid) or 'working'}" for sid, lk in self._locks.items() if lk.locked()]
+        work += [f"{sid}: deploying" for sid in self._pending if not any(w.startswith(sid + ":") for w in work)]
+        with self._jobs_lock:
+            work += [f"{sid}: scheduled {kind}" for sid, kind in sorted(self._jobs_running)
+                     if not any(w.startswith(sid + ":") for w in work)]
+        return work
+
+    def busy_work(self) -> list[str]:
+        with self._locks_guard:
+            return self._busy_work_unlocked()
+
+    # ------------------------------------------------------------ image update check
+    def get_image_update_status(self, server_id: str) -> dict:
+        """What is known about a newer image, without asking the registry (cached answer, may be empty)."""
+        inst = self._instance(server_id)
+        return self._image_status(inst, self._image_checks.get(inst.id))
+
+    def _image_status(self, inst: Instance, chk: ImageCheck | None, cached: bool = True) -> dict:
+        t = self._with_current_hints(inst, self._template(inst))
+        if t.update_method == "none":
+            return {"server_id": inst.id, "supported": False, "update_available": None, "checked_at": None,
+                    "message": f"{t.name} updates its game files inside the container, so there is no image update to "
+                               "check for.", "update_note": t.update_note, "cached": cached}
+        return {"server_id": inst.id, "supported": True,
+                "update_available": chk.available if chk else None,
+                "checked_at": sch.iso(datetime.fromtimestamp(chk.checked_at, timezone.utc)) if chk else None,
+                "message": chk.message if chk else "Not checked yet.", "failed": bool(chk and chk.failed),
+                "update_note": t.update_note, "cached": cached}
+
+    def check_image_update(self, server_id: str, force: bool = False) -> dict:
+        """Ask the registry whether the image has a newer version than the one this server's container was made from.
+        Nothing is downloaded. The answer is kept for hours; `force` (the Check now button) asks again, but not more
+        than once every 30 seconds per server. Never raises for network trouble: the answer says it could not tell."""
+        inst = self._instance(server_id)
+        t = self._template(inst)
+        if t.update_method == "none":
+            return self._image_status(inst, None, cached=False)
+        with self._image_check_lock:
+            chk = self._image_checks.get(inst.id)
+            now = time.time()
+            if chk:
+                age = now - chk.checked_at
+                if age < (IMAGE_CHECK_GAP if force else (IMAGE_CHECK_RETRY if chk.failed else IMAGE_CHECK_TTL)):
+                    return self._image_status(inst, chk, cached=True)
+            chk = self._ask_registry(inst, t, now)
+            self._image_checks[inst.id] = chk
+            return self._image_status(inst, chk, cached=False)
+
+    def _ask_registry(self, inst: Instance, t: CatalogEntry, now: float) -> ImageCheck:
+        try:
+            remote = self.backend.remote_image_digest(t.image)
+        except BackendError as e:
+            return ImageCheck(now, None, str(e), failed=True)
+        if not remote:
+            return ImageCheck(now, None, "The registry did not report a version for this image, so GameDock cannot tell.")
+        try:
+            ref = self.backend.get_container_image_id(container_name(inst.id)) or t.image
+            local = self.backend.local_image_digests(ref)
+        except BackendError as e:
+            return ImageCheck(now, None, str(e), failed=True)
+        if not local:
+            return ImageCheck(now, None, "The image on this machine has no registry record (for example it was built "
+                                         "here), so GameDock cannot compare it.")
+        if remote in local:
+            return ImageCheck(now, False, "This server runs the newest image.")
+        return ImageCheck(now, True, "A newer image is available in the registry.")
+
+    def check_image_updates_due(self, limit: int = 1) -> int:
+        """Background helper: ask the registry about at most `limit` servers whose answer is missing or old."""
+        done = 0
+        for inst in self.store.all():
+            if done >= limit:
+                break
+            try:
+                if self._template(inst).update_method == "none":
+                    continue
+                chk = self._image_checks.get(inst.id)
+                wait = IMAGE_CHECK_RETRY if chk and chk.failed else IMAGE_CHECK_TTL
+                if chk and time.time() - chk.checked_at < wait:
+                    continue
+                self.check_image_update(inst.id)
+                done += 1
+            except GameDockError:
+                continue
+        return done
+
+    # ------------------------------------------------------------ schedules (view and change)
+    def _now(self) -> datetime:
+        return self._clock().astimezone(timezone.utc)
+
+    def _next_of(self, rule: sch.Recurrence, enabled: bool, state: sch.RunState) -> datetime | None:
+        return sch.next_due(rule, state, self.tz) if enabled else None
+
+    def _schedule_overview(self, server_id: str) -> dict:
+        s = self.schedules.get(server_id)
+        nb = self._next_of(s.backup.rule, s.backup.enabled, s.backup.state)
+        nm = self._next_of(s.maintenance.rule, s.maintenance.enabled, s.maintenance.state)
+        nxt, kind = (nb, "backup") if nb and (not nm or nb <= nm) else ((nm, "maintenance") if nm else (None, ""))
+        return {"backup": sch.describe(s.backup.rule) if s.backup.enabled else "",
+                "maintenance": sch.describe(s.maintenance.rule) if s.maintenance.enabled else "",
+                "next_run": sch.iso(nxt), "next_kind": kind,
+                "last_problem": bool(s.history and s.history[0].result == "failed")}
+
+    def timezone_info(self) -> dict:
+        off = self._now().astimezone(self.tz) if self.tz else self._now().astimezone()
+        delta = off.utcoffset() or timedelta(0)
+        mins = int(delta.total_seconds() // 60)
+        sign = "+" if mins >= 0 else "-"
+        return {"name": self.tz_name, "utc_offset": f"UTC{sign}{abs(mins) // 60:02d}:{abs(mins) % 60:02d}"}
+
+    def _rule_view(self, rule: sch.Recurrence) -> dict:
+        return {"frequency": rule.kind, "every_hours": rule.every_hours or None,
+                "time": rule.time or None, "days": list(rule.days)}
+
+    def get_server_schedules(self, server_id: str) -> dict:
+        inst = self._instance(server_id)
+        t = self._with_current_hints(inst, self._template(inst))
+        s = self.schedules.get(inst.id)
+        b, m = s.backup, s.maintenance
+
+        def run_info(state: sch.RunState, nxt: datetime | None) -> dict:
+            return {"last_run": state.last_run or None, "last_result": state.last_result or None,
+                    "last_message": state.last_message, "next_run": sch.iso(nxt)}
+
+        return {
+            "server_id": inst.id, "server_name": inst.name, "timezone": self.timezone_info(),
+            "backup": {
+                "enabled": b.enabled, **self._rule_view(b.rule), "retention": b.retention,
+                "retention_in_use": b.retention or self.backup_retention,
+                "summary": sch.describe(b.rule) if b.enabled else "off",
+                **run_info(b.state, self._next_of(b.rule, b.enabled, b.state)),
+                "how": ("The game is stopped briefly for each scheduled backup." if t.backup_stop_first else
+                        "A running server is copied while it runs (players stay connected)"
+                        + (", after asking the game to save." if t.save_command else ".")),
+            },
+            "maintenance": {
+                "enabled": m.enabled, **self._rule_view(m.rule), "backup_first": m.backup_first,
+                "update_image": m.update_image, "restart": m.restart,
+                "summary": sch.describe(m.rule) if m.enabled else "off",
+                "image_update_supported": t.update_method != "none",
+                "only_when_empty": {"available": False, "reason": ONLY_WHEN_EMPTY_REASON},
+                **run_info(m.state, self._next_of(m.rule, m.enabled, m.state)),
+            },
+            "history": [h.__dict__ for h in s.history],
+            "overview": self._schedule_overview(inst.id),
+        }
+
+    def list_schedules(self) -> dict:
+        return {"timezone": self.timezone_info(), "problem": self.schedules.problem,
+                "servers": [self.get_server_schedules(i.id) for i in self.store.all()]}
+
+    def set_backup_schedule(self, server_id: str, enabled: bool, frequency: str | None = None,
+                            every_hours: int | None = None, time_of_day: str | None = None,
+                            days: list[str] | None = None, retention: int | None = None) -> dict:
+        """Create or change a server's backup schedule. Switching it off keeps the settings for later. Does not run
+        anything now and cannot lose data, so it is allowed to AI agents in standard mode."""
+        inst = self._instance(server_id)
+        if not isinstance(enabled, bool):
+            raise ValidationError("'enabled' must be true or false")
+        current = self.schedules.get(inst.id).backup
+        if enabled and frequency is None and not current.state.since:
+            raise ValidationError("Choose how often to back up: frequency 'interval' (every N hours), 'daily' or 'weekly'.")
+        if frequency is None and enabled:
+            rule, keep = current.rule, current.retention if retention is None else sch.validate_retention(retention)
+        elif frequency is None:   # switching off, nothing else changes
+            rule, keep = current.rule, current.retention
+        else:
+            rule = sch.validate_recurrence(frequency, every_hours, time_of_day, days, sch.BACKUP_KINDS)
+            keep = sch.validate_retention(retention)
+        now = sch.iso(self._now()) or ""
+
+        def change(s: sch.ServerSchedules) -> sch.ServerSchedules:
+            b = s.backup
+            restart_clock = enabled and (not b.enabled or rule != b.rule or not b.state.since)
+            state = replace(b.state, since=now) if restart_clock else b.state
+            return replace(s, backup=sch.BackupSchedule(enabled, rule, keep, state))
+
+        self.schedules.update(inst.id, change)
+        return self.get_server_schedules(inst.id)
+
+    def set_maintenance_schedule(self, server_id: str, enabled: bool, frequency: str | None = None,
+                                 time_of_day: str | None = None, days: list[str] | None = None,
+                                 backup_first: bool = True, update_image: bool = True, restart: bool = True) -> dict:
+        """Create or change a server's maintenance schedule (back up, apply an image update, restart). Switching it off
+        keeps the settings. Only the schedule changes; nothing runs now."""
+        inst = self._instance(server_id)
+        t = self._with_current_hints(inst, self._template(inst))
+        if not isinstance(enabled, bool):
+            raise ValidationError("'enabled' must be true or false")
+        for name, v in (("backup_first", backup_first), ("update_image", update_image), ("restart", restart)):
+            if not isinstance(v, bool):
+                raise ValidationError(f"'{name}' must be true or false")
+        current = self.schedules.get(inst.id).maintenance
+        if enabled and frequency is None and not current.state.since:
+            raise ValidationError("Choose when to run maintenance: frequency 'daily' or 'weekly' with a time.")
+        if frequency is None:
+            # no new frequency: keep the stored rule and options (switching on or off, or reusing the old settings)
+            rule = current.rule
+            backup_first, update_image, restart = current.backup_first, current.update_image, current.restart
+        else:
+            rule = sch.validate_recurrence(frequency, None, time_of_day, days, sch.MAINTENANCE_KINDS)
+        if enabled:
+            if not (backup_first or update_image or restart):
+                raise ValidationError("Choose at least one thing for maintenance to do: back up, update the image or restart.")
+            if update_image and t.update_method == "none":
+                raise ValidationError(f"{t.name} updates its game files inside the container, so there is no image update "
+                                      "to apply. Turn 'update the image' off (restarting is how this game updates).")
+        now = sch.iso(self._now()) or ""
+
+        def change(s: sch.ServerSchedules) -> sch.ServerSchedules:
+            m = s.maintenance
+            restart_clock = enabled and (not m.enabled or rule != m.rule or not m.state.since)
+            state = replace(m.state, since=now) if restart_clock else m.state
+            return replace(s, maintenance=sch.MaintenanceSchedule(enabled, rule, backup_first, update_image, restart, state))
+
+        self.schedules.update(inst.id, change)
+        return self.get_server_schedules(inst.id)
+
+    # ------------------------------------------------------------ schedules (running)
+    def _audit(self, tool: str, args: dict, status: str, detail: str) -> None:
+        hook = self.audit_hook
+        if hook:
+            try:
+                hook(tool, args, status, detail)
+            except Exception:  # noqa: BLE001 - auditing must never break a job
+                log.exception("could not write the audit entry for %s", tool)
+
+    def _record_run(self, server_id: str, kind: str, trigger: str, result: str, message: str, started: datetime) -> None:
+        """Remember how a run went: state of the schedule, the history list, the log and the audit file."""
+        message = " ".join(message.split())[:500]
+        entry = sch.HistoryEntry(sch.iso(started) or "", kind, trigger, result, message)
+
+        def change(s: sch.ServerSchedules) -> sch.ServerSchedules:
+            state_of = s.backup if kind == "backup" else s.maintenance
+            st = replace(state_of.state, last_run=sch.iso(started) or "", last_result=result, last_message=message)
+            s = replace(s, **{kind: replace(state_of, state=st)})
+            return sch.with_history(s, entry)
+
+        self.schedules.update(server_id, change)
+        (log.error if result == "failed" else log.info)("Scheduled %s of '%s' (%s): %s - %s", kind, server_id, trigger, result, message)
+        self._audit(f"scheduled_{kind}" if trigger != "manual" else f"{kind}_run_now",
+                    {"server_id": server_id, "trigger": trigger}, "ok" if result in ("ok", "skipped") else "error", message)
+
+    def run_schedule_now(self, server_id: str, kind: str, confirm: bool = False) -> dict:
+        """Run a server's scheduled backup or maintenance right now (the "Run now" button). Needs confirm=true because
+        maintenance restarts the game. Uses the settings stored for the schedule, switched on or not."""
+        inst = self._instance(server_id)
+        if kind not in ("backup", "maintenance"):
+            raise ValidationError("kind must be 'backup' or 'maintenance'")
+        if not confirm:
+            raise ValidationError("Running it now needs explicit confirmation (confirm=true)")
+        if kind == "maintenance":
+            m = self.schedules.get(inst.id).maintenance
+            if not (m.backup_first or m.update_image or m.restart):
+                raise ValidationError("Maintenance has nothing to do: choose back up, update the image or restart first.")
+        result, message = self._execute(inst, kind, "manual", self._now(), raise_failures=True)
+        return {"server_id": inst.id, "kind": kind, "result": result, "message": message}
+
+    def _execute(self, inst: Instance, kind: str, trigger: str, started: datetime, raise_failures: bool = False,
+                 ) -> tuple[str, str]:
+        """Run one job. A server that is busy raises BusyError (nothing is recorded). Anything else is recorded."""
+        try:
+            if kind == "backup":
+                result, message = self._job_backup(inst)
+            else:
+                result, message = self._job_maintenance(inst)
+        except BusyError:
+            raise
+        except GameDockError as e:
+            self._record_run(inst.id, kind, trigger, "failed", str(e), started)
+            if raise_failures:
+                raise
+            return "failed", str(e)
+        except Exception as e:  # noqa: BLE001 - a scheduled job must never kill the scheduler
+            log.exception("scheduled %s of '%s' crashed", kind, inst.id)
+            msg = f"Unexpected error: {e}"
+            self._record_run(inst.id, kind, trigger, "failed", msg, started)
+            if raise_failures:
+                raise
+            return "failed", msg
+        self._record_run(inst.id, kind, trigger, result, message, started)
+        return result, message
+
+    def _job_backup(self, inst: Instance) -> tuple[str, str]:
+        with self._operation(inst.id, "backing up"):
+            t = self._with_current_hints(inst, self._template(inst))
+            files, _, _ = bk.folder_usage(self._data_dir_of(inst))
+            if files == 0:
+                return "skipped", "Nothing to back up yet: the server's data folder has no files."
+            r = self._backup_locked(inst, live=not t.backup_stop_first, kind="scheduled")
+            extra = (" " + " ".join(r.warnings)) if r.warnings else ""
+            return ("failed" if r.warnings else "ok"), f"Saved backup {r.backup.name}. {r.note}{extra}"
+
+    def _job_maintenance(self, inst: Instance) -> tuple[str, str]:
+        with self._operation(inst.id, "maintenance"):
+            t = self._with_current_hints(inst, self._template(inst))
+            m = self.schedules.get(inst.id).maintenance
+            cname = container_name(inst.id)
+            was_running = self._is_running(inst)
+            notes: list[str] = []
+            problems: list[str] = []
+            changed = False
+            if m.update_image and t.update_method != "none":
+                try:
+                    before = self.backend.get_container_image_id(cname)
+                    self.backend.pull_image(t.image)
+                    newest = self.backend.get_image_id(t.image)
+                    changed = before is not None and newest is not None and before != newest
+                    notes.append("A newer image was downloaded." if changed else "The image was already the newest.")
+                except GameDockError as e:
+                    problems.append(f"The image update could not be checked ({e}); the other steps were still done.")
+            will_stop = was_running and (m.restart or changed)
+            stopped = False
+            backed_up = False
+            try:
+                if m.backup_first and was_running and not will_stop:
+                    r = self._backup_locked(inst, live=not t.backup_stop_first, kind="pre-maintenance")
+                    backed_up = True
+                    notes.append(f"Backed up ({r.backup.name}).")
+                    problems.extend(r.warnings)
+                if will_stop:
+                    self._stop(inst)
+                    stopped = True
+                if (m.backup_first or changed) and not backed_up:
+                    if self._is_running(inst):
+                        raise ConflictError("The server is still running, so a consistent backup cannot be made.")
+                    files, _, _ = bk.folder_usage(self._data_dir_of(inst))
+                    if files:
+                        info = self._safety_backup(inst, "pre-maintenance" if m.backup_first else "pre-update")
+                        notes.append(f"Backed up ({info.name}).")
+                    else:
+                        notes.append("No files to back up yet.")
+                if changed:
+                    self.backend.remove(cname)
+                    self.backend.create(self._spec(inst))
+                    notes.append("The server now uses the new image.")
+            except GameDockError as e:
+                problems.append(f"{e} Maintenance stopped before changing anything further.")
+                changed = False
+            if stopped:
+                try:
+                    self._start(inst)
+                    notes.append("The server was restarted.")
+                except GameDockError as e:
+                    problems.append(f"The server could not be started again: {e}")
+            elif m.restart and not was_running:
+                notes.append("The server was not running, so it was left stopped.")
+            if m.update_image and t.update_method != "none":
+                self._image_checks.pop(inst.id, None)  # the badge is worked out afresh by the next check
+            msg = " ".join([*notes, *problems]) or "Nothing to do."
+            return ("failed" if problems else "ok"), msg
+
+    def due_jobs(self, now: datetime | None = None) -> list[tuple[str, str, datetime]]:
+        """(server id, kind, the time it was due) for every enabled schedule that is due at `now`."""
+        now = now or self._now()
+        out = []
+        ids = {i.id for i in self.store.all()}
+        for sid, s in self.schedules.all().items():
+            if sid not in ids:
+                continue
+            for kind, sched in (("backup", s.backup), ("maintenance", s.maintenance)):
+                if not sched.enabled:
+                    continue
+                due = sch.next_due(sched.rule, sched.state, self.tz)
+                if due and due <= now:
+                    out.append((sid, kind, due))
+        return out
+
+    def process_schedules(self, now: datetime | None = None, spawn: Callable[[Callable[[], None]], None] | None = None) -> int:
+        """One scheduler tick: start every due job (each in its own thread unless `spawn` says otherwise). A job whose
+        server is busy waits and is tried again at the next tick. Returns how many jobs were started."""
+        now = now or self._now()
+        if self._frozen:
+            return 0
+        spawn = spawn or (lambda fn: threading.Thread(target=fn, name="gamedock-job", daemon=True).start())
+        started = 0
+        for sid, kind, due in self.due_jobs(now):
+            key = (sid, kind)
+            with self._jobs_lock:
+                if key in self._jobs_running:
+                    continue
+                self._jobs_running.add(key)
+            started += 1
+            spawn(lambda sid=sid, kind=kind, due=due: self._scheduled_job(sid, kind, due, now))
+        return started
+
+    def _scheduled_job(self, sid: str, kind: str, due: datetime, now: datetime) -> None:
+        key = (sid, kind)
+        try:
+            inst = self.store.get(sid)
+            if inst is None:
+                return
+            late = (now - due).total_seconds()
+            if kind == "maintenance" and late > MAINTENANCE_CATCHUP_SECONDS:
+                hours = int(late // 3600)
+                self._waiting_since.pop(key, None)
+                self._record_run(sid, kind, "catch-up", "skipped",
+                                 f"Maintenance was due {hours} hours ago while GameDock was not running. It was skipped "
+                                 "so the game is not restarted at an unexpected time. The next one runs as scheduled.", now)
+                return
+            trigger = "catch-up" if late > SCHEDULE_TICK_GRACE else "schedule"
+            try:
+                self._execute(inst, kind, trigger, now)
+                self._waiting_since.pop(key, None)
+            except BusyError:
+                first = self._waiting_since.setdefault(key, time.monotonic())
+                if time.monotonic() - first > BUSY_GIVE_UP_SECONDS:
+                    self._waiting_since.pop(key, None)
+                    self._record_run(sid, kind, trigger, "skipped",
+                                     "The server stayed busy for two hours, so this run was skipped.", now)
+                else:
+                    log.info("Scheduled %s of '%s' waits: the server is busy", kind, sid)
+        except Exception:  # noqa: BLE001
+            log.exception("scheduled %s of '%s' failed", kind, sid)
+        finally:
+            with self._jobs_lock:
+                self._jobs_running.discard(key)

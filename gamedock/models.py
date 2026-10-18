@@ -94,6 +94,10 @@ class CatalogEntry:
     # is up" from "the game can be joined": see gamedock/readiness.py.
     ready_log_pattern: str = ""      # a log line that appears once the game accepts players
     progress_log_pattern: str = ""   # regex with ONE capture group giving a percentage (first-start downloads)
+    # Optional hints for updates and scheduled backups.
+    update_note: str = ""            # plain-language note shown with the update button (how this game really updates)
+    backup_stop_first: bool = False  # True = scheduled backups stop the game briefly instead of copying it while it runs
+    save_command: tuple[str, ...] = ()  # command run inside the container (no shell) to make the game save before a live backup
 
 
 @dataclass
@@ -157,6 +161,13 @@ class ServerInfo:
     ready: bool = False
     progress: float | None = None   # 0-100 while phase is "installing" and the log shows a percentage
     phase_detail: str = ""    # plain-language sentence for the phase
+    # Newer image in the registry? None = unknown (never checked, offline, game updates itself, locally built image).
+    update_available: bool | None = None
+    update_checked_at: str = ""
+    update_note: str = ""
+    # Short schedule overview for the tile: {"backup": "daily 03:00", "maintenance": "Sun 04:00", "next_run": iso|None,
+    # "next_kind": "backup"|"maintenance"|""}. Empty strings mean no schedule.
+    schedule: dict = field(default_factory=dict)
 
 
 # ----------------------------------------------------------------------- operation results

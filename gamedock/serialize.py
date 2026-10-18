@@ -19,7 +19,8 @@ def catalog_to_dict(e: CatalogEntry) -> dict:
     return {
         "id": e.id, "name": e.name, "image": e.image, "description": e.description, "notes": e.notes,
         "ports": [asdict(p) for p in e.ports],
-        "update_method": e.update_method,
+        "update_method": e.update_method, "update_note": e.update_note,
+        "backup_stop_first": e.backup_stop_first, "save_command": list(e.save_command),
         "ready_log_pattern": e.ready_log_pattern, "progress_log_pattern": e.progress_log_pattern,
         "config_files": [{"path": c.path, "label": c.label, "format": c.format, "hot_edit": c.hot_edit,
                           "note": c.note} for c in e.config_files],

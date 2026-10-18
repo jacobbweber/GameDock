@@ -11,7 +11,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.routing import Route
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool, StrictInt
+from typing import Literal
 
 from .. import __version__
 from ..errors import (
@@ -66,6 +67,25 @@ class UpdateIn(BaseModel):
     env: dict[str, str] | None = None
 
 
+class BackupScheduleIn(BaseModel):
+    enabled: StrictBool
+    frequency: Literal["interval", "daily", "weekly"] | None = None
+    every_hours: StrictInt | None = None
+    time: str | None = None
+    days: list[str] | None = None
+    retention: StrictInt | None = None
+
+
+class MaintenanceScheduleIn(BaseModel):
+    enabled: StrictBool
+    frequency: Literal["daily", "weekly"] | None = None
+    time: str | None = None
+    days: list[str] | None = None
+    backup_first: StrictBool = True
+    update_image: StrictBool = True
+    restart: StrictBool = True
+
+
 def _ports(items: list[PortIn] | None) -> list[PortMapping] | None:
     if items is None:
         return None
@@ -79,21 +99,29 @@ def _is_loopback(host: str | None) -> bool:
 def create_app(service: GameDockService, sampler=None, metrics_enabled: bool = False,
                metrics_allow_remote: bool = False, mcp_config: McpConfig | None = None,
                mcp_confirmations: ConfirmationStore | None = None,
-               allowed_host_patterns: list[str] | None = None, settings: Settings | None = None) -> FastAPI:
+               allowed_host_patterns: list[str] | None = None, settings: Settings | None = None,
+               scheduler=None) -> FastAPI:
     """`sampler` (optional) is started and stopped with the app. /metrics exists only if metrics_enabled.
     /mcp is served only if mcp_config asks for a mode other than "off".
     `allowed_host_patterns` (optional) restricts the Host header of web/API requests, which stops DNS-rebinding
     attacks from web pages (None = no restriction; /mcp has its own check)."""
     mcp = build_mcp(service, mcp_config, mcp_confirmations)
+    # scheduled runs are written to the same audit file as MCP calls (the "client" says why it ran)
+    service.audit_hook = lambda tool, args, status, detail: mcp.audit.record(tool, args, status, detail,
+                                                                          str(args.get("trigger") or "schedule"))
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         if sampler:
             sampler.start()
+        if scheduler:
+            scheduler.start()
         try:
             async with mcp.lifespan():
                 yield
         finally:
+            if scheduler:
+                scheduler.stop()
             if sampler:
                 sampler.stop()
 
@@ -113,6 +141,7 @@ def create_app(service: GameDockService, sampler=None, metrics_enabled: bool = F
         response.headers.setdefault("X-Frame-Options", "DENY")  # nobody can frame the UI to trick a click
         response.headers.setdefault("Referrer-Policy", "no-referrer")
         if request.url.path in ("/", "/index.html") or request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-cache"  # always revalidate, so a new version shows after an update
             response.headers.setdefault(
                 "Content-Security-Policy",
                 "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
@@ -173,13 +202,32 @@ def create_app(service: GameDockService, sampler=None, metrics_enabled: bool = F
     def health():
         return {"ok": True, "version": __version__}
 
+    # ---- GameDock's own version and update
+    @app.get("/api/version")
+    def version_info():
+        """Version, commit and what is known about a newer GameDock (never contacts the network)."""
+        return service.updater.status()
+
+    @app.post("/api/gamedock/update-check")
+    def check_for_gamedock_update():
+        """The Check now button: asks GitHub (read-only). Offline is not an error; the answer says so."""
+        return service.updater.check(force=True)
+
+    @app.post("/api/gamedock/update")
+    def update_gamedock(confirm: bool = False):
+        """Pull the newest GameDock (git pull --ff-only) and restart GameDock only. Web only, never an MCP tool."""
+        if not confirm:
+            raise GameDockError("Updating GameDock needs explicit confirmation (confirm=true)")
+        return service.updater.apply(service.freeze, service.unfreeze)
+
     @app.get("/api/status")
     def status():
         """Cheap summary for the banner at the top of the UI (Docker reachable? catalog problems?)."""
         d = service.docker_status()
         fake = settings is not None and settings.backend == "fake"
         service.list_catalog()  # refreshes service.catalog_problems
-        return {"version": __version__, "docker": {"ok": d.reachable, "kind": d.kind, "message": d.message,
+        return {"version": __version__, "update_available": service.updater.status()["update_available"],
+                "docker": {"ok": d.reachable, "kind": d.kind, "message": d.message,
                                                    "version": d.server_version, "fake": fake},
                 "catalog_problems": [{"file": f, "problem": p} for f, p in service.catalog_problems]}
 
@@ -244,6 +292,40 @@ def create_app(service: GameDockService, sampler=None, metrics_enabled: bool = F
     @app.post("/api/servers/{server_id}/update-image")
     def update_image(server_id: str, confirm: bool = False):
         return asdict(service.update_server_image(server_id, confirm))
+
+    @app.get("/api/servers/{server_id}/image-update")
+    def image_update_status(server_id: str):
+        """What is known about a newer game image (cached; asks nothing)."""
+        return service.get_image_update_status(server_id)
+
+    @app.post("/api/servers/{server_id}/image-update/check")
+    def image_update_check(server_id: str):
+        """The server's Check now button: asks the registry (nothing is downloaded)."""
+        return service.check_image_update(server_id, force=True)
+
+    # ---- schedules
+    @app.get("/api/schedules")
+    def all_schedules():
+        return service.list_schedules()
+
+    @app.get("/api/servers/{server_id}/schedules")
+    def server_schedules(server_id: str):
+        return service.get_server_schedules(server_id)
+
+    @app.put("/api/servers/{server_id}/schedules/backup")
+    def put_backup_schedule(server_id: str, body: BackupScheduleIn):
+        return service.set_backup_schedule(server_id, body.enabled, body.frequency, body.every_hours, body.time,
+                                           body.days, body.retention)
+
+    @app.put("/api/servers/{server_id}/schedules/maintenance")
+    def put_maintenance_schedule(server_id: str, body: MaintenanceScheduleIn):
+        return service.set_maintenance_schedule(server_id, body.enabled, body.frequency, body.time, body.days,
+                                                body.backup_first, body.update_image, body.restart)
+
+    @app.post("/api/servers/{server_id}/schedules/{kind}/run")
+    def run_schedule(server_id: str, kind: str, confirm: bool = False):
+        """The Run now button for a schedule (kind: backup or maintenance)."""
+        return service.run_schedule_now(server_id, kind, confirm)
 
     # ---- logs
     @app.get("/api/servers/{server_id}/logs")

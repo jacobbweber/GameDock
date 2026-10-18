@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 from pathlib import Path, PurePosixPath
 
 import yaml
@@ -85,6 +86,21 @@ def _parse_pattern(value: object, name: str, source: str, groups: int | None) ->
     return value
 
 
+def _parse_save_command(value: object, source: str) -> tuple[str, ...]:
+    """A command (list of words, run without a shell) that asks the game to save, run before a live backup."""
+    if value is None or value == "" or value == []:
+        return ()
+    if isinstance(value, str):
+        try:
+            value = shlex.split(value)
+        except ValueError as e:
+            raise CatalogError(f"{source}: save_command is not valid: {e}") from e
+    if (not isinstance(value, list) or not 1 <= len(value) <= 12
+            or not all(isinstance(w, str) and w and len(w) <= 300 and not any(c in w for c in "\n\r\0") for w in value)):
+        raise CatalogError(f"{source}: save_command must be a short list of words, for example [rcon-cli, save]")
+    return tuple(value)
+
+
 def parse_definition(data: object, source: str = "<definition>") -> CatalogEntry:
     if not isinstance(data, dict):
         raise CatalogError(f"{source}: expected a mapping at top level")
@@ -147,6 +163,12 @@ def parse_definition(data: object, source: str = "<definition>") -> CatalogEntry
     ready_pattern = _parse_pattern(data.get("ready_log_pattern"), "ready_log_pattern", source, groups=None)
     progress_pattern = _parse_pattern(data.get("progress_log_pattern"), "progress_log_pattern", source, groups=1)
 
+    update_note = str(data.get("update_note") or "").strip()
+    stop_first = data.get("backup_stop_first", False)
+    if not isinstance(stop_first, bool):
+        raise CatalogError(f"{source}: backup_stop_first must be true or false")
+    save_command = _parse_save_command(data.get("save_command"), source)
+
     return CatalogEntry(
         id=gid,
         name=data["name"],
@@ -161,6 +183,9 @@ def parse_definition(data: object, source: str = "<definition>") -> CatalogEntry
         config_files=tuple(config_files),
         ready_log_pattern=ready_pattern,
         progress_log_pattern=progress_pattern,
+        update_note=update_note,
+        backup_stop_first=stop_first,
+        save_command=save_command,
     )
 
 
@@ -175,6 +200,9 @@ def entry_to_dict(e: CatalogEntry) -> dict:
         "update_method": e.update_method,
         "ready_log_pattern": e.ready_log_pattern,
         "progress_log_pattern": e.progress_log_pattern,
+        "update_note": e.update_note,
+        "backup_stop_first": e.backup_stop_first,
+        "save_command": list(e.save_command),
         "config_files": [
             {"path": c.path, "label": c.label, "format": c.format,
              "sensitive_keys": list(c.sensitive_keys), "hot_edit": c.hot_edit, "note": c.note}

@@ -19,7 +19,7 @@ from pathlib import Path, PurePosixPath
 
 from .errors import AccessError, OperationError, ValidationError
 
-KINDS = ("pre-restore", "pre-update", "pre-wipe", "pre-delete")
+KINDS = ("pre-restore", "pre-update", "pre-wipe", "pre-delete", "pre-maintenance", "scheduled")
 NAME_RE = re.compile(
     r"^(?P<prefix>.+)-(?P<ts>\d{8}-\d{6})(?:-(?P<kind>" + "|".join(KINDS) + r"))?(?:-(?P<n>\d+))?\.tar\.gz$"
 )

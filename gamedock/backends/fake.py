@@ -28,6 +28,8 @@ class FakeBackend:
         self.fail_next: str | None = None  # set to an action name to make it raise once
         self.health: dict[str, str] = {}   # container name -> "" | starting | healthy | unhealthy (pretend health check)
         self._logs: dict[str, list[str]] = {}
+        self.offline = False                # True = the pretend registry cannot be reached
+        self.exec_log: list[tuple[str, list[str]]] = []  # (container, command) of every exec_in
         self.delays: dict[str, float] = {}  # action name -> seconds to wait (demos: make create/stop look slow)
 
     def _pause(self, action: str) -> None:
@@ -126,6 +128,32 @@ class FakeBackend:
             self.calls.append(("pull", image))
             self._maybe_fail("pull")
             self.local_images[image] = self.registry.setdefault(image, self._new_id())
+
+    def remote_image_digest(self, image: str) -> str | None:
+        with self._lock:
+            self.calls.append(("remote_digest", image))
+            self._maybe_fail("remote_digest")
+            if self.offline:
+                raise BackendError(f"Could not ask the registry about {image} (no internet). Are you online?")
+            return self.registry.get(image)
+
+    def local_image_digests(self, ref: str) -> tuple[str, ...]:
+        with self._lock:
+            known = set(self.local_images.values()) | set(self._container_image.values())
+            if ref in known:
+                return (ref,)
+            got = self.local_images.get(ref)
+            return (got,) if got else ()
+
+    def exec_in(self, name: str, argv: list[str], timeout: int = 60) -> str:
+        with self._lock:
+            self.calls.append(("exec", name))
+            self._maybe_fail("exec")
+            entry = self._containers.get(name)
+            if entry is None or entry[1] != Status.RUNNING:
+                raise BackendError(f"The container '{name}' is not running, so a command cannot be run in it.")
+            self.exec_log.append((name, list(argv)))
+            return "ok\n"
 
     def get_image_id(self, image: str) -> str | None:
         return self.local_images.get(image)

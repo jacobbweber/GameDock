@@ -60,6 +60,17 @@ class ContainerBackend(Protocol):
         """The last `tail` lines the container wrote (stdout and stderr merged, oldest first), optionally only those
         since `since` (an RFC 3339 time as in ContainerState.started_at). Empty text if there is nothing yet."""
 
+    def remote_image_digest(self, image: str) -> str | None:
+        """Digest the registry currently serves for `image` (looked up WITHOUT downloading the image), or None if the
+        registry did not say. Raises BackendError, with a plain sentence, when the registry cannot be asked."""
+
+    def local_image_digests(self, ref: str) -> tuple[str, ...]:
+        """Registry digests recorded for a locally stored image (`ref` is an image name or an image id). Empty if
+        none are known (for example an image built on this machine)."""
+
+    def exec_in(self, name: str, argv: list[str], timeout: int = 60) -> str:
+        """Run a command (no shell) inside the running container and return what it printed. Raises BackendError."""
+
     def diagnose(self) -> DockerDiagnosis:
         """Check that the engine is installed and reachable. Must not raise."""
 

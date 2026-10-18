@@ -14,6 +14,10 @@ class ConflictError(GameDockError):
     """The request conflicts with current state, e.g. port in use (HTTP 409)."""
 
 
+class BusyError(ConflictError):
+    """Another action is already running on the server (or GameDock is about to restart). Try again shortly."""
+
+
 class BackendError(GameDockError):
     pass
 

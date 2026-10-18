@@ -5,6 +5,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .updates import parse_repo
+
 
 def load_dotenv(path: str | Path = ".env") -> None:
     """Tiny .env loader. Existing environment variables win."""
@@ -57,6 +59,10 @@ class Settings:
     mcp_token: str | None = field(default=None, repr=False)  # optional bearer token for /mcp; never logged
     mcp_allowed_hosts: tuple[str, ...] = ()  # extra Host header values accepted by /mcp (host or host:port)
     mcp_allowed_origins: tuple[str, ...] = ()  # extra Origin values accepted by /mcp
+    scheduler_enabled: bool = True   # run scheduled backups and maintenance (GAMEDOCK_SCHEDULER)
+    update_check: bool = True        # look on GitHub for a newer GameDock (GAMEDOCK_UPDATE_CHECK=false: never contact it)
+    update_repo: str = "jacobbweber/GameDock"   # GitHub repository checked for updates (GAMEDOCK_UPDATE_REPO)
+    self_update: bool = True         # show the Update GameDock button (GAMEDOCK_SELF_UPDATE=false hides it)
 
     def effective_mcp_mode(self) -> tuple[str, str]:
         """(mode actually used, plain-language reason if it differs from the configured mode).
@@ -89,4 +95,8 @@ class Settings:
             mcp_token=(env.get("GAMEDOCK_MCP_TOKEN") or "").strip() or None,
             mcp_allowed_hosts=_csv(env.get("GAMEDOCK_MCP_ALLOWED_HOSTS", "")),
             mcp_allowed_origins=_csv(env.get("GAMEDOCK_MCP_ALLOWED_ORIGINS", "")),
+            scheduler_enabled=_bool(env.get("GAMEDOCK_SCHEDULER", "true")),
+            update_check=_bool(env.get("GAMEDOCK_UPDATE_CHECK", "true")),
+            update_repo=parse_repo(env.get("GAMEDOCK_UPDATE_REPO", "jacobbweber/GameDock") or "jacobbweber/GameDock"),
+            self_update=_bool(env.get("GAMEDOCK_SELF_UPDATE", "true")),
         )
