@@ -1,16 +1,17 @@
 # GameDock
 
-A small, self-hosted game hosting manager for home use. Each game server runs in its own Docker container (SteamCMD and Wine based images work well). GameDock gives you a simple web dashboard to see and control them, and is built so a built-in MCP endpoint for AI agents can be added on top of the same service layer.
+A small, self-hosted game hosting manager for home use. Each game server runs in its own Docker container (SteamCMD and Wine based images work well). GameDock gives you a simple web dashboard to see and control them, and has a built-in MCP endpoint so AI agents can manage servers through the same service layer.
 
 GameDock is not tied to any particular machine or game: games are described by small YAML files in `catalog/`.
 
 ![Catalog](docs/gamedock-step2-catalog.png)
 ![Dashboard with live stats](docs/gamedock-step4-dashboard.png)
 ![Monitoring](docs/gamedock-step4-monitoring.png)
+![AI agents (MCP) page](docs/gamedock-step5-mcp.png)
 ![Backups](docs/gamedock-step3-backups.png)
 ![Config editor](docs/gamedock-step3-config.png)
 
-**Status:** step 4 of the plan. Browse a catalog of game templates, deploy servers (several of the same game can coexist on different ports), edit their settings, start / stop / restart, back up and restore their data, update their images, edit their config files, watch CPU / memory / network per game, and delete them safely. Planned next: the MCP endpoint.
+**Status:** step 5 of the plan. Browse a catalog of game templates, deploy servers (several of the same game can coexist on different ports), edit their settings, start / stop / restart, back up and restore their data, update their images, edit their config files, watch CPU / memory / network per game, delete them safely, and let AI agents do the same through MCP (`/mcp`).
 
 ## Concepts
 
@@ -50,6 +51,10 @@ GAMEDOCK_BACKEND=fake python -m gamedock
 | `GAMEDOCK_STATS_HISTORY_SECONDS` | `3600` | History kept in memory (60 to 86400); at most 2000 points per server |
 | `GAMEDOCK_METRICS_ENABLED` | `false` | Serve Prometheus text at `/metrics` |
 | `GAMEDOCK_METRICS_ALLOW_REMOTE` | `false` | Let non-local clients read `/metrics` |
+| `GAMEDOCK_MCP_MODE` | `standard` | `off`, `read_only`, `standard` or `full` (see [AI agents](#ai-agents-mcp)). Forced to `off` when `GAMEDOCK_HOST` is not localhost and no token is set |
+| `GAMEDOCK_MCP_TOKEN` | *(empty)* | Optional bearer token clients must send to `/mcp` |
+| `GAMEDOCK_MCP_ALLOWED_HOSTS` | *(empty)* | Extra `Host` values `/mcp` accepts, comma separated (`gamedock.lan:8080`) |
+| `GAMEDOCK_MCP_ALLOWED_ORIGINS` | *(empty)* | Extra `Origin` values `/mcp` accepts (browser-based MCP clients), comma separated |
 
 ## Using it
 
@@ -164,6 +169,86 @@ A server keeps a snapshot of its template from the time it was deployed, so conf
 
 **The bundled entries (Enshrouded, Palworld, Valheim, Minecraft Java, Satisfactory) are examples.** Their images, ports and variables are written from general knowledge of popular community images and have not been tested here. Check each against the image's own documentation before real use.
 
+## AI agents (MCP)
+
+GameDock serves a [Model Context Protocol](https://modelcontextprotocol.io) endpoint at **`/mcp`** on the same port as the web page (no extra process). It uses the official Python `mcp` SDK (2.x), Streamable HTTP, stateless. Every tool calls the same `GameDockService` methods as the web page, so the two can never disagree. The **AI agents (MCP)** page in the web UI shows the endpoint URL, the current mode, whether a token is set, copy-paste connection snippets and the recent activity.
+
+### Modes (`GAMEDOCK_MCP_MODE`)
+
+| Mode | Tools served |
+|---|---|
+| `off` | none (`/mcp` answers 404 with an explanation) |
+| `read_only` | `list_catalog`, `get_catalog_entry`, `list_servers`, `get_server_status`, `get_server_stats`, `get_host_stats`, `get_stats_history`, `list_backups`, `list_config_files`, `read_config_file` |
+| `standard` (default) | read-only tools plus `deploy_server`, `start_server`, `stop_server`, `restart_server`, `update_server_settings`, `update_server_image`, `create_backup`, `write_config_file` |
+| `full` | standard plus the destructive tools `delete_server`, `restore_backup`, `delete_backup`, `wipe_server_data` |
+
+Tools outside the mode are not listed at all and cannot be called. If `GAMEDOCK_HOST` is not localhost and `GAMEDOCK_MCP_TOKEN` is empty, the mode is forced to `off` (a warning is logged and the web page explains why).
+
+### Destructive tools need two steps
+
+`delete_server`, `restore_backup`, `delete_backup` and `wipe_server_data` never act on the first call. The first call changes nothing and returns a plain-language **summary** of exactly what would happen (including the automatic backup that is taken first) plus a **confirmation token**. Only a second call with the same arguments plus `confirmation_token` does it. Tokens last about 2 minutes, work once, are kept in memory only, and are tied to the exact action and arguments (change `delete_data` and the token is refused). A running server must be stopped first; that is reported before any token is issued. The built-in guide tells agents to show the summary to a human before confirming.
+
+### Security
+
+- Optional bearer token: set `GAMEDOCK_MCP_TOKEN` (for example `python -c "import secrets; print(secrets.token_urlsafe(32))"`); clients send `Authorization: Bearer <token>`. The comparison is constant-time and the token is never returned, shown or logged.
+- `Host` header check against DNS rebinding: only localhost names (any port) and the bind address are accepted, plus `GAMEDOCK_MCP_ALLOWED_HOSTS`. When bound to `0.0.0.0` with nothing configured, the token is the protection.
+- `Origin` check: a request that carries an `Origin` header (which is what a web page in a browser sends) is refused unless it is the same origin or listed in `GAMEDOCK_MCP_ALLOWED_ORIGINS`. Normal agent clients send no `Origin`.
+- With no token and a localhost bind, any program on this machine can use the endpoint. Set a token if other users share the machine.
+- Secret settings (passwords) are accepted as input, but no tool ever returns them, and the audit log masks them.
+- `/mcp` has no TLS of its own. Put it behind a reverse proxy with HTTPS before exposing it beyond your LAN.
+
+### Audit log
+
+Every call (and every refused connection) is appended as one JSON line to `<data folder>/mcp-audit.jsonl` (mode 0600, rotated at 5 MB, one old file kept): `time` (UTC), `tool`, `args` (secret values and file contents masked), `status` (`ok`, `error`, `confirmation_required`, `token_rejected`, `invalid_arguments`, `unknown_tool`, `denied`, `crashed`), a short `detail` for problems and the caller's address. Read it at `GET /api/mcp/audit?limit=50` (newest first) or on the AI agents page.
+
+### Connecting an agent
+
+Any MCP client that supports **Streamable HTTP** needs only the URL and, if you set one, the token:
+
+```json
+{
+  "mcpServers": {
+    "gamedock": {
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:8080/mcp",
+      "headers": { "Authorization": "Bearer <YOUR_GAMEDOCK_MCP_TOKEN>" }
+    }
+  }
+}
+```
+
+(Leave `headers` out when no token is set. Replace the placeholder with your token; never commit it.) The exact key names differ a little between clients (`type`/`transport`, `url`/`serverUrl`); the three things to give any client are the URL, the transport "streamable HTTP", and the `Authorization` header.
+
+Clients that only speak stdio can use the `mcp-remote` bridge:
+
+```json
+{ "mcpServers": { "gamedock": { "command": "npx",
+    "args": ["-y", "mcp-remote", "http://127.0.0.1:8080/mcp", "--header", "Authorization:${GAMEDOCK_AUTH}"],
+    "env": { "GAMEDOCK_AUTH": "Bearer <YOUR_GAMEDOCK_MCP_TOKEN>" } } } }
+```
+
+**AutoReiv, Crucible, Agent-OS and similar agent harnesses.** These are generic instructions: I have not tested GameDock against those specific products. In each one, add a new MCP server entry (usually called "MCP servers", "tools" or "connectors" in its settings or config file), choose the **HTTP / Streamable HTTP** transport, paste the URL (`http://<host>:8080/mcp`), add the header `Authorization: Bearer <token>`, and save. If the harness runs on another machine or in a container, `127.0.0.1` will not reach GameDock: bind GameDock to a LAN address (`GAMEDOCK_HOST=...`), set `GAMEDOCK_MCP_TOKEN`, and put the name you use into `GAMEDOCK_MCP_ALLOWED_HOSTS`. After connecting, the harness should list the tools for your mode; ask the agent to read the `gamedock://guide` resource (or use the `gamedock_overview` prompt) so it knows the confirmation flow.
+
+Python, with the official SDK:
+
+```python
+import asyncio, httpx2
+from mcp import Client
+from mcp.client.streamable_http import streamable_http_client
+
+async def main():
+    http = httpx2.AsyncClient(headers={"Authorization": "Bearer <YOUR_GAMEDOCK_MCP_TOKEN>"})
+    async with http, Client(streamable_http_client("http://127.0.0.1:8080/mcp", http_client=http)) as c:
+        print([t.name for t in (await c.list_tools()).tools])
+        print(await c.call_tool("list_servers", {}))
+
+asyncio.run(main())
+```
+
+### Guide resource and prompts
+
+`gamedock://guide` (a read-only resource) explains how GameDock works, which tools the current mode has and the confirmation flow. The prompts `gamedock_overview` and `deploy_game_server` give the same guidance as ready-made messages.
+
 ## API
 
 | Method | Path | |
@@ -187,6 +272,8 @@ A server keeps a snapshot of its template from the time it was deployed, so conf
 | GET | `/api/servers/{id}/stats` | one server's numbers |
 | GET | `/api/stats/history?window=600`, `/api/servers/{id}/stats/history?window=600` | recent samples for sparklines (seconds back, 10 to the history kept) |
 | GET | `/metrics` | Prometheus text; only when `GAMEDOCK_METRICS_ENABLED=true` |
+| GET | `/api/mcp/info`, `/api/mcp/audit?limit=50` | MCP status for the UI (never includes the token) and the audit log, newest first |
+| POST | `/mcp` | the MCP endpoint (see [AI agents](#ai-agents-mcp)) |
 | GET | `/api/health` | liveness |
 
 Errors are `{"error": "..."}` with 400 (invalid or missing confirmation), 403 (file permission problem), 404 (unknown), 409 (conflict: port in use, server running, or another operation in progress), 413 (file too large), 422 (malformed request), 500 (operation failed, e.g. disk full) or 502 (Docker problem). Interactive docs at `/api/docs`.
@@ -203,7 +290,9 @@ gamedock/
   hoststats.py     host CPU / memory / disk from /proc and shutil
   sampler.py       background thread feeding the in-memory history
   metrics.py       Prometheus text output
-  service.py       all management logic (web and future MCP call this)
+  service.py       all management logic (web and MCP both call this)
+  serialize.py     result to JSON-friendly dicts, shared by web and MCP
+  mcp_api/         MCP endpoint: tools.py, guard.py (token/Host/Origin), confirm.py (two-step tokens), audit.py, guide.py
   backends/        container engine interface: docker_cli.py (real), fake.py (in-memory), docker_stats.py (parsers)
   web/             FastAPI app + static dashboard (vanilla JS, no build step)
 catalog/           game templates (examples)
@@ -225,4 +314,5 @@ pytest
 - `.env`, `data/` (including `instances.json`, mode 0600) and `backups/` are git-ignored.
 - Destructive actions (restore, delete, wipe, update) need an explicit confirmation in both the UI and the API, and take a backup first.
 - Only one state-changing operation runs per server at a time.
-- Secret settings are never returned by the API, shown in the UI after saving, or included in logs/`repr`.
+- The MCP endpoint is on by default only for local use, hides destructive tools unless mode is `full`, and puts those behind two-step confirmations (see above).
+- Secret settings are never returned by the API or any MCP tool, shown in the UI after saving, or included in logs/`repr`.
