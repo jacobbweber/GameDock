@@ -283,12 +283,45 @@ class FormField:
     type: str         # text | number | bool | json
     sensitive: bool = False
     group: str = ""   # ini section, if any
+    # filled in by the comparison with the recorded defaults (0.5.2); see baselines.py
+    default: str | None = None        # the recorded default value (None: new setting, or a sensitive one)
+    default_set: bool | None = None   # sensitive settings only: whether a value was set in the defaults
+    differs: bool = False             # the value differs from the recorded default (or the setting is new)
+    status: str = "same"              # same | changed | new (not in the recorded defaults)
+
+
+@dataclass(frozen=True)
+class MissingField:
+    """A setting that was in the file when the defaults were recorded and is not in it now."""
+
+    id: str
+    key: str
+    label: str
+    default: str | None
+    type: str
+    sensitive: bool = False
+    group: str = ""
+    default_set: bool | None = None
+    status: str = "missing"
 
 
 @dataclass(frozen=True)
 class ConfigForm:
     kind: str                       # optionsettings | keyvalue | json
     fields: tuple[FormField, ...]
+    missing: tuple[MissingField, ...] = ()
+    differing: int = 0              # how many settings differ from the recorded defaults (incl. new and missing)
+
+
+@dataclass(frozen=True)
+class BaselineInfo:
+    """What is known about the recorded defaults of one config file."""
+
+    available: bool
+    captured_at: str = ""
+    origin: str = ""                # deploy | first-seen | pre-save | manual
+    just_recorded: bool = False     # recorded during this very request: earlier changes cannot be shown
+    has_previous: bool = False      # a previous baseline is kept as <name>.prev.json
 
 
 @dataclass(frozen=True)
@@ -300,6 +333,7 @@ class ConfigContent:
     editable_now: bool
     note: str
     form: "ConfigForm | None" = None  # None: this file's format has no structured view (use the raw text)
+    baseline: "BaselineInfo | None" = None
 
 
 @dataclass(frozen=True)
@@ -307,6 +341,7 @@ class ConfigFormResult:
     form: "ConfigForm | None"
     content: str          # the text with the requested changes applied (sensitive values still masked)
     changed: tuple[str, ...]  # ids of the fields that differ from the text that was sent
+    baseline: "BaselineInfo | None" = None
 
 
 @dataclass(frozen=True)

@@ -58,6 +58,14 @@ and GameDock works for any game: a game is just an entry in the catalog.
   confirm. Never put a password in an entry.
 - **Config files**: only files listed by `list_config_files` can be read or written. Sensitive values appear
   as placeholders; writing the placeholder back keeps the existing value.
+- **What did someone change?** `get_config_changes(server_id, path)` lists the settings that differ from the game's
+  recorded defaults, with the default and current value of each (`changed`; `new` = not in the defaults; `missing` =
+  in the defaults but gone from the file). Secrets show only "set" / "not set", never a value. The defaults are the
+  file as GameDock first saw it (for a server deployed with GameDock: right after its first start; for an older
+  server: the first time anyone opened or saved the file), so earlier changes cannot be shown: read the `baseline`
+  and `note` in the answer before telling anyone "this was changed from the default". Use it before editing, to see
+  what the person already tuned, and to answer "what did we change?". Re-recording the defaults is only possible in
+  the web page (there is no tool for it).
 
 ## Current mode: {mode}
 {MODE_TEXT.get(mode, "")}
@@ -67,6 +75,7 @@ Tools you have: {", ".join(tool_names)}.
 - Deploy: `list_catalog` -> `get_catalog_entry` -> `deploy_server` (give required settings, `start=true` to start).
 - Check on things: `list_servers`, `get_server_status`, `get_server_stats`, `get_stats_history`, `get_host_stats`.
 - Something wrong or slow to start? `get_server_logs` shows the newest console lines.
+- What differs from the defaults? `list_config_files` -> `get_config_changes` for each file.
 - Before risky changes: `create_backup`.
 - Is the game out of date? `check_game_update`, then (with the human's agreement, it disconnects players) `update_game`.
 - Regular safety: `set_backup_schedule` (for example daily at 03:00, keep 7), and for a weekly restart with updates

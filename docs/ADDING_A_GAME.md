@@ -41,7 +41,7 @@ For every step, write down **where you found the answer** (a link). You will put
 - Anything not in a volume disappears when the container is removed, and GameDock cannot back it up.
 - If the game downloads many gigabytes on first start (most SteamCMD games do), also mount the **game install folder**. Otherwise every re-created container downloads it all again.
 - Use relative host folders such as `./saves`. GameDock keeps them under its own data folder for that server (`<data folder>/<server id>/saves`).
-- Settings files you want people to edit go in `config_files`; their `path` is relative to the server's folder, so it starts with the volume's host folder (for example `saves/Settings.ini`).
+- Settings files you want people to edit go in `config_files`; their `path` is relative to the server's folder, so it starts with the volume's host folder (for example `saves/Settings.ini`). The Config form also remembers what the file looked like when GameDock first saw it (the game's own defaults) and marks settings that later differ; that needs no catalog key. Declare `sensitive_keys` so passwords are never stored in that record.
 
 ### Step 4. Identify the environment variables, and which are secret
 

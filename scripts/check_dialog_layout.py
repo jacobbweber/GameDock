@@ -187,6 +187,9 @@ def run(shots: Path | None = None, prefix: str = "gamedock-051", suffix: str = "
             kw = {"executable_path": chrome} if chrome else {}
             b = p.chromium.launch(args=["--no-sandbox"], **kw)
             for size_name, (w, h) in sizes.items():
+                # every size starts from the pristine settings file and no recorded defaults (the run below saves changes)
+                (cfg / "enshrouded_server.json").write_text(enshrouded_json())
+                shutil.rmtree(work / "data" / "config-baselines", ignore_errors=True)
                 pg = b.new_page(viewport={"width": w, "height": h})
                 pg.on("pageerror", lambda e: errors.append(str(e)))
                 pg.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
@@ -204,6 +207,8 @@ def run(shots: Path | None = None, prefix: str = "gamedock-051", suffix: str = "
                 assert pg.locator(".cfg-row").count() > 35
                 pg.wait_for_timeout(250)
                 before = c.box()
+                if "just now" not in pg.locator("#cfg-baseline").inner_text():
+                    c.fail("config form", "first open: the 'Defaults were first recorded just now' notice is missing")
                 c.footer_ok("config form, nothing changed")
                 for sel in (".seg", ".seg button", "#cfg-search", ".cfg-tools label.check"):       # header controls are not squashed
                     hh = pg.locator(sel).first.bounding_box()["height"]
@@ -262,7 +267,7 @@ def run(shots: Path | None = None, prefix: str = "gamedock-051", suffix: str = "
                 if desktop and shots:
                     pg.screenshot(path=str(shots / f"{prefix}-config-many-{suffix}.png"))
                 # undo everything: the box goes away, the frame stays
-                pg.evaluate("() => document.querySelectorAll('.cfg-row .cfg-sub button').forEach((x) => x.click())")
+                pg.evaluate("() => document.querySelectorAll('.cfg-row .cfg-sub:not(.def) button').forEach((x) => x.click())")
                 pg.wait_for_timeout(250)
                 if c.box() != before:
                     c.fail("config form, after undo", f"dialog size changed: {before} -> {c.box()}")
@@ -276,6 +281,77 @@ def run(shots: Path | None = None, prefix: str = "gamedock-051", suffix: str = "
                 c.single_scroller("config raw", "config-text")
                 if desktop and shots:
                     pg.screenshot(path=str(shots / f"{prefix}-config-raw-{suffix}.png"))
+                pg.keyboard.press("Escape")
+
+                # ---- 0.5.2: save, close, reopen: the "Not default" markers, the default lines and the filter stay
+                tile(ens, "Config").click()
+                expect(pg.locator(".cfg-row").first).to_be_visible()
+                for field, how in TOGGLES:
+                    loc = pg.locator(f'[id="cfg-{field}"]')
+                    loc.scroll_into_view_if_needed()
+                    if how == "toggle":
+                        loc.evaluate("e => e.click()")
+                    else:
+                        loc.fill(how)
+                expect(pg.locator(".cfg-row.nondefault")).to_have_count(4)      # also live, before saving
+                pg.locator("#config-save").click()
+                expect(pg.locator(".okmsg")).to_be_visible(timeout=8000)
+                expect(pg.locator(".cfg-row.changed")).to_have_count(0)         # the session list cleared after Save...
+                expect(pg.locator(".cfg-row.nondefault")).to_have_count(4)      # ...the "not default" markers stayed
+                pg.keyboard.press("Escape")
+                tile(ens, "Config").click()
+                expect(pg.locator(".cfg-row").first).to_be_visible()
+                pg.wait_for_timeout(250)
+                if c.box() != before:
+                    c.fail("config form, reopened", f"dialog size changed: {before} -> {c.box()}")
+                if "just now" in pg.locator("#cfg-baseline").inner_text():
+                    c.fail("config form, reopened", "the 'just recorded' notice is shown again")
+                expect(pg.locator(".cfg-row.nondefault")).to_have_count(4)
+                expect(pg.locator(".cfg-row.changed")).to_have_count(0)
+                if "4 settings differ from the default" not in pg.locator("#cfg-default-count").inner_text():
+                    c.fail("config form, reopened", f"count text is {pg.locator('#cfg-default-count').inner_text()!r}")
+                row = pg.locator('[id="row-gameSettings.foodBuffDurationFactor"]')
+                row.scroll_into_view_if_needed()
+                if "Default: 1" not in row.locator(".def-line").inner_text() or "Not default" not in row.locator(".pill").inner_text():
+                    c.fail("config form, reopened", "the default line or the Not default pill is missing on a changed setting")
+                for sel in (".pill:not([hidden])", ".def-line:not([hidden])", ".def-reset:not([hidden])"):
+                    r0 = pg.locator(f".cfg-row.nondefault {sel}").first.bounding_box()
+                    lst = pg.locator(".cfg-list").bounding_box()
+                    if not r0 or r0["x"] + r0["width"] > lst["x"] + lst["width"] + 1:
+                        c.fail("config form, reopened", f"{sel} sticks out of the settings list")
+                pg.locator("#cfg-only-default").check()
+                pg.wait_for_timeout(200)
+                visible = pg.locator(".cfg-row:visible").count()
+                if visible != 4:
+                    c.fail("config form, only differing", f"{visible} rows visible, expected 4")
+                if c.box() != before:
+                    c.fail("config form, only differing", f"dialog size changed: {before} -> {c.box()}")
+                c.footer_ok("config form, only differing from default")
+                c.single_scroller("config form, only differing from default", "cfg-list")
+                if shots and desktop:
+                    pg.screenshot(path=str(shots / f"{prefix}-config-only-differing-{suffix}.png"))
+                # "Reset all" asks first, then only fills the form (Save is still needed)
+                pg.locator("#cfg-reset-all").click()
+                expect(pg.locator("#cfg-reset-all-yes")).to_be_visible()
+                pg.wait_for_timeout(150)
+                if c.box() != before:
+                    c.fail("config form, reset all confirm", f"dialog size changed: {before} -> {c.box()}")
+                c.footer_ok("config form, reset all confirm")
+                pg.locator("#cfg-reset-all-yes").click()
+                expect(pg.locator(".cfg-row.nondefault")).to_have_count(0)
+                expect(pg.locator(".cfg-row.changed")).to_have_count(4)         # four edits to save, back to the defaults
+                if "All settings match the default" not in pg.locator("#cfg-default-count").inner_text():
+                    c.fail("config form, reset all", "count text did not clear after Reset all")
+                c.footer_ok("config form, after reset all")
+                # the "record" confirmation is inline and keeps the frame
+                pg.locator("#cfg-only-default").uncheck()
+                pg.locator("#cfg-list-top, .cfg-list").first.evaluate("e => { e.scrollTop = 0; }")
+                pg.locator("#cfg-record-baseline").click()
+                expect(pg.locator("#cfg-record-yes")).to_be_visible()
+                pg.wait_for_timeout(150)
+                if c.box() != before:
+                    c.fail("config form, record confirm", f"dialog size changed: {before} -> {c.box()}")
+                c.footer_ok("config form, record confirm")
                 pg.keyboard.press("Escape")
 
                 # ---- the other dialogs
@@ -315,7 +391,7 @@ def run(shots: Path | None = None, prefix: str = "gamedock-051", suffix: str = "
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--shots", default=None, help="folder for screenshots (desktop size)")
-    ap.add_argument("--prefix", default="gamedock-051")
+    ap.add_argument("--prefix", default="gamedock-052")
     ap.add_argument("--suffix", default="after")
     ap.add_argument("--chrome", default=None)
     ap.add_argument("--port", type=int, default=8131)

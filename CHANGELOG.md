@@ -2,6 +2,35 @@
 
 All notable changes. Dates are 2026.
 
+## 0.5.2: the Config form remembers the game's defaults and marks what differs
+
+Reported from Jacob's real use of the Config form (Enshrouded `gameSettings.*`, Palworld `OptionSettings`): the "These changes will be saved" list and the **Only changed** filter only knew what changed since the dialog was opened. After saving, or after a refresh and coming back later, nothing was marked and no setting showed what it had been changed from.
+
+### Added
+
+- **Recorded defaults (baseline).** The first time GameDock sees a config file that exists and has a form (when a newly deployed server becomes ready, otherwise the first time the file is opened in the form or raw view, or just before GameDock's first save) it records the parsed list of settings, not the file text, in `<data>/config-baselines/<server id>/<sha1 of the file path>.json` (atomic write, mode 0600 in a 0700 folder, outside the game's own folders, with the source file's mtime and size, the time, how it was taken and a format version). Values of `sensitive_keys` are never stored, only a set / not set marker (a test greps the file). The record is never overwritten automatically; if the file does not exist yet, or has no settings, nothing is recorded until it does. It is keyed by the server id, so renaming is harmless.
+- **Persistent markers in the form.** Every setting that differs from the recorded default has a blue **Not default** pill, a muted `Default: <value>` line and a **Reset to default** button (it only fills the field, Save is still needed). A setting that was not in the defaults is labelled **New**; one that is gone from the file is listed under **Missing from file**. The bar shows `N settings differ from the default`. The markers are computed on the server against the record, so they stay after Save, closing, refreshing and coming back later; the session list ("These changes will be saved") still clears after Save. They also update live while typing.
+- **Two filters.** **Only changed in this session** (the old one) and **Only differing from default** (new, persistent). They can be combined.
+- **Reset all to defaults…** asks first, then only fills the form (nothing is written until Save; passwords are not touched).
+- **Comparison by meaning.** `1`, `1.0` and `1.000000` (and `1.8e12` and `1800000000000`) are equal; `True` equals `true`; surrounding spaces are ignored; arrays and objects are compared as JSON (`true` is not `1`). So a game that rewrites its file in another style does not make every setting "different".
+- **Honest notice when there is no history.** When the defaults are recorded at the moment the file is first opened, the dialog says "Defaults were first recorded just now, so earlier changes cannot be shown". Later the muted line at the top of the list says when and how they were taken. **Record current settings as the default…** (asks first) makes the saved file the new default on purpose; the previous record is kept once as `<sha1>.prev.json`.
+- **API.** `GET .../config/file` and `POST .../config/form` return per field `default`, `default_set` (passwords), `differs` and `status` (`same`, `changed`, `new`), `form.missing`, `form.differing` and a top-level `baseline` (`available`, `captured_at`, `origin`, `just_recorded`, `has_previous`). New `POST /api/servers/{id}/config/baseline` (`{path, confirm: true}`) to re-record.
+- **MCP.** New read-only tool `get_config_changes(server_id, path)` (all modes except off): the settings that differ from the recorded defaults with default and current value, secrets only as "set" / "not set", plus the baseline's origin and a plain note about what it cannot know. There is deliberately no MCP tool to re-record the defaults. The guide explains it. Tool counts: read_only 18, standard 31, full 35.
+- `scripts/make_screenshots_defaults.py` and the screenshots `docs/gamedock-052-config-*.png`; `scripts/check_dialog_layout.py` now also saves, reopens, uses the new filter, Reset all and the record confirmation and asserts the 0.5.1 frame rules still hold (same dialog size, footer visible, one scroll area).
+
+### Changed
+
+- Cleanup: the baseline folder is removed when a server is deleted together with its data or its data is wiped; it is kept when the server is deleted but its data folder is kept (the files and their defaults are both still there). It is GameDock's own record, so it is not part of backups. `config-baselines` is a reserved name, like `backups`.
+- Layout: the Config form's top bar was rearranged so the extra controls fit the fixed dialog frame: the session count now lives in the review box title ("These changes will be saved (N):") (the filters and the default count share one wrapping row), and the review box is capped lower (15% of the window height; 13% and 10% in small windows). Short labels are used in windows under 700 px wide or 650 px high.
+- Version 0.5.2 (only the version lines of `pyproject.toml` and `gamedock/__init__.py`, so the header update button accepts it).
+
+### Known limits
+
+- **A baseline can only know what the file looked like when GameDock first read it.** A server whose file was edited by hand, or saved with 0.5.x, before 0.5.2 first reads it gets a baseline equal to that file: earlier changes are not shown (the notice says so). To get real game defaults, deploy a new server (its baseline is taken when it becomes ready) or compare with the game's own default file by hand.
+- Passwords are not compared by value (only set / not set); a changed but still-set password is not marked.
+- If a game update changes the game's own defaults, the record stays as it was (use **Record current settings as the default…**). Palworld regenerates its file from the deploy-form values on each start, so a deploy-time baseline already contains those values.
+- Array entries are compared by position (`userGroups[0]`), so re-ordering a list shows as changes.
+
 ## 0.5.1: dialogs keep one fixed frame (Config editor layout fix)
 
 Reported from Jacob's browser (about 1000 x 880): in the Config editor's settings form, changing a few settings made the "These changes will be saved" box appear and the dialog broke: it shrank, it had its own scrollbar plus a second one around the field list, and the Close and Save buttons were cut off at the bottom.

@@ -992,6 +992,36 @@ const isBool = (f) => f.type === "bool";
 const boolOf = (v) => String(v).trim().toLowerCase() === "true";
 const sameValue = (f, a, b) => (isBool(f) ? boolOf(a) === boolOf(b) : a === b);
 
+// Comparing with the recorded defaults is by meaning (the server does the same, see baselines.py): 1 = 1.0 = 1.000000,
+// True = true, surrounding spaces do not count, arrays and objects are compared as JSON.
+const NUM_RE = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
+function canonNumber(str) {
+  const m = /^([+-]?)(\d*)\.?(\d*)(?:[eE]([+-]?\d+))?$/.exec(str);
+  if (!m) return str;
+  let digits = (m[2] + m[3]).replace(/^0+/, "");
+  let exp = (m[4] ? parseInt(m[4], 10) : 0) - m[3].length;
+  if (!digits) return "0";
+  const trimmed = digits.replace(/0+$/, "");
+  exp += digits.length - trimmed.length;
+  return `${m[1] === "-" ? "-" : ""}${trimmed}e${exp}`;
+}
+function plainJson(v) {
+  if (typeof v === "boolean") return `b:${v}`;
+  if (typeof v === "number") return `n:${canonNumber(String(v))}`;
+  if (typeof v === "string") return `s:${v}`;
+  if (v === null) return "null";
+  if (Array.isArray(v)) return v.map(plainJson);
+  return Object.fromEntries(Object.keys(v).sort().map((k) => [k, plainJson(v[k])]));
+}
+function canonValue(value, type) {
+  const v = String(value == null ? "" : value).trim();
+  const low = v.toLowerCase();
+  if (type === "json") { try { return "J:" + JSON.stringify(plainJson(JSON.parse(v))); } catch (e) { return "T:" + v; } }
+  if (type === "bool" && (low === "true" || low === "false")) return "B:" + low;
+  if (type === "number" && NUM_RE.test(v)) return "N:" + canonNumber(v);
+  return "T:" + v;
+}
+
 async function openConfig(id) {
   await refresh();
   const s = findServer(id);
@@ -1024,8 +1054,23 @@ async function openConfig(id) {
   function setFormBase(text, form) {
     cur.formBase = { text, values: new Map(form.fields.map((f) => [f.id, f.value])) };
     cur.fields = form.fields;
+    cur.missing = form.missing || [];
     cur.edits = new Map();
   }
+
+  // ---- how a setting compares with the recorded defaults (persistent; unlike "changed", which is per session)
+  const hasDefaults = () => !!(cur.baseline && cur.baseline.available);
+  const resettable = (f) => hasDefaults() && f.status !== "new" && (f.sensitive ? f.default_set === false : f.default !== null && f.default !== undefined);
+  function notDefault(f) {
+    if (!hasDefaults()) return false;
+    if (f.status === "new") return true;
+    const v = valueOf(f);
+    if (f.sensitive) return (v !== "" && v !== MASK) || ((v !== "") !== !!f.default_set);
+    if (v === cur.formBase.values.get(f.id)) return !!f.differs;     // untouched: the server already compared it
+    return canonValue(v, f.type) !== canonValue(f.default, f.type);
+  }
+  const defaultCount = () => (hasDefaults() ? cur.fields.filter(notDefault).length + cur.missing.length : 0);
+  const showVal = (v) => (v === "" || v === null || v === undefined ? "(empty)" : v);
 
   async function preview(text, edits) {
     return api(`/api/servers/${sid(id)}/config/form`, "POST",
@@ -1038,12 +1083,29 @@ async function openConfig(id) {
       const n = changedFields().length;
       ui.count.textContent = n ? `${n} setting${n === 1 ? "" : "s"} changed` : "No changes yet";
       ui.count.classList.toggle("has", n > 0);
-      ui.fields.forEach(({ f, row, was, reset, input }) => {
+      const nd = defaultCount();
+      ui.defCount.textContent = !hasDefaults() ? "" : nd ? `${nd} setting${nd === 1 ? "" : "s"} differ${nd === 1 ? "s" : ""} from the default` : "All settings match the default";
+      ui.defCount.classList.toggle("has", nd > 0);
+      ui.resetAll.hidden = !hasDefaults() || !cur.fields.some((f) => !f.sensitive && resettable(f) && notDefault(f));
+      ui.resetAll.disabled = !editable();
+      ui.fields.forEach(({ f, row, was, reset, input, pill, defLine, defReset }) => {
         const changed = isChanged(f);
         row.classList.toggle("changed", changed);
         was.hidden = !changed;
         reset.hidden = !changed;
         if (changed) was.textContent = f.sensitive ? "password will change" : `was: ${cur.orig.has(f.id) ? (cur.orig.get(f.id) === "" ? "(empty)" : cur.orig.get(f.id)) : "(new)"}`;
+        const nondef = notDefault(f);
+        row.classList.toggle("nondefault", nondef);
+        pill.hidden = !nondef;
+        pill.textContent = f.status === "new" ? "New" : "Not default";
+        pill.title = f.status === "new" ? "This setting was not in the file when the defaults were recorded." : "This value differs from the recorded default.";
+        defLine.hidden = !nondef;
+        if (nondef) {
+          defLine.textContent = f.status === "new" ? "Not in the recorded defaults"
+            : f.sensitive ? `Default: ${f.default_set ? "set (the value is not stored)" : "not set"}` : `Default: ${showVal(f.default)}`;
+        }
+        defReset.hidden = !(nondef && resettable(f));
+        defReset.disabled = !editable();
       });
       applyFilter();
       paintReview();
@@ -1054,7 +1116,7 @@ async function openConfig(id) {
     const ch = changedFields();
     ui.review.hidden = !ch.length;
     if (!ch.length) return;
-    ui.review.replaceChildren(el("strong", { textContent: "These changes will be saved:" }),
+    ui.review.replaceChildren(el("strong", { textContent: `These changes will be saved (${ch.length}):` }),
       el("ul", {}, ...ch.map((f) => {
         const from = cur.orig.has(f.id) ? cur.orig.get(f.id) : "(new)";
         const shown = (v) => (f.sensitive ? (v === "" ? "(empty)" : "\u2022\u2022\u2022\u2022\u2022\u2022") : v === "" ? "(empty)" : v);
@@ -1066,11 +1128,14 @@ async function openConfig(id) {
   function applyFilter() {
     const q = ui.search.value.trim().toLowerCase();
     const onlyChanged = ui.onlyChanged.checked;
+    const onlyDefault = ui.onlyDefault.checked;
     let shown = 0;
     ui.groups.forEach(({ box, rows }) => {
       let any = false;
       rows.forEach(({ f, row }) => {
-        const hit = (!q || `${f.label} ${f.key} ${f.group} ${f.sensitive ? "" : valueOf(f)}`.toLowerCase().includes(q)) && (!onlyChanged || isChanged(f));
+        const val = f.missing ? f.default : f.sensitive ? "" : valueOf(f);
+        const hit = (!q || `${f.label} ${f.key} ${f.group} ${val}`.toLowerCase().includes(q))
+          && (!onlyChanged || (!f.missing && isChanged(f))) && (!onlyDefault || f.missing || notDefault(f));
         row.hidden = !hit;
         any = any || hit;
         if (hit) shown++;
@@ -1078,7 +1143,9 @@ async function openConfig(id) {
       box.hidden = !any;
     });
     ui.none.hidden = shown > 0;
-    ui.none.textContent = onlyChanged && !q ? "Nothing has been changed yet." : "No setting matches your search.";
+    ui.none.textContent = q ? "No setting matches your search."
+      : onlyChanged && onlyDefault ? "Nothing changed in this session differs from the default."
+        : onlyDefault ? "Nothing differs from the default." : onlyChanged ? "Nothing has been changed yet." : "No setting matches your search.";
   }
 
   function inputFor(f) {
@@ -1105,13 +1172,72 @@ async function openConfig(id) {
     return { input, widget: input };
   }
 
+  function fillField(f, input, v) {
+    if (isBool(f)) { input.checked = boolOf(v); input.dispatchEvent(new Event("change")); }
+    else { input.value = v; input.dispatchEvent(new Event("input")); }
+  }
+
+  const BASELINE_WHY = {
+    deploy: "when the server first became ready after it was deployed",
+    "first-seen": "when GameDock first looked at this file, so changes made before then are not shown",
+    "pre-save": "just before GameDock's first save of this file, so changes made before then are not shown",
+    manual: "by hand (\u201cRecord current settings as the default\u201d)",
+  };
+
+  // the note about where the defaults come from, and the deliberate "record again" action
+  function baselineNote() {
+    const bl = cur.baseline;
+    const box = el("div", { class: "cfg-baseline", id: "cfg-baseline" });
+    if (!bl || !bl.available) {
+      box.append(el("p", { class: "hint", textContent: "No defaults are recorded for this file, so settings cannot be compared with them." }));
+      return box;
+    }
+    const just = !!bl.just_recorded;
+    box.classList.toggle("fresh", just);
+    const text = just ? "Defaults were first recorded just now, so earlier changes cannot be shown."
+      : `Defaults recorded ${fmtTime(bl.captured_at)} ${BASELINE_WHY[bl.origin] || ""}.`;
+    const msg = el("span", { class: "msg", id: "cfg-baseline-msg", textContent: text });
+    const confirmBox = el("span", { class: "confirm-inline", hidden: true });
+    const record = el("button", { type: "button", class: "small secondary", id: "cfg-record-baseline", textContent: "Record current settings as the default\u2026" });
+    const yes = el("button", { type: "button", class: "small primary", id: "cfg-record-yes", textContent: "Yes, record them",
+      onclick: async () => {
+        yes.disabled = true;
+        try {
+          await api(`/api/servers/${sid(id)}/config/baseline`, "POST", { path: select.value, confirm: true });
+          await load();
+          ok.textContent = "The settings as saved in the file are now the recorded defaults. The previous record was kept for one undo."; ok.hidden = false;
+        } catch (e) { err.textContent = e.message; err.hidden = false; yes.disabled = false; }
+      } });
+    const no = el("button", { type: "button", class: "small secondary", textContent: "Cancel",
+      onclick: () => { confirmBox.hidden = true; record.hidden = false; } });
+    confirmBox.append(el("span", { textContent: "This makes the saved file the new default and clears every \u201cNot default\u201d marker. Unsaved edits here are not included. " }), yes, no);
+    record.addEventListener("click", () => { confirmBox.hidden = false; record.hidden = true; });
+    box.append(msg, " ", record, confirmBox);
+    return box;
+  }
+
   function buildForm() {
     ui.fields = [];
     ui.groups = [];
     ui.search = el("input", { type: "search", id: "cfg-search", placeholder: "Search settings\u2026", "aria-label": "Search settings",
       oninput: () => applyFilter() });
     ui.onlyChanged = el("input", { type: "checkbox", id: "cfg-only-changed", onchange: () => applyFilter() });
+    ui.onlyDefault = el("input", { type: "checkbox", id: "cfg-only-default", onchange: () => applyFilter() });
     ui.count = el("span", { class: "chg-count", id: "cfg-count" });
+    ui.defCount = el("span", { class: "def-count", id: "cfg-default-count" });
+    ui.resetAllConfirm = el("span", { class: "confirm-inline", id: "cfg-reset-all-confirm", hidden: true });
+    ui.resetAll = el("button", { type: "button", class: "small secondary", id: "cfg-reset-all", textContent: "Reset all to defaults\u2026", hidden: true,
+      onclick: () => {
+        const n = cur.fields.filter((f) => !f.sensitive && resettable(f) && notDefault(f)).length;
+        ui.resetAllConfirm.replaceChildren(
+          el("span", { textContent: `Fill the form with the default for ${n} setting${n === 1 ? "" : "s"}? Passwords are not touched, and nothing is written until you press Save. ` }),
+          el("button", { type: "button", class: "small primary", id: "cfg-reset-all-yes", textContent: "Yes, fill the form", onclick: () => {
+            ui.fields.forEach(({ f, input }) => { if (!f.sensitive && resettable(f) && notDefault(f)) fillField(f, input, f.default); });
+            ui.resetAllConfirm.hidden = true; ui.resetAll.hidden = false; refreshButtons();
+          } }),
+          el("button", { type: "button", class: "small secondary", textContent: "Cancel", onclick: () => { ui.resetAllConfirm.hidden = true; ui.resetAll.hidden = false; } }));
+        ui.resetAllConfirm.hidden = false; ui.resetAll.hidden = true;
+      } });
     ui.review = el("div", { class: "review", id: "cfg-review", hidden: true });
     ui.none = el("p", { class: "empty-small", hidden: true });
     const byGroup = new Map();
@@ -1128,25 +1254,49 @@ async function openConfig(id) {
             cur.edits.delete(f.id);
             const v = cur.orig.has(f.id) ? cur.orig.get(f.id) : cur.formBase.values.get(f.id);
             if (cur.orig.has(f.id) && !sameValue(f, v, cur.formBase.values.get(f.id))) cur.edits.set(f.id, v);
-            if (isBool(f)) { input.checked = boolOf(v); input.dispatchEvent(new Event("change")); } else { input.value = v; input.dispatchEvent(new Event("input")); }
+            fillField(f, input, v);
             refreshButtons();
           } });
-        const row = el("div", { class: "cfg-row" },
-          el("label", { class: "cfg-label", htmlFor: `cfg-${f.id}` }, el("span", { class: "nm", textContent: f.label }),
+        const pill = el("span", { class: "pill nondef", hidden: true });
+        const defLine = el("div", { class: "def-line", hidden: true });
+        const defReset = el("button", { type: "button", class: "small secondary def-reset", textContent: "Reset to default", hidden: true,
+          "aria-label": `Reset ${f.label} to its default`, onclick: () => { fillField(f, input, f.sensitive ? "" : f.default); refreshButtons(); } });
+        const row = el("div", { class: "cfg-row", id: `row-${f.id}` },
+          el("label", { class: "cfg-label", htmlFor: `cfg-${f.id}` }, el("span", { class: "nm" }, f.label, " ", pill),
             el("span", { class: "key", textContent: f.key })),
-          el("div", { class: "cfg-input" }, widget, el("div", { class: "cfg-sub" }, was, reset)));
+          el("div", { class: "cfg-input" }, widget, el("div", { class: "cfg-sub" }, was, reset), el("div", { class: "cfg-sub def" }, defLine, defReset)));
         box.append(row);
         rows.push({ f, row });
-        ui.fields.push({ f, row, was, reset, input });
+        ui.fields.push({ f, row, was, reset, input, pill, defLine, defReset });
       });
       ui.groups.push({ box, rows });
       groupBoxes.push(box);
     }
+    if (hasDefaults() && cur.missing.length) {       // settings the file had when the defaults were recorded and has no more
+      const rows = [];
+      const box = el("div", { class: "cfg-group missing-group", id: "cfg-missing-group" },
+        el("h4", { textContent: "Missing from file" }),
+        el("p", { class: "hint missing-note", textContent: "These were in the file when the defaults were recorded and are not there now (a game update may have removed them)." }));
+      cur.missing.forEach((m) => {
+        const f = { id: m.id, key: m.key, label: m.label || m.key, group: m.group, missing: true, sensitive: m.sensitive, default: m.default };
+        const row = el("div", { class: "cfg-row missing-row", id: `row-missing-${m.id}` },
+          el("div", { class: "cfg-label" }, el("span", { class: "nm" }, f.label, " ", el("span", { class: "pill missing", textContent: "Missing from file" })),
+            el("span", { class: "key", textContent: m.key })),
+          el("div", { class: "cfg-input" }, el("div", { class: "def-line", textContent: m.sensitive ? `Default: ${m.default_set ? "set" : "not set"}` : `Default: ${showVal(m.default)}` })));
+        box.append(row);
+        rows.push({ f, row });
+      });
+      ui.groups.push({ box, rows });
+      groupBoxes.push(box);
+    }
+    const lbl = (long, short) => [el("span", { class: "long", textContent: long }), el("span", { class: "short", textContent: short })];
     return el("div", { class: "cfg-form" },
       el("div", { class: "cfg-tools" }, ui.search,
-        el("label", { class: "check" }, ui.onlyChanged, "Only changed"), ui.count),
+        el("label", { class: "check", title: "Show only the settings you have changed since you opened this window" }, ui.onlyChanged, ...lbl("Only changed in this session", "Changed (session)")),
+        hasDefaults() ? el("label", { class: "check", title: "Show only the settings that differ from the recorded defaults. This stays after saving and reopening." }, ui.onlyDefault, ...lbl("Only differing from default", "Differs from default")) : null,
+        ui.defCount, ui.resetAll, ui.resetAllConfirm),
       ui.review,
-      el("div", { class: "cfg-list" }, ...groupBoxes, ui.none));
+      el("div", { class: "cfg-list" }, baselineNote(), ...groupBoxes, ui.none));
   }
 
   function buildRaw(text) {
@@ -1170,6 +1320,7 @@ async function openConfig(id) {
           const res = await api(`/api/servers/${sid(id)}/config/form`, "POST", { path: select.value, content: ui.area.value });
           if (!res.form) throw new Error("This text can no longer be shown as a form (the structure is not recognised). Fix it in the raw view first.");
           setFormBase(ui.area.value, res.form);
+          if (res.baseline) cur.baseline = { ...res.baseline, just_recorded: cur.baseline && cur.baseline.just_recorded };
         }
         cur.mode = "form";
         body.replaceChildren(buildForm());
@@ -1199,7 +1350,7 @@ async function openConfig(id) {
     ui = {};
     try {
       const r = await api(`/api/servers/${sid(id)}/config/file?path=${encodeURIComponent(select.value)}`);
-      cur = { r, mode: r.form ? "form" : "raw", orig: new Map((r.form ? r.form.fields : []).map((f) => [f.id, f.value])),
+      cur = { r, baseline: r.baseline || null, missing: [], mode: r.form ? "form" : "raw", orig: new Map((r.form ? r.form.fields : []).map((f) => [f.id, f.value])),
         fields: [], formBase: { text: r.content, values: new Map() }, edits: new Map(), rawSynced: r.content };
       if (r.form) setFormBase(r.content, r.form);
       pathLabel.replaceChildren("File: ", el("code", { textContent: r.info.path }),

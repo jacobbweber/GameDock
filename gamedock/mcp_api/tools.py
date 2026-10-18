@@ -174,6 +174,16 @@ def make_tools(service: GameDockService, confirms: ConfirmationStore) -> list[To
         return d
 
     @tool(READ, _ann(read=True))
+    def get_config_changes(server_id: ServerId,
+                           path: Annotated[str, Field(description="Path exactly as listed by list_config_files")]) -> Result:
+        """Which settings of a config file differ from the game's recorded defaults, with the default and the current
+        value of each (status: changed, new = not in the defaults, missing = in the defaults but gone from the file).
+        Secret settings show only "set" / "not set". The defaults are the file as GameDock first saw it (for a server
+        deployed with GameDock: just after its first start), so changes made before then cannot be shown; see
+        `baseline`. Read-only."""
+        return service.config_changes(server_id, path)
+
+    @tool(READ, _ann(read=True))
     def get_server_logs(
         server_id: ServerId,
         lines: Annotated[int, Field(ge=1, le=500, description="How many of the newest lines to return")] = 100,

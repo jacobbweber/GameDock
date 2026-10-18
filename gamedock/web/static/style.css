@@ -258,7 +258,7 @@ button .spinner { margin-right: .45em; }
 .cfg-body { display: flex; flex-direction: column; gap: 8px; }
 .cfg-form { display: flex; flex-direction: column; gap: 10px; }
 .cfg-tools { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 14px; }
-.cfg-tools input[type=search] { flex: 1 1 220px; width: auto; }
+.cfg-tools input[type=search] { flex: 1 1 160px; width: auto; }
 .chg-count { color: var(--muted); font-size: 13px; }
 .chg-count.has { color: #e3b341; font-weight: 600; }
 .cfg-list { flex: 1 1 auto; min-height: 100px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
@@ -267,6 +267,7 @@ button .spinner { margin-right: .45em; }
   border-bottom: 1px solid var(--border); }
 .cfg-row[hidden], .cfg-group[hidden] { display: none; }
 .cfg-row:last-child { border-bottom: 0; }
+.cfg-row.nondefault { box-shadow: inset 3px 0 0 #388bfd; }
 .cfg-row.changed { background: rgba(210,153,34,.11); box-shadow: inset 3px 0 0 #e3b341; }
 .cfg-label { display: flex; flex-direction: column; padding-top: 6px; }
 .cfg-label .nm { font-weight: 600; font-size: 13.5px; }
@@ -275,6 +276,25 @@ button .spinner { margin-right: .45em; }
 .cfg-sub { display: flex; align-items: center; gap: 8px; min-height: 0; }
 .cfg-sub .was { color: #e3b341; font-size: 12px; overflow-wrap: anywhere; }
 .cfg-sub:empty { display: none; }
+/* recorded defaults (0.5.2): a blue "Not default" pill, a muted "Default: x" line, and the reset button */
+.pill { display: inline-block; vertical-align: 1px; font-size: 10.5px; font-weight: 700; letter-spacing: .02em; padding: 1px 7px; border-radius: 999px; white-space: nowrap; }
+.pill[hidden] { display: none; }
+.pill.nondef { background: rgba(31,111,235,.22); color: #79b8ff; border: 1px solid rgba(56,139,253,.5); }
+.pill.missing { background: rgba(110,118,129,.25); color: #c9d1d9; border: 1px solid var(--border); }
+.cfg-sub.def { gap: 8px; flex-wrap: wrap; }
+.def-line { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.def-line[hidden], .cfg-sub.def button[hidden] { display: none; }
+.def-count { color: var(--muted); font-size: 13px; }
+.def-count.has { color: #79b8ff; font-weight: 600; }
+.cfg-tools { gap: 6px 14px; }
+.cfg-tools label.check .short { display: none; }
+.confirm-inline { font-size: 12.5px; color: var(--text); display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.confirm-inline[hidden] { display: none; }
+.cfg-baseline { padding: 7px 12px; font-size: 12.5px; color: var(--muted); border-bottom: 1px solid var(--border); background: rgba(110,118,129,.08); }
+.cfg-baseline.fresh { color: #e3b341; background: rgba(210,153,34,.1); }
+.cfg-baseline .msg { margin-right: 4px; }
+.missing-note { margin: 0; padding: 6px 12px 0; }
+.missing-row .cfg-label { padding-top: 0; }
 .cfg-json { width: 100%; font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--text);
   background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .cfg-row input[type=text], .cfg-row input[type=password] { background: var(--panel); }
@@ -287,7 +307,7 @@ button .spinner { margin-right: .45em; }
 .switch input:focus-visible + .slider { outline: 2px solid #79b8ff; outline-offset: 2px; }
 .switch input:disabled + .slider { opacity: .5; }
 .switch-text { font-size: 13px; color: var(--muted); }
-.review { flex: none; overflow: auto; max-height: 21dvh; background: rgba(210,153,34,.1); border: 1px solid #6b5316; border-radius: 8px; padding: 8px 12px; font-size: 13px; }
+.review { flex: none; overflow: auto; max-height: 15dvh; background: rgba(210,153,34,.1); border: 1px solid #6b5316; border-radius: 8px; padding: 8px 12px; font-size: 13px; }
 .review[hidden] { display: none; }
 .review ul { margin: 6px 0 0; padding-left: 18px; }
 .review .k { font-weight: 600; } .review .from { color: var(--muted); text-decoration: line-through; } .review .to { color: #e3b341; }
@@ -404,16 +424,18 @@ dialog.tall .dialog-body > .logbox { flex: 1 1 auto; flex-shrink: 1; min-height:
 dialog.tall .dialog-body { gap: 8px; }
 /* a long game note must not eat a small window: show the first lines (the whole text is in the tooltip) */
 @media (max-width: 700px), (max-height: 650px) {
+  .cfg-tools label.check .long { display: none; }
+  .cfg-tools label.check .short { display: inline; }
   dialog.tall .dialog-body > p.warn { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin: 0; }
 }
 @media (max-width: 700px) {
-  .review { max-height: 16dvh; }
+  .review { max-height: 13dvh; }
   .dlg > h3 { padding: 14px 16px 8px; }
   .dialog-body { padding: 4px 16px 12px; }
   .dialog-foot { padding: 10px 16px 14px; }
 }
 @media (max-height: 650px) {
-  .review { max-height: 12dvh; }
+  .review { max-height: 10dvh; }
   .cfg-list { min-height: 72px; }
   .dialog-body > .cfg-intro { display: none; }     /* the file path and the restart note give way to the settings */
   .dlg > h3 { padding-top: 12px; }

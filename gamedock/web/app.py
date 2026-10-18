@@ -59,6 +59,11 @@ class ConfigWriteIn(BaseModel):
     content: str
 
 
+class ConfigBaselineIn(BaseModel):
+    path: str
+    confirm: bool = False
+
+
 class ConfigFormIn(BaseModel):
     path: str
     content: str | None = None            # the text the editor holds (default: the file on disk)
@@ -375,6 +380,12 @@ def create_app(service: GameDockService, sampler=None, metrics_enabled: bool = F
     def config_form(server_id: str, body: ConfigFormIn):
         """Structured view helper: parse text into fields and/or apply field changes to it. Writes nothing."""
         return asdict(service.config_form(server_id, body.path, body.content, body.changes))
+
+    @app.post("/api/servers/{server_id}/config/baseline")
+    def record_config_baseline(server_id: str, body: ConfigBaselineIn):
+        """Make the settings as they are now the recorded defaults (the old record is kept once as .prev.json).
+        Changes only GameDock's own record, never the game's file. Web page only: there is no MCP tool for it."""
+        return asdict(service.record_config_baseline(server_id, body.path, body.confirm))
 
     @app.get("/api/servers/{server_id}/config/file")
     def read_config(server_id: str, path: str):

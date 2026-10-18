@@ -26,6 +26,7 @@ from typing import Callable, Iterable, Iterator, Mapping
 
 from . import authoring as au
 from . import backups as bk
+from . import baselines as bl
 from . import configfiles as cfg
 from . import configforms as forms
 from . import readiness as rd
@@ -39,7 +40,7 @@ from .authoring_service import AuthoringMixin
 from .game_updates import GameUpdateMixin
 from .errors import BackendError, BusyError, ConflictError, GameDockError, NotFoundError, ValidationError
 from .models import (
-    BackupResult, CatalogEntry, ConfigContent, ConfigFile, ConfigFileInfo, ConfigForm, ConfigFormResult, ConfigSaveResult,
+    BackupResult, BaselineInfo, CatalogEntry, ConfigContent, ConfigFile, ConfigFileInfo, ConfigForm, ConfigFormResult, ConfigSaveResult,
     ContainerSpec, FormField, LogsResult,
     DataSummary, DeleteResult, EnvValue, HostStats, ImageInfo, Instance, PortMapping, RestoreResult, ServerInfo, ServerStats,
     StatsHistory, StatsPoint, StatsSnapshot, Status, UpdateResult, VolumeMapping, WipeResult,
@@ -56,7 +57,7 @@ LABEL_GAME_ID = "gamedock.game_id"
 MAX_ENV_VALUE_LEN = 4096
 BACKUPS_DIRNAME = "backups"          # <data>/backups/<server id>/ ; also reserved so no server uses it
 DELETED_DIRNAME = "_deleted"         # <data>/backups/_deleted/ holds backups taken when data was deleted
-RESERVED_IDS = {BACKUPS_DIRNAME}
+RESERVED_IDS = {BACKUPS_DIRNAME, bl.DIRNAME}
 MAX_HISTORY_POINTS = 2000            # hard cap per series, whatever the interval/history settings
 READINESS_LOG_LINES = 400            # how much log is read to find the "ready" line or a download percentage
 READINESS_TTL = 2.0                  # seconds a readiness answer is reused (the page polls every 3 s)
@@ -115,6 +116,8 @@ class GameDockService(GameUpdateMixin, AuthoringMixin):
             tz, tz_name = sch.host_timezone()
         self.tz, self.tz_name = tz, tz_name or getattr(tz, "key", None) or str(tz)
         self.schedules = sch.ScheduleStore(self.data_dir / "schedules.json")
+        self.baselines = bl.BaselineStore(self.data_dir / bl.DIRNAME)
+        self._baseline_tried: dict[str, float] = {}       # server id -> monotonic time of the last deploy-time attempt
         self.updater = updater or UpdateChecker(enabled=False, self_update=False)
         self._init_game_updates(steam_info, game_update_wait, game_update_poll, game_update_settle)
         self._init_authoring()
@@ -237,6 +240,8 @@ class GameDockService(GameUpdateMixin, AuthoringMixin):
         r = self._readiness(inst, t, health, started) if status == Status.RUNNING else None
         if status != Status.RUNNING:
             self._forget_readiness(inst.id)
+        elif r is not None and r.ready:
+            self._capture_deploy_baselines(inst)
         env = tuple(
             EnvValue(
                 name=f.name, label=f.label, secret=f.secret, required=f.required,
@@ -714,6 +719,8 @@ class GameDockService(GameUpdateMixin, AuthoringMixin):
             self._require_stopped(inst, "wiping its data")
             safety = self._safety_backup(inst, "pre-wipe")
             bk.empty_directory(self._data_dir_of(inst))
+            self.baselines.remove_server(inst.id)  # the game writes new files (and new defaults) on its next start
+            self._baseline_tried.pop(inst.id, None)
             self._prepare_dirs(self._spec(inst))
             return WipeResult(safety, f"All data was deleted. A backup was saved first as '{safety.name}'.")
 
@@ -743,6 +750,8 @@ class GameDockService(GameUpdateMixin, AuthoringMixin):
             self.backend.remove(cname)
             if delete_data:
                 bk.remove_tree(self._data_dir_of(inst))  # on failure the server entry is kept so you can retry
+                self.baselines.remove_server(inst.id)    # the recorded defaults belong to those files
+            self._baseline_tried.pop(inst.id, None)
             self.store.remove(inst.id)
             self.schedules.remove(inst.id)
             self._image_checks.pop(inst.id, None)
@@ -838,6 +847,153 @@ class GameDockService(GameUpdateMixin, AuthoringMixin):
         inst = self._instance(server_id)
         return [self._config_info(inst, c) for c in self._template(inst).config_files]
 
+    # ------------------------------------------------------------ recorded defaults (baselines)
+    BASELINE_DEPLOY_WINDOW = 6 * 3600     # seconds after deploy in which a ready server's files count as "its defaults"
+    BASELINE_DEPLOY_RETRY = 20.0          # seconds between two looks for settings files that do not exist yet
+
+    def _capture_baseline(self, inst: Instance, c: ConfigFile, r: cfg.ConfigRead | None, origin: str) -> bool:
+        """Record the file's current settings as its defaults if there is no baseline yet. Never overwrites. Returns
+        True if one was written. Never raises: the defaults are a convenience and must not break reading or saving."""
+        try:
+            if self.baselines.load(inst.id, c.path) is not None:
+                return False
+            root = self._data_dir_of(inst)
+            if r is None:
+                r = cfg.read_config(root, c)
+            if not r.exists:
+                return False
+            form = forms.build_form(r.content, c)
+            if form is None or not form.fields:  # not a settings file (yet): an empty list is no baseline
+                return False
+            st = cfg.safe_path(root, c.path).stat()
+            snap = bl.make_snapshot(form, c.sensitive_keys, path=c.path, captured_at=sch.iso(self._clock()) or "",
+                                    origin=origin, source_mtime=st.st_mtime, source_size=st.st_size)
+            return self.baselines.create_if_absent(inst.id, c.path, snap)
+        except Exception:  # noqa: BLE001
+            log.warning("could not record the defaults of %s for %s", c.path, inst.id, exc_info=True)
+            return False
+
+    def _capture_deploy_baselines(self, inst: Instance) -> None:
+        """Called when a running server is ready: a freshly deployed server's files are its defaults. Servers that
+        already existed before this was added get theirs when someone first opens or saves the file instead."""
+        now = time.monotonic()
+        if now - self._baseline_tried.get(inst.id, -1e9) < self.BASELINE_DEPLOY_RETRY:
+            return
+        self._baseline_tried[inst.id] = now
+        try:
+            created = datetime.fromisoformat((inst.created_at or "").replace("Z", "+00:00"))
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            if (datetime.now(timezone.utc) - created).total_seconds() > self.BASELINE_DEPLOY_WINDOW:
+                self._baseline_tried[inst.id] = now + 10 ** 9  # an older server: do not look again
+                return
+            files = self._template(inst).config_files
+        except Exception:  # noqa: BLE001
+            return
+        missing = 0
+        for c in files:
+            if self.baselines.load(inst.id, c.path) is None and not self._capture_baseline(inst, c, None, bl.ORIGIN_DEPLOY):
+                missing += 1
+        if not missing:
+            self._baseline_tried[inst.id] = now + 10 ** 9  # everything is recorded
+
+    def _baseline_info(self, inst: Instance, c: ConfigFile, snap: dict | None, just: bool) -> BaselineInfo:
+        if snap is None:
+            return BaselineInfo(False)
+        return BaselineInfo(True, snap.get("captured_at", ""), snap.get("origin", ""), just,
+                            self.baselines.has_previous(inst.id, c.path))
+
+    def _baseline_for(self, inst: Instance, c: ConfigFile, r: cfg.ConfigRead | None = None,
+                      origin: str = bl.ORIGIN_FIRST_SEEN) -> tuple[dict | None, bool]:
+        """(baseline, recorded just now). Takes the baseline from the file on disk if there is none yet."""
+        snap = self.baselines.load(inst.id, c.path)
+        if snap is not None:
+            return snap, False
+        if not self._capture_baseline(inst, c, r, origin):
+            return None, False
+        return self.baselines.load(inst.id, c.path), True
+
+    def _compared_form(self, inst: Instance, c: ConfigFile, form: ConfigForm | None, snap: dict | None) -> ConfigForm | None:
+        if form is None or snap is None:
+            return form
+        try:
+            return bl.compare(form, snap)
+        except Exception:  # noqa: BLE001 - a damaged baseline must never hide the settings
+            log.warning("could not compare %s of %s with its defaults", c.path, inst.id, exc_info=True)
+            return form
+
+    def record_config_baseline(self, server_id: str, path: str, confirm: bool = False) -> ConfigContent:
+        """Deliberately make the settings as they are now the recorded defaults. The old baseline is kept once as
+        <name>.prev.json. Only GameDock's own record changes, never the game's file."""
+        inst = self._instance(server_id)
+        c = self._config_file(inst, path)
+        if not confirm:
+            raise ValidationError("Recording new defaults needs explicit confirmation (confirm=true)")
+        r = cfg.read_config(self._data_dir_of(inst), c)
+        if not r.exists:
+            raise ValidationError("This game has not created its settings file yet; there is nothing to record.")
+        form = forms.build_form(r.content, c)
+        if form is None or not form.fields:
+            raise ValidationError("This file has no settings form, so no defaults can be recorded for it.")
+        st = cfg.safe_path(self._data_dir_of(inst), c.path).stat()
+        snap = bl.make_snapshot(form, c.sensitive_keys, path=c.path, captured_at=sch.iso(self._clock()) or "",
+                                origin=bl.ORIGIN_MANUAL, source_mtime=st.st_mtime, source_size=st.st_size)
+        self.baselines.save(inst.id, c.path, snap, keep_previous=True)
+        return self.read_config_file(server_id, path)
+
+    def config_changes(self, server_id: str, path: str) -> dict:
+        """The settings of a file that differ from the recorded defaults, with default and current value. Values of
+        secret settings are never included, only "set" / "not set"."""
+        inst = self._instance(server_id)
+        c = self._config_file(inst, path)
+        r = cfg.read_config(self._data_dir_of(inst), c)
+        out: dict = {"server_id": inst.id, "path": c.path, "file_exists": r.exists, "baseline": None, "count": 0,
+                     "changes": [], "note": ""}
+        if not r.exists:
+            out["note"] = "This game has not created its settings file yet."
+            return out
+        form = forms.build_form(r.content, c)
+        if form is None or not form.fields:
+            out["note"] = "This file has no structured settings view, so settings cannot be compared with defaults."
+            return out
+        snap, just = self._baseline_for(inst, c, r)
+        info = self._baseline_info(inst, c, snap, just)
+        out["baseline"] = {"available": info.available, "captured_at": info.captured_at, "origin": info.origin,
+                           "just_recorded": info.just_recorded}
+        if snap is None:
+            out["note"] = "No defaults could be recorded for this file."
+            return out
+        cmp = bl.compare(form, snap)
+
+        def shown(secret: bool, value: str | None, is_set: bool | None) -> str | None:
+            if secret:
+                return "set" if is_set else "not set"
+            return value
+
+        changes = []
+        for f in cmp.fields:
+            if not f.differs:
+                continue
+            changes.append({"id": f.id, "key": f.key, "label": f.label, "group": f.group, "status": f.status,
+                            "sensitive": f.sensitive,
+                            "default": shown(f.sensitive, f.default, f.default_set) if f.status != "new" else None,
+                            "current": shown(f.sensitive, f.value, f.value != "")})
+        for m in cmp.missing:
+            changes.append({"id": m.id, "key": m.key, "label": m.label, "group": m.group, "status": "missing",
+                            "sensitive": m.sensitive, "default": shown(m.sensitive, m.default, m.default_set),
+                            "current": None})
+        out["changes"], out["count"] = changes, len(changes)
+        if info.just_recorded:
+            out["note"] = ("The defaults were recorded just now, from the file as it is, so nothing can differ and "
+                           "earlier changes cannot be shown.")
+        elif info.origin in (bl.ORIGIN_FIRST_SEEN, bl.ORIGIN_PRE_SAVE):
+            out["note"] = (f"The defaults were recorded at {info.captured_at} when GameDock first looked at this file, "
+                           "so they already include any change made before then.")
+        elif info.origin == bl.ORIGIN_MANUAL:
+            out["note"] = f"The defaults were recorded by hand at {info.captured_at}."
+        return out
+
+    # ------------------------------------------------------------ config files (read, form, write)
     def read_config_file(self, server_id: str, path: str) -> ConfigContent:
         inst = self._instance(server_id)
         c = self._config_file(inst, path)
@@ -855,20 +1011,28 @@ class GameDockService(GameUpdateMixin, AuthoringMixin):
         if r.masked:
             note += f" Values for {', '.join(c.sensitive_keys)} are hidden; leave the placeholder to keep them."
         form = None
+        baseline = BaselineInfo(False)
         if r.exists:
             try:
                 form = forms.build_form(r.content, c)
             except Exception:  # the structured view is a convenience; the raw text must always be readable
                 form = None
-        return ConfigContent(self._config_info(inst, c), r.content, r.masked, running, editable, note, form)
+            if form is not None:
+                snap, just = self._baseline_for(inst, c, r)
+                baseline = self._baseline_info(inst, c, snap, just)
+                form = self._compared_form(inst, c, form, snap)
+        return ConfigContent(self._config_info(inst, c), r.content, r.masked, running, editable, note, form, baseline)
 
     def config_form(self, server_id: str, path: str, content: str | None = None,
                     changes: dict[str, str] | None = None) -> ConfigFormResult:
-        """Structured view helper (read-only, writes nothing). Parses `content` (the masked text the editor holds;
-        default: the file as it is on disk), applies `changes` ({field id: new value}) to it and returns the fields
-        plus the resulting text. Used to switch between the form and the raw text, and to prepare a save."""
+        """Structured view helper (read-only for the game's files). Parses `content` (the masked text the editor
+        holds; default: the file as it is on disk), applies `changes` ({field id: new value}) to it and returns the
+        fields plus the resulting text. Used to switch between the form and the raw text, and to prepare a save.
+        The fields carry how they compare with the recorded defaults (the defaults are recorded from the file on disk
+        if that has not happened yet, never from `content`)."""
         inst = self._instance(server_id)
         c = self._config_file(inst, path)
+        r = None
         if content is None:
             r = cfg.read_config(self._data_dir_of(inst), c)
             if not r.exists:
@@ -877,7 +1041,13 @@ class GameDockService(GameUpdateMixin, AuthoringMixin):
         if len(content.encode("utf-8")) > cfg.MAX_CONFIG_BYTES:
             raise ValidationError(f"Content is larger than the editor limit of {cfg.MAX_CONFIG_BYTES} bytes")
         text, changed = forms.apply_changes(content, c, changes) if changes else (content, [])
-        return ConfigFormResult(forms.build_form(text, c), text, tuple(changed))
+        form = forms.build_form(text, c)
+        baseline = BaselineInfo(False)
+        if form is not None:
+            snap, just = self._baseline_for(inst, c, r)
+            baseline = self._baseline_info(inst, c, snap, just)
+            form = self._compared_form(inst, c, form, snap)
+        return ConfigFormResult(form, text, tuple(changed), baseline)
 
     def write_config_file(self, server_id: str, path: str, content: str) -> ConfigSaveResult:
         with self._operation(server_id, "saving config"):
@@ -886,6 +1056,7 @@ class GameDockService(GameUpdateMixin, AuthoringMixin):
             running = self._is_running(inst)
             if running and not c.hot_edit:
                 raise ConflictError("Stop the server before editing this file (it is not marked safe to edit while running)")
+            self._capture_baseline(inst, c, None, bl.ORIGIN_PRE_SAVE)  # the file as it is before our first edit
             w = cfg.write_config(self._data_dir_of(inst), c, content, self._clock())
             note = "Saved." + (f" The previous version was kept as '{w.backup}'." if w.backup else "")
             note += (" Restart the server for the change to take effect." if running
