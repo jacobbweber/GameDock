@@ -159,3 +159,9 @@ table.audit td.small { font-size: 12px; color: var(--muted); word-break: break-w
 .abadge.st-ok { color: #56d364; border-color: #2a5a35; }
 .abadge.st-error, .abadge.st-denied, .abadge.st-token_rejected, .abadge.st-invalid_arguments, .abadge.st-crashed, .abadge.st-unknown_tool { color: #ff9b9b; border-color: #6e2b2b; }
 .abadge.st-confirmation_required { color: #e3b341; border-color: #6b5316; }
+.mcp-status .live-sub, .snippet .live-sub, table.audit .live-sub { white-space: normal; }
+.mcp-status .tile:last-child { grid-column: 1 / -1; }
+table.audit { table-layout: fixed; }
+table.audit th:nth-child(1) { width: 150px; } table.audit th:nth-child(2) { width: 170px; } table.audit th:nth-child(4) { width: 300px; }
+table.audit td { overflow-wrap: anywhere; }
+.nowrap { white-space: nowrap; }

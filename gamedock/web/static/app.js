@@ -716,7 +716,7 @@ function renderMcpAudit() {
     const t = parts.join(" ");
     return t.length > 140 ? t.slice(0, 140) + "\u2026" : t;
   };
-  const fmt = (iso) => { const d = new Date(iso); return isNaN(d) ? iso : d.toLocaleString(); };
+  const fmt = (iso) => { const d = new Date(iso); return isNaN(d) ? iso : d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" }); };
   $("mcp-audit").replaceChildren(mcpAudit.length
     ? el("table", { class: "list audit" },
         el("thead", {}, el("tr", {}, el("th", { textContent: "Time" }), el("th", { textContent: "Tool" }), el("th", { textContent: "Arguments (secrets hidden)" }), el("th", { textContent: "Result" }))),
@@ -732,7 +732,7 @@ function renderMcpAudit() {
 async function refreshMcp() {
   try {
     mcpInfo = await api("/api/mcp/info");
-    mcpAudit = (await api("/api/mcp/audit?limit=25")).entries;
+    mcpAudit = (await api("/api/mcp/audit?limit=15")).entries;
   } catch (e) { /* connection indicator shows problems */ }
   renderMcp();
 }
