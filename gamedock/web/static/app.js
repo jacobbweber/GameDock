@@ -6,6 +6,10 @@ const POLL_MS = 3000;
 const busy = new Set();          // server ids with an action in flight
 let servers = [];
 let catalog = [];
+let stats = null;                // latest /api/stats snapshot
+let history = { servers: {}, host: [] };
+let rankSort = "cpu";            // monitoring table sort: cpu | memory | name
+let pollCount = 0;
 
 const $ = (id) => document.getElementById(id);
 
@@ -39,6 +43,43 @@ async function api(path, method = "GET", body = undefined) {
   return data;
 }
 
+const fmtBytes = (n) => {
+  if (n === null || n === undefined) return "n/a";
+  const u = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0, v = n;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)} ${u[i]}`;
+};
+const fmtRate = (n) => `${fmtBytes(n)}/s`;
+const fmtPct = (n) => `${n === null || n === undefined ? "n/a" : n.toFixed(n >= 100 ? 0 : 1)}%`;
+function fmtUptime(sec) {
+  if (sec === null || sec === undefined) return "\u2013";
+  const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60);
+  if (d) return `${d}d ${h}h`;
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m`;
+  return `${Math.floor(sec)}s`;
+}
+
+// Tiny inline SVG sparkline. values: numbers; max: fixed scale top (else the data's own max).
+function sparkline(values, { max, cls = "" } = {}) {
+  const W = 96, H = 24, ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("class", `spark ${cls}`);
+  svg.setAttribute("aria-hidden", "true");
+  if (values.length < 2) return svg;
+  const top = Math.max(max || 0, ...values, 0.0001);
+  const pts = values.map((v, i) => `${(i / (values.length - 1) * (W - 2) + 1).toFixed(1)},${(H - 2 - (v / top) * (H - 4)).toFixed(1)}`);
+  const area = document.createElementNS(ns, "polygon");
+  area.setAttribute("points", `1,${H - 1} ${pts.join(" ")} ${W - 1},${H - 1}`);
+  area.setAttribute("class", "area");
+  const line = document.createElementNS(ns, "polyline");
+  line.setAttribute("points", pts.join(" "));
+  svg.append(area, line);
+  return svg;
+}
+
 const portText = (ports) => ports.length ? ports.map((p) => `${p.host}/${p.protocol}`).join(", ") : "none";
 
 // ------------------------------------------------------------------ dashboard
@@ -59,6 +100,7 @@ function serverCard(s) {
     el("div", { class: "meta" }, "Image: ", el("code", { textContent: s.image })),
     el("div", { class: "meta", textContent: `Host ports: ${portText(s.ports)}` }),
     s.status === "error" && s.detail ? el("div", { class: "meta", textContent: s.detail }) : null,
+    liveBlock(s),
     el("div", { class: "actions" },
       btn("Start", "start", () => act(s.id, "start"), running),
       btn("Stop", "stop", () => act(s.id, "stop"), !running),
@@ -70,6 +112,27 @@ function serverCard(s) {
       el("span", { class: "spacer" }),
       btn("Edit", "secondary", () => openEdit(s), running, running ? "Stop the server to edit it" : ""),
       btn("Delete", "danger", () => openDelete(s), running, running ? "Stop the server to delete it" : "")));
+}
+
+function liveBlock(s) {
+  const st = stats && stats.servers.find((x) => x.server_id === s.id);
+  const pts = (history.servers[s.id] && history.servers[s.id].points) || [];
+  if (!st || !st.running) {
+    return el("div", { class: "live idle", textContent: s.status === "running" ? "Waiting for the first reading\u2026" : "Not running" });
+  }
+  const cell = (label, value, sub, spark) => el("div", { class: "live-cell" },
+    el("div", { class: "live-label", textContent: label }),
+    el("div", { class: "live-value", textContent: value }),
+    sub ? el("div", { class: "live-sub", textContent: sub }) : null,
+    spark);
+  return el("div", { class: "live" },
+    cell("CPU", fmtPct(st.cpu_percent), `${fmtPct(st.cpu_of_host_percent)} of host`,
+      sparkline(pts.map((p) => p.cpu), { max: 100, cls: "cpu" })),
+    cell("Memory", fmtBytes(st.mem_used), `${fmtPct(st.mem_of_host_percent)} of host`,
+      sparkline(pts.map((p) => p.mem), { cls: "mem" })),
+    cell("Network", `\u2193 ${fmtRate(st.net_rx_rate)}`, `\u2191 ${fmtRate(st.net_tx_rate)}`,
+      sparkline(pts.map((p) => p.rx_rate + p.tx_rate), { cls: "net" })),
+    cell("Uptime", fmtUptime(st.uptime_seconds), null, null));
 }
 
 function renderServers() {
@@ -489,13 +552,87 @@ async function openConfig(id) {
   load();
 }
 
+// -------------------------------------------------------------------- monitoring page
+function bar(pct, cls = "") {
+  return el("div", { class: `bar ${cls}` }, el("div", { class: "fill", style: `width:${Math.max(0, Math.min(100, pct || 0))}%` }));
+}
+
+function renderMonitoring() {
+  if (!stats) return;
+  const h = stats.host;
+  const memPct = h.mem_total ? 100 * h.mem_used / h.mem_total : 0;
+  const diskPct = h.disk_total ? 100 * h.disk_used / h.disk_total : 0;
+  const hist = history.host || [];
+  const tile = (label, value, sub, extra) => el("div", { class: "tile" },
+    el("div", { class: "live-label", textContent: label }),
+    el("div", { class: "tile-value", textContent: value }),
+    sub ? el("div", { class: "live-sub", textContent: sub }) : null, extra);
+  $("host-strip").replaceChildren(
+    tile("Host CPU", fmtPct(h.cpu_percent), `${h.cpu_count} cores` + (h.load1 !== null ? `, load ${h.load1.toFixed(2)}` : ""),
+      sparkline(hist.map((p) => p.cpu), { max: 100, cls: "cpu" })),
+    tile("Host memory", `${fmtBytes(h.mem_used)} / ${fmtBytes(h.mem_total)}`, `${fmtPct(memPct)} used`,
+      el("div", {}, bar(memPct, memPct > 90 ? "hot" : ""))),
+    tile("Disk (data folder)", `${fmtBytes(h.disk_free)} free`, `of ${fmtBytes(h.disk_total)}`,
+      el("div", {}, bar(diskPct, diskPct > 90 ? "hot" : ""))),
+    tile("Host uptime", fmtUptime(h.uptime_seconds), null, null));
+  $("mon-error").hidden = !stats.error;
+  $("mon-error").textContent = stats.error ? `Could not read container stats: ${stats.error}` : "";
+
+  const keys = {
+    cpu: (a, b) => b.cpu_percent - a.cpu_percent || a.name.localeCompare(b.name),
+    memory: (a, b) => b.mem_used - a.mem_used || a.name.localeCompare(b.name),
+    name: (a, b) => a.name.localeCompare(b.name),
+  };
+  const rows = [...stats.servers].sort((a, b) => (Number(b.running) - Number(a.running)) || keys[rankSort](a, b));
+  const running = rows.filter((r) => r.running);
+  const maxCpu = Math.max(100, ...running.map((r) => r.cpu_percent));
+  const th = (label, key) => el("th", { class: key ? `sortable ${rankSort === key ? "sorted" : ""}` : "",
+    textContent: label + (key && rankSort === key ? " \u25BE" : ""), onclick: key ? () => { rankSort = key; renderMonitoring(); } : null });
+  const total = (f) => running.reduce((a, r) => a + f(r), 0);
+  const body = rows.map((r) => el("tr", { class: r.running ? "" : "dim", id: `rank-${r.server_id}` },
+    el("td", {}, el("strong", { textContent: r.name })),
+    el("td", { textContent: r.running ? "running" : "stopped" }),
+    el("td", { class: "num" }, r.running ? el("div", { class: "cellbar" }, el("span", { textContent: fmtPct(r.cpu_percent) }), bar(100 * r.cpu_percent / maxCpu, "cpu")) : "\u2013"),
+    el("td", { class: "num", textContent: r.running ? fmtPct(r.cpu_of_host_percent) : "\u2013" }),
+    el("td", { class: "num", textContent: r.running ? fmtBytes(r.mem_used) : "\u2013" }),
+    el("td", { class: "num", textContent: r.running ? fmtPct(r.mem_of_host_percent) : "\u2013" }),
+    el("td", { class: "num", textContent: r.running ? `\u2193 ${fmtRate(r.net_rx_rate)}  \u2191 ${fmtRate(r.net_tx_rate)}` : "\u2013" }),
+    el("td", { class: "num", textContent: r.running ? fmtUptime(r.uptime_seconds) : "\u2013" })));
+  const foot = running.length ? el("tr", { class: "total" },
+    el("td", { textContent: "All GameDock servers" }), el("td", { textContent: `${running.length} running` }),
+    el("td", { class: "num", textContent: fmtPct(total((r) => r.cpu_percent)) }),
+    el("td", { class: "num", textContent: fmtPct(total((r) => r.cpu_of_host_percent)) }),
+    el("td", { class: "num", textContent: fmtBytes(total((r) => r.mem_used)) }),
+    el("td", { class: "num", textContent: fmtPct(total((r) => r.mem_of_host_percent)) }),
+    el("td", { class: "num", textContent: `\u2193 ${fmtRate(total((r) => r.net_rx_rate))}  \u2191 ${fmtRate(total((r) => r.net_tx_rate))}` }),
+    el("td", {})) : null;
+  $("rank-wrap").replaceChildren(rows.length
+    ? el("table", { class: "list rank" },
+        el("thead", {}, el("tr", {}, th("Server", "name"), th("State"), th("CPU", "cpu"), th("CPU of host"), th("Memory", "memory"), th("Memory of host"), th("Network"), th("Uptime"))),
+        el("tbody", {}, ...body), foot ? el("tfoot", {}, foot) : null)
+    : el("p", { class: "empty-small", textContent: "No servers deployed yet." }));
+}
+
+async function refreshStats() {
+  try {
+    stats = await api("/api/stats");
+    if (pollCount++ % 3 === 0 || !history.host.length) {
+      history = await api("/api/stats/history?window=600");
+    }
+  } catch (e) { /* the connection indicator already shows problems */ }
+  renderServers();
+  renderMonitoring();
+}
+
 // -------------------------------------------------------------------- routing
 function route() {
-  const page = location.hash.startsWith("#/catalog") ? "catalog" : "dashboard";
-  $("page-dashboard").hidden = page !== "dashboard";
-  $("page-catalog").hidden = page !== "catalog";
-  $("nav-dashboard").classList.toggle("active", page === "dashboard");
-  $("nav-catalog").classList.toggle("active", page === "catalog");
+  const page = location.hash.startsWith("#/catalog") ? "catalog"
+    : location.hash.startsWith("#/monitoring") ? "monitoring" : "dashboard";
+  for (const p of ["dashboard", "catalog", "monitoring"]) {
+    $(`page-${p}`).hidden = page !== p;
+    $(`nav-${p}`).classList.toggle("active", page === p);
+  }
+  if (page === "monitoring") renderMonitoring();
   showError("");
 }
 
@@ -523,5 +660,7 @@ async function loadCatalog() {
 window.addEventListener("hashchange", route);
 route();
 loadCatalog();
-refresh();
-setInterval(() => { if (busy.size === 0 && !$("dialog").open) refresh(); }, POLL_MS);
+refresh().then(refreshStats);
+setInterval(() => {
+  if (busy.size === 0 && !$("dialog").open && !document.hidden) refresh().then(refreshStats);
+}, POLL_MS);
