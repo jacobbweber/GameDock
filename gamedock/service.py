@@ -10,22 +10,25 @@ Vocabulary:
 """
 from __future__ import annotations
 
+import math
 import re
+from collections import deque
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Lock
+from threading import Lock, RLock
 from typing import Callable, Iterable, Iterator, Mapping
 
 from . import backups as bk
 from . import configfiles as cfg
 from .backends.base import ContainerBackend
 from .catalog import entry_to_dict, load_catalog, parse_definition
+from .hoststats import HostMeter
 from .errors import BackendError, ConflictError, GameDockError, NotFoundError, ValidationError
 from .models import (
     BackupResult, CatalogEntry, ConfigContent, ConfigFile, ConfigFileInfo, ConfigSaveResult, ContainerSpec,
-    DeleteResult, EnvValue, ImageInfo, Instance, PortMapping, RestoreResult, ServerInfo, Status, UpdateResult,
-    VolumeMapping, WipeResult,
+    DeleteResult, EnvValue, HostStats, ImageInfo, Instance, PortMapping, RestoreResult, ServerInfo, ServerStats,
+    StatsHistory, StatsPoint, StatsSnapshot, Status, UpdateResult, VolumeMapping, WipeResult,
 )
 from .store import InstanceStore
 
@@ -37,6 +40,7 @@ MAX_ENV_VALUE_LEN = 4096
 BACKUPS_DIRNAME = "backups"          # <data>/backups/<server id>/ ; also reserved so no server uses it
 DELETED_DIRNAME = "_deleted"         # <data>/backups/_deleted/ holds backups taken when data was deleted
 RESERVED_IDS = {BACKUPS_DIRNAME}
+MAX_HISTORY_POINTS = 2000            # hard cap per series, whatever the interval/history settings
 
 
 def container_name(server_id: str) -> str:
@@ -49,7 +53,8 @@ def slugify(name: str) -> str:
 
 class GameDockService:
     def __init__(self, backend: ContainerBackend, catalog_dir: Path, data_dir: Path,
-                 backup_retention: int = 10, clock: Callable[[], datetime] | None = None) -> None:
+                 backup_retention: int = 10, clock: Callable[[], datetime] | None = None,
+                 stats_interval: float = 10.0, stats_history_seconds: int = 3600) -> None:
         self.backend = backend
         self.catalog_dir = Path(catalog_dir)
         self.data_dir = Path(data_dir)
@@ -58,6 +63,18 @@ class GameDockService:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._locks: dict[str, Lock] = {}
         self._locks_guard = Lock()
+        # monitoring (all in memory)
+        self.stats_interval = float(stats_interval)
+        self.stats_history_seconds = int(stats_history_seconds)
+        self._history_len = max(2, min(MAX_HISTORY_POINTS, math.ceil(self.stats_history_seconds / self.stats_interval)))
+        self._meter = HostMeter()
+        self._stats_lock = RLock()
+        self._sample_lock = Lock()
+        self._latest: StatsSnapshot | None = None
+        self._latest_ts: datetime | None = None
+        self._history: dict[str, deque] = {}
+        self._host_history: deque = deque(maxlen=self._history_len)
+        self._prev_net: dict[str, tuple[float, int, int]] = {}
 
     @contextmanager
     def _operation(self, server_id: str) -> Iterator[None]:
@@ -551,3 +568,128 @@ class GameDockService:
             note += (" Restart the server for the change to take effect." if running
                      else " The change applies the next time the server starts.")
             return ConfigSaveResult(c.path, w.size, w.backup, running, note)
+
+    # ------------------------------------------------------------ monitoring
+    def sample_stats(self, record: bool = True) -> StatsSnapshot:
+        """Take one reading of every server plus the host and remember it as the latest snapshot.
+
+        Costs one container-engine call when nothing runs (two when something does), however many servers
+        exist. With record=True, and only if at least one server is running, the reading is also added to the
+        in-memory history used for sparklines.
+        """
+        if not self._sample_lock.acquire(blocking=False):
+            return self._latest or self._empty_snapshot()  # another sample is in progress
+        try:
+            now = self._clock()
+            insts = self.store.all()
+            error = ""
+            raw = {}
+            if insts:
+                try:
+                    raw = self.backend.get_stats([container_name(i.id) for i in insts])
+                except BackendError as e:
+                    error = str(e)
+            host = self._meter.read(self.data_dir)
+            servers = tuple(self._server_stats(i, raw.get(container_name(i.id)), host, now) for i in insts)
+            snap = StatsSnapshot(now.isoformat(timespec="seconds").replace("+00:00", "Z"), self.stats_interval,
+                                 host, servers, error)
+            with self._stats_lock:
+                self._latest, self._latest_ts = snap, now
+                if record and any(s.running for s in servers):
+                    t = now.timestamp()
+                    for s in servers:
+                        if s.running:
+                            ring = self._history.setdefault(s.server_id, deque(maxlen=self._history_len))
+                            ring.append((t, s.cpu_percent, s.mem_used, s.net_rx_rate, s.net_tx_rate))
+                    self._host_history.append((t, host.cpu_percent or 0.0, host.mem_used or 0))
+                ids = {i.id for i in insts}
+                for gone in [k for k in self._history if k not in ids]:
+                    del self._history[gone]
+                for gone in [k for k in self._prev_net if k not in ids]:
+                    del self._prev_net[gone]
+            return snap
+        finally:
+            self._sample_lock.release()
+
+    def _empty_snapshot(self) -> StatsSnapshot:
+        host = self._meter.read(self.data_dir)
+        return StatsSnapshot(self._clock().isoformat(timespec="seconds").replace("+00:00", "Z"),
+                             self.stats_interval, host, ())
+
+    def _server_stats(self, inst: Instance, c, host: HostStats, now: datetime) -> ServerStats:
+        t = self._template(inst)
+        running = bool(c and c.running)
+        if not running:
+            self._prev_net.pop(inst.id, None)
+            return ServerStats(inst.id, inst.name, inst.game_id, False, 0.0, 0.0, 0, c.mem_limit if c else 0, 0.0,
+                               0, 0, 0.0, 0.0, 0, 0, 0, None, None)
+        ts = now.timestamp()
+        prev = self._prev_net.get(inst.id)
+        rx_rate = tx_rate = 0.0
+        if prev and ts > prev[0] and c.net_rx >= prev[1] and c.net_tx >= prev[2]:  # counters reset on restart
+            rx_rate = (c.net_rx - prev[1]) / (ts - prev[0])
+            tx_rate = (c.net_tx - prev[2]) / (ts - prev[0])
+        self._prev_net[inst.id] = (ts, c.net_rx, c.net_tx)
+        uptime = max(0.0, (now - c.started_at).total_seconds()) if c.started_at else None
+        mem_pct = 100.0 * c.mem_used / host.mem_total if host.mem_total else 0.0
+        return ServerStats(
+            inst.id, inst.name, inst.game_id, True, round(c.cpu_percent, 2),
+            round(min(100.0, c.cpu_percent / max(1, host.cpu_count)), 2), c.mem_used, c.mem_limit, round(mem_pct, 2),
+            c.net_rx, c.net_tx, round(rx_rate, 1), round(tx_rate, 1), c.block_read, c.block_write, c.pids,
+            round(uptime, 1) if uptime is not None else None,
+            c.started_at.isoformat(timespec="seconds").replace("+00:00", "Z") if c.started_at else None)
+
+    def get_all_stats(self, sort_by: str | None = None) -> StatsSnapshot:
+        """Latest stats for every server and the host. Uses the sampler's snapshot when it is recent;
+        otherwise reads once now (without adding to the history). sort_by: 'cpu', 'memory' or 'name'."""
+        with self._stats_lock:
+            snap, ts = self._latest, self._latest_ts
+        fresh = snap is not None and ts is not None and (self._clock() - ts).total_seconds() < self.stats_interval * 3
+        if not fresh:
+            snap = self.sample_stats(record=False)
+        if sort_by:
+            keys = {"cpu": lambda s: -s.cpu_percent, "memory": lambda s: -s.mem_used, "name": lambda s: s.name.lower()}
+            if sort_by not in keys:
+                raise ValidationError("sort must be one of: cpu, memory, name")
+            snap = StatsSnapshot(snap.sampled_at, snap.interval, snap.host, tuple(sorted(snap.servers, key=keys[sort_by])),
+                                 snap.error)
+        return snap
+
+    def get_server_stats(self, server_id: str) -> ServerStats:
+        self._instance(server_id)
+        for s in self.get_all_stats().servers:
+            if s.server_id == server_id:
+                return s
+        raise NotFoundError(f"No stats for server '{server_id}'")
+
+    def get_host_stats(self) -> HostStats:
+        """Host totals, read live from /proc and the disk (cheap, no container-engine call)."""
+        return self._meter.read(self.data_dir)
+
+    def _window(self, window: int | None) -> int:
+        w = 600 if window is None else int(window)
+        if w < 10:
+            raise ValidationError("window must be at least 10 seconds")
+        return min(w, self.stats_history_seconds)
+
+    def _points(self, ring, window: int):
+        cutoff = self._clock().timestamp() - window
+        return tuple(StatsPoint(*p) for p in list(ring) if p[0] >= cutoff)
+
+    def get_stats_history(self, server_id: str, window: int | None = 600) -> StatsHistory:
+        """Recent samples for one server (oldest first). window = seconds back, capped at the history kept."""
+        self._instance(server_id)
+        w = self._window(window)
+        with self._stats_lock:
+            ring = list(self._history.get(server_id, ()))
+        return StatsHistory(server_id, self.stats_interval, w, self._points(ring, w))
+
+    def get_all_stats_history(self, window: int | None = 600) -> tuple[dict[str, StatsHistory], list[tuple]]:
+        """History for every server plus host (t, cpu%, mem_used) tuples, in one call."""
+        w = self._window(window)
+        with self._stats_lock:
+            rings = {k: list(v) for k, v in self._history.items()}
+            host = list(self._host_history)
+        cutoff = self._clock().timestamp() - w
+        return ({k: StatsHistory(k, self.stats_interval, w, self._points(v, w)) for k, v in rings.items()},
+                [p for p in host if p[0] >= cutoff])

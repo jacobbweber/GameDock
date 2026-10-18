@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -17,6 +18,7 @@ from ..errors import (
     TooLargeError,
 )
 from ..models import CatalogEntry, PortMapping, ServerInfo
+from ..metrics import render_metrics
 from ..service import GameDockService
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -74,8 +76,26 @@ def _ports(items: list[PortIn] | None) -> list[PortMapping] | None:
     return [PortMapping(p.protocol, p.host, p.container) for p in items]
 
 
-def create_app(service: GameDockService) -> FastAPI:
-    app = FastAPI(title="GameDock", version=__version__, docs_url="/api/docs", openapi_url="/api/openapi.json")
+def _is_loopback(host: str | None) -> bool:
+    return bool(host) and (host in ("127.0.0.1", "::1", "localhost") or host.startswith("::ffff:127."))
+
+
+def create_app(service: GameDockService, sampler=None, metrics_enabled: bool = False,
+               metrics_allow_remote: bool = False) -> FastAPI:
+    """`sampler` (optional) is started and stopped with the app. /metrics exists only if metrics_enabled."""
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        if sampler:
+            sampler.start()
+        try:
+            yield
+        finally:
+            if sampler:
+                sampler.stop()
+
+    app = FastAPI(title="GameDock", version=__version__, docs_url="/api/docs", openapi_url="/api/openapi.json",
+                  lifespan=lifespan)
 
     @app.middleware("http")
     async def same_origin_for_writes(request: Request, call_next):
@@ -218,6 +238,40 @@ def create_app(service: GameDockService) -> FastAPI:
     @app.post("/api/servers/{server_id}/restart")
     def restart_server(server_id: str):
         return server_to_dict(service.restart(server_id))
+
+    # ---- monitoring
+    @app.get("/api/stats")
+    def all_stats(sort: str | None = None):
+        snap = service.get_all_stats(sort)
+        d = asdict(snap)
+        return d
+
+    @app.get("/api/stats/host")
+    def host_stats():
+        return asdict(service.get_host_stats())
+
+    @app.get("/api/stats/history")
+    def all_stats_history(window: int = 600):
+        servers, host = service.get_all_stats_history(window)
+        return {"interval": service.stats_interval,
+                "servers": {k: asdict(v) for k, v in servers.items()},
+                "host": [{"t": t, "cpu": cpu, "mem": mem} for t, cpu, mem in host]}
+
+    @app.get("/api/servers/{server_id}/stats")
+    def server_stats(server_id: str):
+        return asdict(service.get_server_stats(server_id))
+
+    @app.get("/api/servers/{server_id}/stats/history")
+    def server_stats_history(server_id: str, window: int = 600):
+        return asdict(service.get_stats_history(server_id, window))
+
+    if metrics_enabled:
+        @app.get("/metrics", include_in_schema=False)
+        def metrics(request: Request):
+            if not metrics_allow_remote and not _is_loopback(request.client.host if request.client else None):
+                return PlainTextResponse("metrics are only served to localhost\n", status_code=403)
+            return PlainTextResponse(render_metrics(service.get_all_stats()),
+                                     media_type="text/plain; version=0.0.4; charset=utf-8")
 
     @app.get("/", include_in_schema=False)
     def index():

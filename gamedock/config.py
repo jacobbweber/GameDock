@@ -19,6 +19,10 @@ def load_dotenv(path: str | Path = ".env") -> None:
         os.environ.setdefault(key.strip(), value.strip().strip("'\""))
 
 
+def _bool(value: str) -> bool:
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
 @dataclass(frozen=True)
 class Settings:
     host: str = "127.0.0.1"  # local only unless explicitly configured
@@ -27,6 +31,11 @@ class Settings:
     data_dir: Path = Path("data")
     backend: str = "docker"  # "docker" or "fake"
     backup_retention: int = 10  # keep the newest N backups per server
+    stats_enabled: bool = True  # run the background sampler (history sparklines)
+    stats_interval: float = 10.0  # seconds between samples
+    stats_history_seconds: int = 3600  # how much history to keep in memory
+    metrics_enabled: bool = False  # serve Prometheus text at /metrics
+    metrics_allow_remote: bool = False  # /metrics answers only loopback clients unless this is true
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -38,4 +47,9 @@ class Settings:
             data_dir=Path(env.get("GAMEDOCK_DATA_DIR", "data")),
             backend=env.get("GAMEDOCK_BACKEND", "docker").lower(),
             backup_retention=max(1, int(env.get("GAMEDOCK_BACKUP_RETENTION", "10"))),
+            stats_enabled=_bool(env.get("GAMEDOCK_STATS_ENABLED", "true")),
+            stats_interval=min(300.0, max(2.0, float(env.get("GAMEDOCK_STATS_INTERVAL", "10")))),
+            stats_history_seconds=min(86400, max(60, int(env.get("GAMEDOCK_STATS_HISTORY_SECONDS", "3600")))),
+            metrics_enabled=_bool(env.get("GAMEDOCK_METRICS_ENABLED", "false")),
+            metrics_allow_remote=_bool(env.get("GAMEDOCK_METRICS_ALLOW_REMOTE", "false")),
         )

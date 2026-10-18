@@ -7,6 +7,7 @@ import uvicorn
 
 from .backends import make_backend
 from .config import Settings, load_dotenv
+from .sampler import Sampler
 from .service import GameDockService
 from .web.app import create_app
 
@@ -16,8 +17,12 @@ log = logging.getLogger("gamedock")
 def build_app(settings: Settings | None = None):
     settings = settings or Settings.from_env()
     service = GameDockService(make_backend(settings.backend), settings.catalog_dir, settings.data_dir,
-                              backup_retention=settings.backup_retention)
-    return create_app(service)
+                              backup_retention=settings.backup_retention,
+                              stats_interval=settings.stats_interval,
+                              stats_history_seconds=settings.stats_history_seconds)
+    sampler = Sampler(service) if settings.stats_enabled else None
+    return create_app(service, sampler=sampler, metrics_enabled=settings.metrics_enabled,
+                      metrics_allow_remote=settings.metrics_allow_remote)
 
 
 def main() -> None:
@@ -28,6 +33,8 @@ def main() -> None:
         log.warning(
             "Listening on %s: anyone who can reach this port can start/stop servers. "
             "GameDock has no login yet.", settings.host)
+    if settings.metrics_enabled and settings.metrics_allow_remote:
+        log.warning("/metrics is open to remote clients (GAMEDOCK_METRICS_ALLOW_REMOTE=true).")
     if settings.backend == "fake":
         log.warning("Using the FAKE in-memory backend: no real containers will be touched.")
     uvicorn.run(build_app(settings), host=settings.host, port=settings.port, log_level="info")
