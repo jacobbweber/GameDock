@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GameDock</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <div class="brand"><span class="logo">&#9875;</span> GameDock</div>
+    <div id="conn" class="conn" title="Connection to GameDock">connecting&hellip;</div>
+  </header>
+  <main>
+    <div id="error" class="error" hidden></div>
+    <section id="servers" class="grid" aria-live="polite"></section>
+    <p id="empty" class="empty" hidden>No games defined yet. Add a <code>.yaml</code> file to the <code>catalog/</code> folder.</p>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>
