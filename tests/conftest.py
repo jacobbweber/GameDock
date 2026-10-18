@@ -1,4 +1,5 @@
 import textwrap
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -21,6 +22,17 @@ SAMPLE = textwrap.dedent(
       - { name: MAX, default: "8" }
       - { name: SERVER_PASSWORD, label: Password, secret: true }
       - { name: ADMIN_PASSWORD, label: Admin password, secret: true, required: true }
+    config_files:
+      - path: conf/settings.ini
+        label: Settings
+        format: ini
+        sensitive_keys: [AdminPassword, rcon.password]
+      - path: conf/hot.txt
+        label: Hot file
+        hot_edit: true
+      - path: conf/data.json
+        format: json
+        sensitive_keys: [token]
     """
 )
 
@@ -41,9 +53,25 @@ def catalog_dir(tmp_path):
 ADMIN = {"ADMIN_PASSWORD": "adminpw"}
 
 
+class StepClock:
+    """Deterministic clock: every call is one second later."""
+
+    def __init__(self):
+        self.t = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+    def __call__(self):
+        self.t += timedelta(seconds=1)
+        return self.t
+
+
 @pytest.fixture
-def service(backend, catalog_dir, tmp_path):
-    return GameDockService(backend, catalog_dir, tmp_path / "data")
+def clock():
+    return StepClock()
+
+
+@pytest.fixture
+def service(backend, catalog_dir, tmp_path, clock):
+    return GameDockService(backend, catalog_dir, tmp_path / "data", clock=clock)
 
 
 @pytest.fixture

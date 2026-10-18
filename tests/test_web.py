@@ -91,8 +91,6 @@ def test_delete_needs_confirm(client, one):
 def test_delete_data_flow(client, one):
     r = client.delete("/api/servers/one?confirm=true&delete_data=true")
     assert r.status_code == 400 and "second" in r.json()["error"]
-    r = client.delete("/api/servers/one?confirm=true&delete_data=true&confirm_delete_data=true")
-    assert r.status_code == 400 and "step 3" in r.json()["error"]
     assert len(client.get("/api/servers").json()) == 1
 
 

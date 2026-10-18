@@ -9,8 +9,12 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import TYPE_CHECKING
 
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+if TYPE_CHECKING:
+    from .backups import BackupInfo
+
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 
 
@@ -128,3 +132,91 @@ class ServerInfo:
     env: tuple[EnvValue, ...] = ()
     detail: str = ""  # e.g. an error message
     created_at: str = ""
+
+
+# ----------------------------------------------------------------------- operation results
+@dataclass(frozen=True)
+class BackupResult:
+    backup: "BackupInfo"
+    was_running: bool
+    stopped_for_backup: bool  # server was stopped so the files were consistent
+    restarted: bool
+    live: bool  # True when a running server was backed up without stopping (may be inconsistent)
+    removed_by_retention: tuple[str, ...]
+    note: str  # plain-language account of what happened
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RestoreResult:
+    restored: str
+    safety_backup: "BackupInfo"
+    note: str
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class WipeResult:
+    safety_backup: "BackupInfo"
+    note: str
+
+
+@dataclass(frozen=True)
+class DeleteResult:
+    deleted: str
+    data_deleted: bool
+    backup: "BackupInfo | None"  # backup taken because data was deleted (kept outside the data folder)
+    note: str
+
+
+@dataclass(frozen=True)
+class ImageInfo:
+    image: str
+    image_id: str | None  # id of the image the container was created from
+    latest_local_id: str | None
+
+
+@dataclass(frozen=True)
+class UpdateResult:
+    image: str
+    before: str | None
+    after: str | None
+    changed: bool
+    was_running: bool
+    restarted: bool
+    backup: "BackupInfo | None"
+    note: str
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ConfigFileInfo:
+    path: str
+    label: str
+    format: str
+    sensitive_keys: tuple[str, ...]
+    hot_edit: bool
+    exists: bool
+    size: int
+    backups: tuple[str, ...] = ()  # names of automatic .bak copies, newest first
+
+
+@dataclass(frozen=True)
+class ConfigContent:
+    info: ConfigFileInfo
+    content: str  # sensitive values are replaced by a placeholder
+    masked: bool
+    running: bool
+    editable_now: bool
+    note: str
+
+
+@dataclass(frozen=True)
+class ConfigSaveResult:
+    path: str
+    size: int
+    backup: str | None
+    running: bool
+    note: str
+
+

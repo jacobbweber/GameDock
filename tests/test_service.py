@@ -253,12 +253,10 @@ def test_delete_refused_while_running(service, deployed):
         service.delete(deployed, confirm=True)
 
 
-def test_delete_data_needs_second_confirmation_then_is_refused_until_backups(service, deployed, tmp_path):
+def test_delete_data_needs_second_confirmation(service, deployed, tmp_path):
     with pytest.raises(ValidationError, match="second explicit confirmation"):
         service.delete(deployed, confirm=True, delete_data=True)
-    with pytest.raises(ValidationError, match="step 3"):
-        service.delete(deployed, confirm=True, delete_data=True, confirm_delete_data=True)
-    assert len(service.list_servers()) == 1  # nothing happened
+    assert len(service.list_servers()) == 1
     assert (tmp_path / "data" / "one" / "saves").is_dir()
 
 
