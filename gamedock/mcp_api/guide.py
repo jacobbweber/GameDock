@@ -6,7 +6,8 @@ ADD_GAME_URI = "gamedock://add-a-game"
 
 MODE_TEXT = {
     "read_only": "Read-only: you can look at things (catalog, servers, stats, backups, schedules, config files, "
-                 "GameDock's version) but not change them.",
+                 "GameDock's version, setup checks, diagnostics, port checks, deploy previews, the audit log) but not change "
+                 "them.",
     "standard": "Standard: you can deploy, start, stop, restart, change settings, update images, make backups, "
                 "change backup and maintenance schedules, edit config files and add games to the catalog (which a person "
                 "must approve). Destructive tools (delete, restore, wipe, delete backup) are NOT available.",
@@ -55,7 +56,24 @@ and GameDock works for any game: a game is just an entry in the catalog.
   rule:** every entry you add is marked "Added by AI, needs your review" and cannot be deployed, by you or in the web page,
   until a person approves it there (there is no tool for that). Entries that came from the repository are never changed.
   Never invent an image, a port or a Steam app id: research them and write in the entry's `notes` what you could not
-  confirm. Never put a password in an entry.
+  confirm. Never put a password in an entry. **Inspect the exact image tag you use** (never assume `latest` exists; when a tag
+  is not found, `inspect_image` lists the tags that exist) and **expose every documented player-facing setting as a field**, or
+  say in `notes` why one was left out: `validate_catalog_entry` warns about both.
+- **After you add a game (add -> approve -> deploy a test copy -> verify -> fix -> re-review)**: `add_catalog_entry` saves the
+  entry as "waiting for approval". You cannot see the person's click directly, so poll `get_catalog_review_status(game_id)`:
+  `state` becomes `approved` (or `changed_since_approval` / `waiting_for_approval` again after an edit), with the file's
+  `fingerprint`. Meanwhile `preview_deploy` (read-only) shows what a deploy would do and says plainly that it cannot be
+  deployed yet. Once approved: `check_ports` / `preview_deploy` (pick spare host ports; two games may share a default), then
+  `deploy_server` a test copy, then `verify_game_setup(server_id)`: a checklist (container, health, ready line, installed
+  game version and whether `steam_app_id` matches the Steam record that is really there, each config file, ports, folders,
+  required settings, disk) with concrete fixes. Use `get_server_logs` and `get_server_diagnostics` for details. To fix the
+  entry call `update_catalog_entry` (it needs a new approval) and then deploy a NEW test copy: a deployed server keeps a
+  snapshot of the entry, so catalog changes never reach it (`get_catalog_review_status` lists servers on an older
+  snapshot). Deleting the old test server needs the person, or full mode. Only a person can approve or delete: say what
+  you need and wait.
+- **Checking and troubleshooting (all read-only)**: `verify_game_setup`, `get_server_diagnostics` (status, container exit code
+  and restarts, ports, disk, backups, newest redacted log lines), `check_ports`, `preview_deploy`, and `get_mcp_audit` (what
+  agents and schedules did; secrets and file contents are never in it).
 - **Config files**: only files listed by `list_config_files` can be read or written. Sensitive values appear
   as placeholders; writing the placeholder back keeps the existing value.
 - **What did someone change?** `get_config_changes(server_id, path)` lists the settings that differ from the game's
@@ -80,10 +98,14 @@ Tools you have: {", ".join(tool_names)}.
 - Is the game out of date? `check_game_update`, then (with the human's agreement, it disconnects players) `update_game`.
 - Regular safety: `set_backup_schedule` (for example daily at 03:00, keep 7), and for a weekly restart with updates
   `set_maintenance_schedule` (for example weekly on sun at 04:00). Check results with `list_schedules`.
-- Add a game: `get_add_game_guide` -> research the image -> `inspect_image` -> write the entry -> `validate_catalog_entry`
-  until valid -> `add_catalog_entry` -> tell the person to approve it in the web page -> (after approval, with their
-  agreement) `deploy_server` a test copy on spare ports -> verify -> report.
-- Port conflicts and other problems come back as plain error messages: read them and adjust.
+- Add a game: `get_add_game_guide` -> research the image -> `inspect_image` (exact tag) -> write the entry ->
+  `validate_catalog_entry` until valid and the warnings are explained -> `add_catalog_entry` -> tell the person to approve it
+  in the web page -> poll `get_catalog_review_status` -> (after approval, with their agreement) `preview_deploy`,
+  `check_ports`, `deploy_server` a test copy on spare ports -> `verify_game_setup` -> fix with `update_catalog_entry` ->
+  re-approval -> redeploy -> report.
+- Before deploying: `preview_deploy` (and `check_ports`). After deploying: `verify_game_setup`; if something is wrong,
+  `get_server_diagnostics`.
+- Port conflicts and other problems come back as plain error messages (with a free port suggested): read them and adjust.
 
 ## Destructive tools: the two-step confirmation (full mode only)
 `delete_server`, `restore_backup`, `delete_backup` and `wipe_server_data` never act on the first call.

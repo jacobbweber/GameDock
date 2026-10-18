@@ -83,6 +83,16 @@ flowchart LR
 - **The gate.** `GameDockService._deploy` calls `require_reviewed`, so the web API, the dashboard, MCP `deploy_server` and anything else that deploys are all stopped at one place.
 - **`inspect_image`.** A backend method (`ContainerBackend.inspect_image`) that runs only `docker image inspect`, `docker buildx imagetools inspect` and `docker manifest inspect`; parsing is in `backends/image_inspect.py` (bounded lists, environment variable names only). It never pulls or runs; a test checks every command it issues.
 
+## Checks, diagnostics and port conflicts (0.6.0)
+
+All read-only; the web page and the MCP tools call the same service methods.
+
+- **`ops_service.py`** (`OpsMixin` of the service): `verify_game_setup` builds a list of `checks.Check` (id, title, pass / warn / fail / skip, detail, fix) from the backend's `get_state` and `container_details`, the Steam manifests in the server's volumes (`steam.list_manifests` finds *all* records, so a wrong `steam_app_id` can be named), the config files (read with the same safe-path rules as the editor), Docker's published ports, the volumes' state and the snapshot-versus-current catalog comparison (`template_drift`). `get_server_diagnostics` assembles the bundle and `diagnostics_text` renders it; log lines go through `checks.redact_text` (known secret values, `password=` / `token=` shapes, bearer tokens, URL credentials). `preview_deploy` builds the same `docker create` argument list as a real deploy (`DockerCliBackend.build_create_args`, secrets masked) and creates nothing.
+- **`portcheck.py`** is pure: `find_conflicts(wanted, servers, catalog_defaults, probe)` returns findings (kind `gamedock_server`, `host_listener`, `catalog_default`, `duplicate`, `invalid`; level conflict / warn / info) and `suggest_free`. The probe is `hostcheck.port_free` and is only wired for the real Docker backend (tests inject it; `None` means "not checked", and the answer says so). Port facts from Docker come from `container_details`, which parses `docker container inspect` (`backends/container_inspect.py`; the environment is never read, and only containers with the `gamedock.managed` label are described).
+- **Authoring additions.** `InspectionStore` (`<data>/inspected-images.json`, 0600, 100 entries, environment variable names only, never values) remembers what `inspect_image` saw for each exact tag, so `validate_catalog_entry` can warn about a tag that was never inspected, one that does not exist, and image ports, variables and folders the entry ignores. `inspect_image` asks Docker Hub's public tag list (read-only, only when update checks are enabled and only for Docker Hub images) to say which tags exist. `CatalogAuthoring.review_status` reports `waiting_for_approval`, `approved`, `changed_since_approval` or `repository` from the review record and the file's fingerprint. Nothing here approves or records anything.
+- **`lint.py`** and `scripts/lint_catalog.py` load every catalog file the way the program does and add the Review dialog's checks; a test fails when a catalog file has an error.
+- **MCP.** Six new read-only tools (`get_catalog_review_status`, `verify_game_setup`, `check_ports`, `preview_deploy`, `get_server_diagnostics`, `get_mcp_audit`; read_only 24, standard 37, full 41 tools). The audit tool reuses `AuditLog.recent`, which masks arguments a second time on the way out.
+
 ## Where things are stored
 
 | What | Where |
@@ -94,6 +104,7 @@ flowchart LR
 | Schedules, run states and run history | `<data>/schedules.json` (atomic, 0600) |
 | MCP audit log (also scheduled runs, approvals in the web page) | `<data>/mcp-audit.jsonl` |
 | Which catalog entries an AI added, and whether you approved them | `<data>/catalog-review.json` (atomic, 0600; not in the repository) |
+| What `inspect_image` saw for each exact tag (env variable names only) | `<data>/inspected-images.json` (atomic, 0600) |
 | Newest Steam build per game (cache, 1 hour) | `<data>/steam-latest.json` |
 | The game's own version text, with the build it belongs to | `<data>/game-versions.json` |
 | Update check results (GameDock, images) | memory only |
@@ -109,7 +120,7 @@ flowchart LR
 
 ## Testing
 
-`scripts/make_screenshots.py` (and `make_screenshots_authoring.py` for the review step) start the real app on the fake backend and drives it with a headless browser (Playwright, not part of the normal test run); it doubles as a browser smoke test for the progress UI, log viewer and config form. `make_screenshots_defaults.py` shows the 0.5.2 "Not default" markers.
+`scripts/make_screenshots.py` (and `make_screenshots_authoring.py` for the review step) start the real app on the fake backend and drives it with a headless browser (Playwright, not part of the normal test run); it doubles as a browser smoke test for the progress UI, log viewer and config form. `make_screenshots_defaults.py` shows the 0.5.2 "Not default" markers and `make_screenshots_checks.py` the 0.6.0 Check setup dialog, the port-conflict note and the diagnostics. `scripts/lint_catalog.py` lints the catalog (the tests run it).
 
 `scripts/check_dialog_layout.py` is the layout check for dialogs: every dialog is built by `openDialog()` as title, one scrolling body and a footer (CSS classes `.dlg`, `.dialog-body`, `.dialog-foot`), and the check asserts a fixed size, visible buttons and a single scroll area at 1000x880, 700x500 and 390x760 (it also runs under pytest, skipped without Playwright and Chrome).
 

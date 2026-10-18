@@ -173,6 +173,57 @@ def find_manifest(app_id: str, roots: list[Path], manifest_dir: str = "", base: 
     return None
 
 
+MANIFEST_NAME_RE = re.compile(r"^appmanifest_([0-9]{1,10})\.acf$")
+
+
+def list_manifests(roots: list[Path], max_depth: int = SEARCH_MAX_DEPTH, max_entries: int = SEARCH_MAX_ENTRIES) -> list[dict]:
+    """Every Steam record (``steamapps/appmanifest_<id>.acf``) found in the given folders, with the same limits and the
+    same no-symlink rule as find_manifest: [{"app_id", "path", "build", "name"}]. Used to say which app id is really
+    there when the catalog's steam_app_id is wrong."""
+    found: list[dict] = []
+    budget = [max_entries]
+
+    def walk(folder: Path, depth: int) -> None:
+        if depth > max_depth or budget[0] <= 0:
+            return
+        steamapps = folder / "steamapps"
+        try:
+            if steamapps.is_dir() and not steamapps.is_symlink():
+                with os.scandir(steamapps) as it:
+                    for e in it:
+                        m = MANIFEST_NAME_RE.match(e.name)
+                        if m and e.is_file(follow_symlinks=False):
+                            game = read_installed(Path(e.path))
+                            state = {}
+                            try:
+                                with open(e.path, "r", encoding="utf-8", errors="replace") as f:
+                                    parsed = parse_manifest(f.read(MAX_MANIFEST_BYTES))
+                                state = parsed.get("AppState") if isinstance(parsed.get("AppState"), dict) else parsed
+                            except OSError:
+                                pass
+                            found.append({"app_id": m.group(1), "path": e.path, "build": game.build if game else None,
+                                          "name": str(state.get("name") or "")[:80]})
+            with os.scandir(folder) as it:
+                subdirs = []
+                for e in it:
+                    budget[0] -= 1
+                    if budget[0] <= 0:
+                        break
+                    try:
+                        if e.is_dir(follow_symlinks=False) and e.name != "steamapps":
+                            subdirs.append(Path(e.path))
+                    except OSError:
+                        continue
+        except OSError:
+            return
+        for sub in sorted(subdirs):
+            walk(sub, depth + 1)
+
+    for root in roots:
+        walk(Path(root), 0)
+    return found
+
+
 def read_installed(path: Path) -> InstalledGame | None:
     """The installed game described by one manifest file; None if it cannot be read or has no build id."""
     try:

@@ -9,6 +9,7 @@ from typing import Callable
 
 from ..errors import BackendError
 from ..models import ContainerSpec, ContainerStats, Status
+from . import docker_errors
 from .base import ContainerState, DockerDiagnosis
 
 
@@ -34,6 +35,9 @@ class FakeBackend:
         self.image_facts: dict[str, dict] = {}   # image name -> what `docker image inspect` would show (only for local images)
         self.remote_facts: dict[str, dict] = {}  # image name -> {"digest", "platforms"} the pretend registry shows
         self._start_hooks: dict[str, Callable[[], None]] = {}  # container name -> called each time it starts
+        self.restart_counts: dict[str, int] = {}              # container name -> pretend restart count
+        self.exit_info: dict[str, tuple[int, bool]] = {}      # container name -> (exit code, out of memory) while stopped
+        self.unpublished_ports: dict[str, set[str]] = {}      # container name -> {"27015/udp"} pretend not published
 
     def _pause(self, action: str) -> None:
         d = self.delays.get(action, 0)
@@ -179,6 +183,8 @@ class FakeBackend:
                 out["remote"] = None
                 out["remote_error"] = ("The registry could not be asked (no internet)." if self.offline else
                                        "The registry could not be asked (the image was not found there).")
+                out["remote_error_kind"] = "offline" if self.offline else "not_found"
+                out["failure"] = (docker_errors.registry_failure(out["remote_error_kind"], image))
             return out
 
     def local_image_digests(self, ref: str) -> tuple[str, ...]:
@@ -198,6 +204,31 @@ class FakeBackend:
                 raise BackendError(f"The container '{name}' is not running, so a command cannot be run in it.")
             self.exec_log.append((name, list(argv)))
             return "ok\n"
+
+    def container_details(self, name: str) -> dict | None:
+        with self._lock:
+            self.calls.append(("container_details", name))
+            entry = self._containers.get(name)
+            if entry is None:
+                return None
+            spec, status = entry
+            running = status == Status.RUNNING
+            hidden = self.unpublished_ports.get(name, set())
+            started = self._started.get(name)
+            code, oom = self.exit_info.get(name, (0, False))
+            return {
+                "status": "running" if running else "exited" if name in self.exit_info else "created",
+                "exit_code": None if running else code, "oom_killed": False if running else oom,
+                "restart_count": self.restart_counts.get(name, 0),
+                "started_at": started.isoformat() if running and started else "", "finished_at": "", "error": "",
+                "health": self.health.get(name, "") if running else "",
+                "ports": [{"container": p.container, "protocol": p.protocol, "host_ip": "0.0.0.0", "host_port": p.host}
+                          for p in spec.ports if f"{p.container}/{p.protocol}" not in hidden],
+                "unpublished": sorted(hidden),
+                "mounts": [{"source": v.host, "target": v.container, "writable": True, "type": "bind"}
+                           for v in spec.volumes],
+                "image": spec.image,
+            }
 
     def get_image_id(self, image: str) -> str | None:
         return self.local_images.get(image)

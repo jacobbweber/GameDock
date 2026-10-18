@@ -1,9 +1,12 @@
 """The service methods behind the "add a game" tools and the Review dialog (mixed into GameDockService)."""
 from __future__ import annotations
 
+import difflib
+import json
 from pathlib import Path
 
 from . import authoring as au
+from . import steam as steam_module
 from .errors import BackendError, ConflictError, ValidationError
 from .models import IMAGE_RE
 
@@ -13,15 +16,19 @@ GUIDE_RESOURCE = "gamedock://add-a-game"
 
 STEPS = (
     "Find a maintained Docker image for the game's dedicated server and read its documentation.",
-    "Confirm the ports and their protocols (UDP or TCP).",
+    "Inspect the EXACT image tag you will use (inspect_image) and confirm the ports and their protocols (UDP or TCP).",
     "Confirm which folders hold the saves and the settings, and mount them.",
-    "Identify the environment variables and which of them are secret.",
+    "Identify every documented player-facing environment variable and which of them are secret; expose each as a field "
+    "(or say in the notes why one was left out).",
     "Find the Steam app id of the dedicated server (not the game) and how the image updates the game with SteamCMD.",
     "Find the log lines that mean ready, show the version and show download progress.",
     "Write the entry (start from catalog/_template.yaml).",
-    "Validate it (validate_catalog_entry), then add it (add_catalog_entry).",
-    "After a person approves it: deploy a test copy on spare ports.",
-    "Verify joining, config editing, backup and restore, and report the result.",
+    "Validate it (validate_catalog_entry) until it has no errors and no warnings you cannot explain, then add it "
+    "(add_catalog_entry).",
+    "Wait for a person to approve it in the web page (poll get_catalog_review_status), then preview_deploy and check_ports, "
+    "and deploy a test copy on spare ports.",
+    "Verify (verify_game_setup, get_server_logs, get_server_diagnostics), fix the entry with update_catalog_entry, ask for "
+    "re-approval, redeploy the test copy, and report the result.",
 )
 FALLBACK_PROCEDURE = (
     "# Adding a game to GameDock (short version)\n\nThe full procedure is the file docs/ADDING_A_GAME.md in the GameDock "
@@ -49,6 +56,7 @@ class AuthoringMixin:
     def _init_authoring(self) -> None:
         self.authoring = au.CatalogAuthoring(self.catalog_dir, self.data_dir, entries=self._catalog,
                                              changed=self._catalog_changed)
+        self.http_get = steam_module.default_http_get   # (url, timeout) -> (status, text); tests replace it
 
     def _catalog_changed(self) -> None:
         self._entries_cache = None
@@ -82,6 +90,26 @@ class AuthoringMixin:
 
     def catalog_review(self, game_id: str) -> dict:
         return self.authoring.review_info(game_id)
+
+    def catalog_review_status(self, game_id: str, include_yaml: bool = False) -> dict:
+        """Read-only approval state of one entry, plus which deployed servers still run an older snapshot of it."""
+        out = self.authoring.review_status(game_id, include_yaml)
+        servers = []
+        entry = self._catalog().get(game_id)
+        for inst in self.store.all():
+            if inst.game_id != game_id or entry is None:
+                continue
+            drift = self.template_drift(inst, entry)
+            servers.append({"server_id": inst.id, "name": inst.name, "uses_current_entry": not drift,
+                            "differences": drift})
+        out["servers"] = servers
+        stale = [x["server_id"] for x in servers if not x["uses_current_entry"]]
+        if stale:
+            out["servers_on_older_snapshot"] = stale
+            out["servers_note"] = ("These servers were deployed from an older version of the entry and keep that snapshot "
+                                   "(image, ports, folders, settings, config files). Changing the entry does not change "
+                                   "them: delete and deploy again to use the current version.")
+        return out
 
     def approve_catalog_entry(self, game_id: str, yaml_sha256: str) -> dict:
         r = self.authoring.approve(game_id, yaml_sha256)
@@ -122,6 +150,16 @@ class AuthoringMixin:
             "template_yaml": self.add_game_template(),
             "limits": dict(au.LIMITS),
             "rules": [
+                "Always inspect the exact image tag you use (inspect_image with that tag); never assume that 'latest' exists. "
+                "validate_catalog_entry warns when the tag was never inspected.",
+                "Expose every documented player-facing setting as a field, or list in the entry's notes why one was left out. "
+                "validate_catalog_entry warns about image variables that are neither exposed nor fixed in env.",
+                "Add, then wait: the entry cannot be deployed until a person approves it. Poll get_catalog_review_status "
+                "(read-only) to see whether they did; it also says if the file changed after approval.",
+                "After approval deploy a test copy on spare ports (preview_deploy and check_ports first), then run "
+                "verify_game_setup. Fix what it reports with update_catalog_entry, ask for approval again, and redeploy: a "
+                "deployed server keeps a snapshot of the entry, so catalog changes only reach a NEW deploy (ask the person to "
+                "delete the test server, or use full mode).",
                 "Never invent an image name, a port or a Steam app id. Research them from the image's own documentation; "
                 "if you cannot confirm something, leave it out or say so in the entry's notes.",
                 "Never put a password or token in the entry. Make it a field with secret: true.",
@@ -133,7 +171,11 @@ class AuthoringMixin:
                 "host networking, devices, extra capabilities and the Docker socket are never allowed.",
             ],
             "tools": ["get_add_game_guide", "inspect_image", "validate_catalog_entry", "add_catalog_entry",
-                      "update_catalog_entry"],
+                      "update_catalog_entry", "get_catalog_review_status", "check_ports", "preview_deploy",
+                      "verify_game_setup", "get_server_diagnostics"],
+            "workflow": ["add_catalog_entry", "(person approves in the web page; poll get_catalog_review_status)",
+                         "preview_deploy + check_ports", "deploy_server (test copy, spare ports)", "verify_game_setup",
+                         "fix with update_catalog_entry -> re-approval -> redeploy", "report"],
             "resource": GUIDE_RESOURCE,
         }
 
@@ -144,7 +186,71 @@ class AuthoringMixin:
             raise ValidationError(f"'{image}' is not a normal image reference. Use name[:tag][@digest] with letters, "
                                   "digits and . _ - / : @ only, for example 'someuser/some-server:1.2'.")
         info = self.backend.inspect_image(image)   # may raise BackendError with a plain sentence
-        return _describe_image(info)
+        out = _describe_image(info)
+        missing = not out.get("local") and not out.get("remote")
+        kind = out.get("remote_error_kind") or ""
+        if missing and kind in ("not_found", "denied") and "@" not in image:
+            tags = self._known_tags(image)
+            out["tag_status"] = "not_found"
+            out["available_tags"] = tags.get("tags", [])
+            out["similar_tags"] = tags.get("similar", [])
+            out["tag_listing"] = tags.get("note", "")
+            out["summary"] = list(out["summary"]) + _tag_notes(image, tags)
+        elif missing:
+            out["tag_status"] = "unknown"
+        else:
+            out["tag_status"] = "found"
+        out["ok"] = not missing
+        out["failure_reason"] = (out.get("failure") or out.get("remote_error") or "") if missing else ""
+        try:
+            self.authoring.inspections.record(image, out)
+        except Exception:  # noqa: BLE001 - remembering the inspection is a convenience
+            pass
+        return out
+
+    # Docker Hub's public tag list (read-only). Other registries are not asked.
+    _TAG_LIST_TIMEOUT = 6.0
+
+    def _known_tags(self, image: str) -> dict:
+        """Tags the registry lists for this image: {"tags": [...], "similar": [...], "note": why nothing / where from}."""
+        ref = image.split("@", 1)[0]
+        last = ref.rsplit("/", 1)[-1]
+        name, wanted = (ref.rpartition(":")[0], last.split(":", 1)[1]) if ":" in last else (ref, "")
+        first, _, rest = name.partition("/")
+        if rest and ("." in first or ":" in first or first == "localhost"):
+            return {"note": f"Tag lists are only available for Docker Hub images; {first} is another registry. Look at the "
+                            "image's own page for its tags."}
+        repo = name if "/" in name else f"library/{name}"
+        if not getattr(self.steam, "enabled", True):
+            return {"note": "Looking up tags online is switched off (GAMEDOCK_UPDATE_CHECK=false)."}
+        url = f"https://hub.docker.com/v2/repositories/{repo}/tags?page_size=30&ordering=last_updated"
+        try:
+            status, body = self.http_get(url, self._TAG_LIST_TIMEOUT)
+        except Exception as e:  # noqa: BLE001 - offline or blocked: say so, do not fail the inspection
+            return {"note": f"The tag list could not be fetched from Docker Hub ({type(e).__name__}); the machine may be offline."}
+        if status == 404:
+            return {"note": f"Docker Hub has no repository '{repo}': the image name itself looks wrong."}
+        if status != 200:
+            return {"note": f"Docker Hub's tag list was not available (HTTP {status})."}
+        try:
+            names = [str(r.get("name")) for r in (json.loads(body).get("results") or []) if isinstance(r, dict) and r.get("name")]
+        except (ValueError, AttributeError):
+            return {"note": "Docker Hub's tag list could not be read."}
+        similar = difflib.get_close_matches(wanted, names, n=3, cutoff=0.4) if wanted else []
+        return {"tags": names[:30], "similar": similar,
+                "note": "Newest tags first, from Docker Hub." if names else "Docker Hub lists no tags for this image."}
+
+
+def _tag_notes(image: str, tags: dict) -> list[str]:
+    notes = []
+    if tags.get("tags"):
+        notes.append("Tags that exist for this image (newest first): " + ", ".join(tags["tags"][:20]) + ".")
+        if tags.get("similar"):
+            notes.append("Closest to the one you asked for: " + ", ".join(tags["similar"]) + ".")
+        notes.append("Pick one of these exact tags and call inspect_image again with it.")
+    elif tags.get("note"):
+        notes.append(tags["note"])
+    return notes
 
 
 def _describe_image(info: dict) -> dict:
@@ -183,8 +289,8 @@ def _describe_image(info: dict) -> dict:
                      + (". Platforms: " + ", ".join(plat) + "." if plat else "."))
         if plat and not any(p.startswith("linux/amd64") for p in plat):
             notes.append("WARNING: no linux/amd64 build is listed, so it will probably not run on a normal PC or server.")
-    elif info.get("remote_error"):
-        notes.append(info["remote_error"])
+    elif info.get("failure") or info.get("remote_error"):
+        notes.append(info.get("failure") or info["remote_error"])
     out["summary"] = notes
     out["pulled_or_ran"] = False
     return out

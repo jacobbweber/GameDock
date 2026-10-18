@@ -10,6 +10,12 @@ A server that is still downloading its game files shows **Installing 52%** inste
 
 ![Installing](docs/gamedock-020-installing.png)
 
+**New in 0.6.0:** troubleshooting and review tools, built from a real AI-agent review (AutoReiv adding ASKA). Each server card has a **Check setup** button: a read-only checklist of what is right and wrong (container, ready line, game version and Steam app id, config files, ports, folders, required settings), with the concrete fix for each problem and a **Copy diagnostics** button (passwords hidden) for pasting into a chat. The Deploy dialog warns, as you type, when a host port is already used by another server or another program, and offers a free one. AI agents get matching read-only tools (`verify_game_setup`, `check_ports`, `preview_deploy`, `get_server_diagnostics`, `get_catalog_review_status`, `get_mcp_audit`), `inspect_image` now says which tags exist when a tag is wrong, and `validate_catalog_entry` catches more mistakes before a person has to.
+
+![Check setup dialog](docs/gamedock-060-check-setup.png)
+
+![The Deploy dialog warning that a port is taken, with a free one offered](docs/gamedock-060-port-conflict.png)
+
 **New in 0.5.0:** adding a game is now a written, repeatable procedure ([docs/ADDING_A_GAME.md](docs/ADDING_A_GAME.md)), and your AI agent can do much of the work through MCP: it reads the guide, inspects the Docker image (without downloading it), validates and adds a catalog entry. An entry an AI added is marked **Added by AI, needs your review** and cannot be deployed until you read it and press **Approve**.
 
 ![A catalog entry added by an AI, waiting for review, with Deploy switched off](docs/gamedock-050-catalog-unreviewed.png)
@@ -38,9 +44,10 @@ A server that is still downloading its game files shows **Installing 52%** inste
 - **Schedules:** automatic backups (every few hours, daily, or on chosen weekdays, with how many to keep) and regular maintenance (back up, apply updates to the game and its image, restart) for each server.
 - A **Health** page and a `doctor` command that tell you in plain language what is wrong and how to fix it.
 - A step-by-step guide for adding new games ([docs/ADDING_A_GAME.md](docs/ADDING_A_GAME.md)), a template (`catalog/_template.yaml`), and MCP tools so an AI agent can research, validate and add an entry that you then review and approve.
+- **Check setup** and **Copy diagnostics** on every server, port-conflict warnings in the Deploy dialog, and an MCP audit section ([Troubleshooting a server](#troubleshooting-a-server)).
 - An optional MCP endpoint for AI agents (read-only, standard or full mode, with two-step confirmation for anything destructive).
 
-**Version:** 0.5.1. See [CHANGELOG.md](CHANGELOG.md). How it is built: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+**Version:** 0.6.0. See [CHANGELOG.md](CHANGELOG.md). How it is built: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Quick start
 
@@ -377,17 +384,17 @@ GameDock serves a [Model Context Protocol](https://modelcontextprotocol.io) endp
 | Mode | Tools served |
 |---|---|
 | `off` | none (`/mcp` answers 404 with an explanation) |
-| `read_only` | `list_catalog`, `get_catalog_entry`, `list_servers`, `get_server_status`, `get_server_stats`, `get_host_stats`, `get_stats_history`, `list_backups`, `list_config_files`, `read_config_file`, `get_config_changes`, `get_server_logs`, `get_gamedock_version`, `list_schedules`, `check_game_update`, and for adding games `get_add_game_guide`, `validate_catalog_entry`, `inspect_image` (18 tools) |
-| `standard` (default) | read-only tools plus `deploy_server`, `start_server`, `stop_server`, `restart_server`, `update_server_settings`, `update_server_image`, `create_backup`, `write_config_file`, `set_backup_schedule`, `set_maintenance_schedule`, `update_game`, `add_catalog_entry`, `update_catalog_entry` (31 tools) |
-| `full` | standard plus the destructive tools `delete_server`, `restore_backup`, `delete_backup`, `wipe_server_data` (35 tools) |
+| `read_only` | `list_catalog`, `get_catalog_entry`, `list_servers`, `get_server_status`, `get_server_stats`, `get_host_stats`, `get_stats_history`, `list_backups`, `list_config_files`, `read_config_file`, `get_config_changes`, `get_server_logs`, `get_gamedock_version`, `list_schedules`, `check_game_update`, and for adding games `get_add_game_guide`, `validate_catalog_entry`, `inspect_image`, and the 0.6.0 checks `get_catalog_review_status`, `verify_game_setup`, `check_ports`, `preview_deploy`, `get_server_diagnostics`, `get_mcp_audit` (24 tools) |
+| `standard` (default) | read-only tools plus `deploy_server`, `start_server`, `stop_server`, `restart_server`, `update_server_settings`, `update_server_image`, `create_backup`, `write_config_file`, `set_backup_schedule`, `set_maintenance_schedule`, `update_game`, `add_catalog_entry`, `update_catalog_entry` (37 tools) |
+| `full` | standard plus the destructive tools `delete_server`, `restore_backup`, `delete_backup`, `wipe_server_data` (41 tools) |
 
 Tools outside the mode are not listed at all and cannot be called. If `GAMEDOCK_HOST` is not localhost and `GAMEDOCK_MCP_TOKEN` is empty, the mode is forced to `off` (a warning is logged and the web page explains why).
 
 ### Adding a game through MCP
 
-An agent can help add a new game. The tools are `get_add_game_guide` (the procedure, a field reference and a template), `inspect_image` (read-only: it never downloads or runs an image; for an image already on the machine it shows the declared ports, volumes, user, environment variable names and health check, otherwise it says so and how to pull it, and it shows what the registry says), `validate_catalog_entry` (a dry run with exactly the checks of adding; saves nothing) and, in `standard` and `full` modes, `add_catalog_entry` and `update_catalog_entry`. The procedure is also the resource `gamedock://add-a-game` and the prompt `add_a_game`.
+An agent can help add a new game. The tools are `get_add_game_guide` (the procedure, a field reference and a template), `inspect_image` (read-only: it never downloads or runs an image; for an image already on the machine it shows the declared ports, volumes, user, environment variable names and health check, otherwise it says so and how to pull it, and it shows what the registry says), `validate_catalog_entry` (a dry run with exactly the checks of adding; saves nothing; since 0.6.0 it also warns about an image tag that was never inspected, variables, ports or folders the image declares but the entry ignores, a `steam_app_id` GameDock could not confirm, a very short settings list and default-port clashes) and, in `standard` and `full` modes, `add_catalog_entry` and `update_catalog_entry`. After a person approves the entry: `get_catalog_review_status` (where it stands: `waiting_for_approval`, `approved`, `changed_since_approval`, `repository`), `preview_deploy`, `check_ports`, `verify_game_setup` and `get_server_diagnostics`. `inspect_image` answers `tag_status: not_found` with the tags that exist (Docker Hub images; other registries are not asked) and a plain reason. The loop is *add, wait for approval, deploy a test copy, verify, fix, re-review* (see [docs/ADDING_A_GAME.md](docs/ADDING_A_GAME.md)). The procedure is also the resource `gamedock://add-a-game` and the prompt `add_a_game`.
 
-**The review rule.** `add_catalog_entry` validates strictly, then writes `catalog/<id>.yaml` (the file name comes from the validated id; nothing outside the catalog folder is ever written; an id that exists is refused, so nothing is overwritten) and records it in `<data>/catalog-review.json` (not in the repository) as added by MCP, **not reviewed**, with the file's SHA-256. Until a person approves it, the Catalog page shows **Added by AI, needs your review**, the Deploy button is off, and both the web API and `deploy_server` refuse it. **Review** shows a plain summary (image, ports, folders it will mount, secret fields, anything unusual) and the whole file; **Approve** records the fingerprint of exactly what was shown (if the file is changed afterwards by anyone it is unreviewed again); **Reject** deletes the file after a confirmation. These buttons exist only in the web page; there is no MCP tool for approving. `update_catalog_entry` works only on entries the agent itself added, never on entries from the repository (git-tracked files), and sends the entry back to "needs review". Every authoring call is in the audit log (the YAML itself is not logged, only a size and fingerprint).
+**The review rule.** `add_catalog_entry` validates strictly, then writes `catalog/<id>.yaml` (the file name comes from the validated id; nothing outside the catalog folder is ever written; an id that exists is refused, so nothing is overwritten) and records it in `<data>/catalog-review.json` (not in the repository) as added by MCP, **not reviewed**, with the file's SHA-256. Until a person approves it, the Catalog page shows **Added by AI, needs your review**, the Deploy button is off, and both the web API and `deploy_server` refuse it. **Review** shows a plain summary (image, ports, folders it will mount, secret fields, anything unusual) and the whole file; **Approve** records the fingerprint of exactly what was shown (if the file is changed afterwards by anyone it is unreviewed again); **Reject** deletes the file after a confirmation. These buttons exist only in the web page; there is no MCP tool for approving (and none that re-records a config baseline). `update_catalog_entry` works only on entries the agent itself added, never on entries from the repository (git-tracked files), and sends the entry back to "needs review". Every authoring call is in the audit log (the YAML itself is not logged, only a size and fingerprint).
 
 ### Destructive tools need two steps
 
@@ -404,7 +411,7 @@ An agent can help add a new game. The tools are `get_add_game_guide` (the proced
 
 ### Audit log
 
-Every call (and every refused connection) is appended as one JSON line to `<data folder>/mcp-audit.jsonl` (mode 0600, rotated at 5 MB, one old file kept): `time` (UTC), `tool`, `args` (secret values and file contents masked), `status` (`ok`, `error`, `confirmation_required`, `token_rejected`, `invalid_arguments`, `unknown_tool`, `denied`, `crashed`), a short `detail` for problems and the caller's address. Read it at `GET /api/mcp/audit?limit=50` (newest first) or on the AI agents page.
+Every call (and every refused connection) is appended as one JSON line to `<data folder>/mcp-audit.jsonl` (mode 0600, rotated at 5 MB, one old file kept): `time` (UTC), `tool`, `args` (secret values and file contents masked), `status` (`ok`, `error`, `confirmation_required`, `token_rejected`, `invalid_arguments`, `unknown_tool`, `denied`, `crashed`), a short `detail` for problems and the caller's address. Read it at `GET /api/mcp/audit?limit=50` (newest first; `&tool=` and `&status=` filter it), with the read-only MCP tool `get_mcp_audit`, or on the AI agents page (**Last N calls**, **Only problems**).
 
 ### Connecting an agent
 
@@ -484,6 +491,18 @@ The Docker route mounts `/var/run/docker.sock` into the GameDock container. That
 
 Stopping or restarting GameDock does not stop your game servers (they are separate containers with restart policy `unless-stopped`).
 
+## Troubleshooting a server
+
+Three read-only helpers (nothing here changes a server, a file or the catalog):
+
+- **Check setup** (button on each server card, also the MCP tool `verify_game_setup`). A checklist with OK / Check / Problem / Skipped for: the container (running, restart count, exit code, out of memory), the image's health check, the game's ready line, the installed game version (the Steam record `appmanifest_<id>.acf`; if `steam_app_id` is wrong it names the id it really found), the newest known Steam build, the game's version line in the log, each config file (exists, readable, parses, empty), each port (published by Docker, bound on the machine, or taken by another program), each folder (exists, writable, mounted in the running container), file ownership, free disk space, required settings, and whether the catalog entry changed after the server was deployed. Every Check or Problem comes with a *Fix* in plain words. Some results are only "Check" on a young server because the game may not have written its files yet; run it again after the first start.
+- **Copy diagnostics** (in the same dialog; `GET /api/servers/{id}/diagnostics`, MCP `get_server_diagnostics`). One block of text: GameDock version, status and phase, Docker's facts about the container, ports, settings (passwords only as set / not set), data folder size, free disk, backups, update checks and the newest log lines. Password values, `password=` / `token=` shapes, bearer tokens and passwords in URLs are replaced by `********` (the server's own secret values are masked wherever they appear). Read it before you paste it somewhere.
+- **Port conflicts.** In the Deploy and Edit dialogs a note appears under the ports when a host port is already used by another GameDock server (a conflict), by another program on this machine (a conflict, found by trying to bind it: only with the real Docker backend) or is the default of another catalog game (information only). **Use N** fills in a free port. The same logic is `POST /api/ports/check`, the MCP tool `check_ports` and part of `preview_deploy` (a dry run of a deploy that shows the container command with secrets hidden and every problem at once). Deploy errors now say what to do ("The setting 'X' (NAME) is required", "the container port must be one of ...", "Could not create the server ... Nothing was saved or started").
+
+A server keeps a **snapshot** of its catalog entry from the day it was deployed. If you (or an agent) fix the entry later, an existing server does not change: Check setup shows "The catalog entry changed after this server was deployed", and the fix is to delete that server (keep or wipe its data) and deploy it again.
+
+![Diagnostics](docs/gamedock-060-diagnostics.png)
+
 ## Troubleshooting
 
 Start with `python -m gamedock doctor` (or the Health page). It names most of these.
@@ -493,7 +512,8 @@ Start with `python -m gamedock doctor` (or the Health page). It names most of th
 | "The 'docker' command was not found" | Docker Engine is not installed, or not on the PATH of the user running GameDock | Install Docker Engine (docs.docker.com/engine/install). Check `docker --version`. |
 | "Cannot connect to the Docker daemon" | The Docker service is not running | `sudo systemctl enable --now docker`, then `docker ps` |
 | "permission denied ... docker.sock" | This user is not in the `docker` group | `sudo usermod -aG docker $USER`, then log out and back in (or restart the GameDock service). Remember: the docker group is root-equivalent. |
-| "port is already allocated" / "address already in use" | Something else on the machine uses that host port | Pick another host port in the deploy or Edit form. GameDock also checks this before start. |
+| "port is already allocated" / "address already in use" | Something else on the machine uses that host port | Pick another host port in the deploy or Edit form (the dialog now warns and offers a free one). GameDock also checks this before start. To see what uses a port: `sudo ss -lntup \| grep :<port>`. |
+| A server is up but something is off (no version, config file missing, wrong port) | The catalog entry and the image disagree | Press **Check setup** on the card and follow each Fix. |
 | Deploy seems stuck on the first run | The image is being downloaded (can be many GB) | Wait; watch the network. Nothing is wrong unless it ends with an error. |
 | "image not found" / "pull access denied" | Wrong image name in the catalog file, or a private image | Check the name and tag on Docker Hub. |
 | "no matching manifest" | The image does not exist for this CPU type (e.g. x86 only image on ARM) | Use an image built for your CPU. |
@@ -539,6 +559,11 @@ Start with `python -m gamedock doctor` (or the Health page). It names most of th
 | GET | `/api/servers/{id}/game-update` | the game's installed and newest version and status (cached; asks nothing) |
 | POST | `/api/servers/{id}/game-update/check` | ask the Steam data service now (read-only) |
 | POST | `/api/servers/{id}/update-game?confirm=true` | update the game: backup, restart, verify the build changed |
+| GET | `/api/servers/{id}/check-setup` | the Check setup checklist (read-only) |
+| GET | `/api/servers/{id}/diagnostics?lines=60` | `{data, text}`: the diagnostics bundle and the same as redacted plain text |
+| POST | `/api/ports/check` | `{ports:[{protocol,host}], game_id?, server_id?}`: which host ports are free, with suggestions (read-only) |
+| POST | `/api/catalog/{id}/deploy-preview` | `{name, ports?, env?}`: dry run of a deploy (creates nothing, secrets hidden) |
+| GET | `/api/catalog/{id}/review-status` | approval state of a catalog entry (read-only) |
 | GET | `/api/servers/{id}/logs?lines=200` | end of the container log (ANSI removed, secrets masked; 1 to 1000 lines) |
 | GET | `/api/servers/{id}/config` | declared config files |
 | POST | `/api/servers/{id}/config/form` | read-only for the game's files: `{path, content?, changes?}` returns the form fields (each with `default`, `differs`, `status` = same / changed / new, plus `form.missing`, `form.differing` and a top-level `baseline` = `{available, captured_at, origin, just_recorded, has_previous}`), or the new file text for `changes` (nothing is written; the defaults are recorded from the file on disk if that has not happened yet) |
@@ -549,7 +574,7 @@ Start with `python -m gamedock doctor` (or the Health page). It names most of th
 | GET | `/api/servers/{id}/stats` | one server's numbers |
 | GET | `/api/stats/history?window=600`, `/api/servers/{id}/stats/history?window=600` | recent samples for sparklines (seconds back, 10 to the history kept) |
 | GET | `/metrics` | Prometheus text; only when `GAMEDOCK_METRICS_ENABLED=true` |
-| GET | `/api/mcp/info`, `/api/mcp/audit?limit=50` | MCP status for the UI (never includes the token) and the audit log, newest first |
+| GET | `/api/mcp/info`, `/api/mcp/audit?limit=50&tool=&status=` | MCP status for the UI (never includes the token) and the audit log, newest first |
 | POST | `/mcp` | the MCP endpoint (see [AI agents](#ai-agents-mcp)) |
 | GET | `/api/health` | liveness |
 | GET | `/api/status` | small summary for the banner: is Docker reachable, which catalog files are broken, which AI-added games wait for review |
@@ -573,6 +598,10 @@ gamedock/
   readiness.py     Starting / Installing NN% / Ready decision from health status and log lines
   hoststats.py     host CPU / memory / disk from /proc and shutil
   hostcheck.py     port probe, free space, file-owner scan
+  portcheck.py     port conflict logic (GameDock servers, programs on the machine, catalog defaults, free-port suggestions)
+  checks.py        pure helpers for Check setup and diagnostics (result types, redaction, config-file parsing)
+  ops_service.py   Check setup, port check, deploy preview and diagnostics (part of the service, read-only)
+  lint.py          catalog lint used by scripts/lint_catalog.py and the tests
   doctor.py        the health checks (CLI, API and UI share them)
   sampler.py       background thread feeding the in-memory history
   schedule.py      schedule rules, next-run maths (timezone and DST aware), schedules.json store
@@ -590,7 +619,7 @@ catalog/           game templates (examples plus the smoke test)
 deploy/            example systemd units and settings file (not installed anywhere)
 docs/              architecture, deployment, first-test checklist, screenshots
 tests/             pytest suite (no Docker needed)
-scripts/           update_docs.py (regenerates the field table in docs/ADDING_A_GAME.md), make_screenshots*.py: browser smoke tests + screenshots on the fake backend (need Playwright)
+scripts/           update_docs.py (regenerates the field table in docs/ADDING_A_GAME.md), lint_catalog.py (checks every catalog file; run by the tests), make_screenshots*.py: browser smoke tests + screenshots on the fake backend (need Playwright)
 ```
 
 ## Tests
@@ -598,6 +627,7 @@ scripts/           update_docs.py (regenerates the field table in docs/ADDING_A_
 ```bash
 pip install -e '.[dev]'
 pytest
+.venv/bin/python scripts/lint_catalog.py   # catalog lint (the tests run it too)
 ```
 
 The tests use the in-memory engine and fake `docker` scripts, so they need no Docker. One extra browser test (`tests/test_browser_dialog_layout.py`, from `scripts/check_dialog_layout.py`) checks that every dialog keeps a fixed size with a single scroll area; it needs Playwright and Chrome and is skipped without them (or with `GAMEDOCK_SKIP_BROWSER_TESTS=1`). The real Docker backend is covered by command-construction tests but has not yet been run against a real engine; [docs/NIMO_FIRST_TEST.md](docs/NIMO_FIRST_TEST.md) is the first real run.

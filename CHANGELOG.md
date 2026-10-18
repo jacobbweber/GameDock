@@ -2,6 +2,36 @@
 
 All notable changes. Dates are 2026.
 
+## 0.6.0: Check setup, port-conflict warnings, diagnostics and a stricter add-a-game loop
+
+Built from a real AI-agent review (AutoReiv adding ASKA through MCP) and from the questions a person asks when a new server does not behave: *is it set up the way the entry says, is the port free, what do I paste into a chat?* Everything new is read-only: no tool approves an entry or re-records a config baseline, and nothing destructive was added.
+
+### Added
+
+- **Check setup** (button on every server card; `GET /api/servers/{id}/check-setup`; MCP `verify_game_setup`). A read-only checklist (OK / Check / Problem / Skipped, each with a plain "How to fix"): container (running, restarts, exit code, out of memory), Docker health check, the game's ready line, installed game version and Steam record (a wrong `steam_app_id` names the id that is really there), newest Steam build, version log line, each config file (missing, with a look-alike path suggested, empty, not parsing), each port (published, bound, taken by another program), each folder (exists, writable, mounted in the running container), file ownership, free disk, required settings, and whether the catalog entry changed after the server was deployed (a server keeps a snapshot).
+- **Diagnostics** (`GET /api/servers/{id}/diagnostics?lines=`, MCP `get_server_diagnostics`, **Copy diagnostics** button in the Check setup dialog): status, container facts from `docker container inspect`, ports, settings (secrets only as set / not set), data size, disk, backups, update checks and the newest log lines, with known secret values, `password=` / `token=` shapes, bearer tokens and URL credentials replaced by `********`.
+- **Port conflicts.** `check_ports` (MCP, `POST /api/ports/check`): a port used by another GameDock server (conflict), by another program on the machine (conflict, real Docker backend only) or by another catalog game's default (information), duplicate and invalid ports, and a free port to use instead. The Deploy and Edit dialogs show it as you type with a **Use N** button. `preview_deploy` (MCP, `POST /api/catalog/{id}/deploy-preview`) is a dry run of a deploy: image, ports, folders and the container command with secrets hidden, with every problem listed at once (unapproved entry, name taken, missing required setting, port conflict). It creates nothing.
+- **Review status.** `get_catalog_review_status` (MCP, `GET /api/catalog/{id}/review-status`): `waiting_for_approval`, `approved`, `changed_since_approval` or `repository`, fingerprints, timestamps, whether it can be deployed, what to do next, and which deployed servers still run an older snapshot of the entry. The documented loop is add, wait for approval, deploy a test copy, verify, fix, re-review. Deploying an unapproved entry is still refused everywhere.
+- **`inspect_image` for a wrong tag.** `tag_status: not_found` with a plain reason (not found, private or denied, rate limit, offline), the tags that exist for Docker Hub images (and the closest ones), `ok` and `failure_reason`. What it saw is remembered per exact tag in `<data>/inspected-images.json` (variable names only, never values).
+- **`validate_catalog_entry` warnings:** the tag was never inspected; the inspection failed and the tag is `latest`; the image declares variables, ports or volumes the entry ignores; no ready pattern and no health check; `steam_app_id` that can never be confirmed (no mounted folder); fewer than 5 settings without a note saying what was left out; a default host port that another catalog game also uses.
+- **`get_mcp_audit`** (MCP) and an **AI agents** page section with "Last N calls" and "Only problems"; `GET /api/mcp/audit` takes `tool` and `status`.
+- **`scripts/lint_catalog.py`** (`--strict`, `--notes`) and `gamedock/lint.py`; a test runs it on the repository catalog.
+- **Clearer deploy errors:** the required-setting message names the label and variable, a wrong container port lists the valid ones, an unknown setting lists the valid ones, a port in use suggests a free one, and a failed create says that nothing was saved or started.
+- Docs: ADDING_A_GAME (exact-tag rule, expose every documented setting, the loop, the new tools), the agent prompt, README, ARCHITECTURE. Screenshots `docs/gamedock-060-*.png` from `scripts/make_screenshots_checks.py`. `scripts/check_dialog_layout.py` now also covers Check setup (with the diagnostics open) and the deploy dialog with a port note.
+- **Tool counts:** read_only 24, standard 37, full 41 (six new read-only tools: `get_catalog_review_status`, `verify_game_setup`, `check_ports`, `preview_deploy`, `get_server_diagnostics`, `get_mcp_audit`).
+
+### Changed
+
+- Version 0.6.0 (only the version lines of `pyproject.toml` and `gamedock/__init__.py`; dependencies are unchanged, so the header update button accepts it).
+
+### Known limits
+
+- `steam_app_id` can only be checked as far as the entry allows before a first deploy; the full confirmation is `verify_game_setup` on a running test copy.
+- Tag lists exist only for Docker Hub images and only when update checks are on (`GAMEDOCK_UPDATE_CHECK`); other registries get a note.
+- Comparing the image's variables, ports and volumes with the entry needs the image to be stored on the machine (`docker pull` it once); otherwise `inspect_image` says so.
+- "Taken by another program" needs the real Docker backend (it tries to bind the port); the fake backend reports "not checked".
+- The inspection record is keyed by the tag text; a tag that is re-published under the same name is not noticed.
+
 ## 0.5.2: the Config form remembers the game's defaults and marks what differs
 
 Reported from Jacob's real use of the Config form (Enshrouded `gameSettings.*`, Palworld `OptionSettings`): the "These changes will be saved" list and the **Only changed** filter only knew what changed since the dialog was opened. After saving, or after a refresh and coming back later, nothing was marked and no setting showed what it had been changed from.

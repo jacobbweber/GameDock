@@ -46,6 +46,23 @@ class DeployIn(BaseModel):
     start: bool = False
 
 
+class PortCheckItemIn(BaseModel):
+    protocol: str = Field(pattern="^(tcp|udp)$")
+    host: int
+
+
+class PortCheckIn(BaseModel):
+    ports: list[PortCheckItemIn]
+    game_id: str | None = None        # the catalog game the ports are for
+    server_id: str | None = None      # a deployed server being edited (its own ports are not a clash)
+
+
+class PreviewIn(BaseModel):
+    name: str
+    ports: list[PortIn] = []
+    env: dict[str, str] = {}
+
+
 class ApproveIn(BaseModel):
     yaml_sha256: str   # the fingerprint of the text the person was shown (the review dialog sends it back)
 
@@ -271,6 +288,21 @@ def create_app(service: GameDockService, sampler=None, metrics_enabled: bool = F
     def catalog_reject(game_id: str, confirm: bool = False):
         return service.reject_catalog_entry(game_id, confirm)
 
+    @app.get("/api/catalog/{game_id}/review-status")
+    def catalog_review_status(game_id: str, include_yaml: bool = False):
+        """Read-only approval state of an entry (the same answer as the MCP tool get_catalog_review_status)."""
+        return service.catalog_review_status(game_id, include_yaml)
+
+    @app.post("/api/catalog/{game_id}/deploy-preview")
+    def deploy_preview(game_id: str, body: PreviewIn):
+        """Dry run of deploying: what would be created and what would stop it. Creates nothing."""
+        return service.preview_deploy(game_id, body.name, _ports(body.ports), body.env)
+
+    @app.post("/api/ports/check")
+    def check_ports(body: PortCheckIn):
+        """Host port conflicts (other servers, programs on this machine, other games' defaults) with free alternatives."""
+        return service.check_ports([(p.protocol, p.host) for p in body.ports], body.game_id, body.server_id)
+
     @app.post("/api/servers", status_code=201)
     def deploy_server(body: DeployIn):
         return server_to_dict(service.deploy(body.game_id, body.name, _ports(body.ports), body.env, body.start))
@@ -366,6 +398,18 @@ def create_app(service: GameDockService, sampler=None, metrics_enabled: bool = F
         """The Run now button for a schedule (kind: backup or maintenance)."""
         return service.run_schedule_now(server_id, kind, confirm)
 
+    # ---- checks and diagnostics (read-only)
+    @app.get("/api/servers/{server_id}/check-setup")
+    def check_setup(server_id: str):
+        """The "Check setup" checklist: pass / warn / fail with plain details and suggested fixes. Changes nothing."""
+        return service.verify_game_setup(server_id)
+
+    @app.get("/api/servers/{server_id}/diagnostics")
+    def diagnostics(server_id: str, lines: int = 60):
+        """The diagnostics bundle plus the same as redacted plain text (what the Copy diagnostics button copies)."""
+        d = service.get_server_diagnostics(server_id, lines)
+        return {"data": d, "text": service.diagnostics_text(d)}
+
     # ---- logs
     @app.get("/api/servers/{server_id}/logs")
     def server_logs(server_id: str, lines: int = 200):
@@ -443,8 +487,8 @@ def create_app(service: GameDockService, sampler=None, metrics_enabled: bool = F
         return mcp.info(str(request.base_url).rstrip("/") + "/mcp")
 
     @app.get("/api/mcp/audit")
-    def mcp_audit(limit: int = 50):
-        return {"entries": mcp.audit.recent(limit)}
+    def mcp_audit(limit: int = 50, status: str | None = None, tool: str | None = None):
+        return {"entries": mcp.audit.recent(limit, tool=tool, status=status)}
 
     if mcp.enabled:
         # Raw routes for both spellings so /mcp does not redirect (clients may not follow a 307 on POST).

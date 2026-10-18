@@ -373,6 +373,11 @@ def run(shots: Path | None = None, prefix: str = "gamedock-051", suffix: str = "
                 dialog_case("schedules", lambda: pg.locator(f"#card-{mc} .sched-line").first.click(), "#sched-panel", "schedules")
                 dialog_case("review catalog entry", lambda: (pg.goto(base + "/#/catalog"),
                             pg.locator("#catalog-example-game button", has_text="Review").click()), ".yaml-view", "review")
+                dialog_case("check setup", lambda: tile(pal, "Check setup").click(), "#check-list", "check-setup")
+                dialog_case("check setup with diagnostics", lambda: (tile(ens, "Check setup").click(),
+                            pg.locator("#diag-details summary").click()), "#diag-text")
+                dialog_case("deploy form with a port-conflict note", lambda: (pg.goto(base + "/#/catalog"),
+                            pg.locator("#catalog-minecraft-java button.primary").click()), "dialog[open] .port-note")
                 dialog_case("deploy form", lambda: (pg.goto(base + "/#/catalog"),
                             pg.locator("#catalog-palworld button.primary").click()), "dialog[open] button[type=submit]")
                 dialog_case("delete confirmation", lambda: tile(mc, "Delete").click(),

@@ -502,7 +502,10 @@ def test_authoring_tools_per_mode(service):
         assert {"get_add_game_guide", "validate_catalog_entry", "inspect_image", "add_catalog_entry",
                 "update_catalog_entry"} <= both
     # approving / rejecting is never an MCP tool
-    assert not {n for n in run(make_app(service, "full"), names) if "approve" in n or "reject" in n or "review" in n}
+    full = run(make_app(service, "full"), names)
+    assert not {n for n in full if "approve" in n or "reject" in n}
+    # the only "review" tools only LOOK (0.6.0): get_catalog_review_status, and preview_deploy (it contains "review")
+    assert {n for n in full if "review" in n} == {"get_catalog_review_status", "preview_deploy"}
 
 
 def test_add_tool_is_not_callable_in_read_only_mode(service):

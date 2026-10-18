@@ -75,3 +75,45 @@ SHORT = {
                    "Check with: docker ps"),
     "error": ("Docker did not answer as expected.", "Run 'docker version' in a terminal and read what it says."),
 }
+
+
+# ---- what a failed registry question means (used by inspect_image so an agent gets a clear reason)
+REGISTRY_NOT_FOUND, REGISTRY_DENIED, REGISTRY_RATE_LIMIT, REGISTRY_OFFLINE, REGISTRY_OTHER = (
+    "not_found", "denied", "rate_limit", "offline", "other")
+
+
+def classify_registry_error(text: str) -> str:
+    """'not_found' (the name or tag does not exist), 'denied' (private image or login needed), 'rate_limit',
+    'offline' (no network or DNS), or 'other', from the error text of `docker buildx imagetools inspect` or
+    `docker manifest inspect`."""
+    e = (text or "").lower()
+    if "toomanyrequests" in e or "rate limit" in e:
+        return REGISTRY_RATE_LIMIT
+    if ("no such host" in e or "dial tcp" in e or "i/o timeout" in e or "network is unreachable" in e
+            or "temporary failure in name resolution" in e or "context deadline exceeded" in e
+            or "connection refused" in e or "no route to host" in e or "tls handshake timeout" in e):
+        return REGISTRY_OFFLINE
+    if ("not found" in e or "manifest unknown" in e or "name unknown" in e or "no such manifest" in e
+            or "repository does not exist" in e or "does not exist" in e):
+        return REGISTRY_NOT_FOUND
+    if "unauthorized" in e or "denied" in e or "authentication required" in e or "requires authorization" in e:
+        return REGISTRY_DENIED
+    return REGISTRY_OTHER
+
+
+def registry_failure(kind: str, image: str, detail: str = "") -> str:
+    """The plain-words reason for a failed registry question."""
+    tag = image.rsplit("/", 1)[-1].split(":", 1)[1] if ":" in image.rsplit("/", 1)[-1] and "@" not in image else ""
+    if kind == REGISTRY_NOT_FOUND:
+        which = f"the tag '{tag}' of this image" if tag else "this image"
+        return (f"The registry says {which} was not found: '{image}' does not exist there. Either the image name is "
+                "wrong, or the tag is wrong (the tag 'latest' does not exist for every image).")
+    if kind == REGISTRY_DENIED:
+        return (f"The registry refused to answer about '{image}': it is private, or it needs a login, or the name is wrong "
+                "(Docker Hub answers like this for names that do not exist).")
+    if kind == REGISTRY_RATE_LIMIT:
+        return "The registry is limiting requests right now (rate limit). Try again in a while."
+    if kind == REGISTRY_OFFLINE:
+        return "The registry could not be reached: the machine looks offline (no internet) or cannot resolve the registry's name."
+    first = (detail.strip().splitlines() or ["no answer"])[0][:200]
+    return f"The registry gave an answer GameDock does not understand ({first})."

@@ -440,3 +440,25 @@ dialog.tall .dialog-body { gap: 8px; }
   .dialog-body > .cfg-intro { display: none; }     /* the file path and the restart note give way to the settings */
   .dlg > h3 { padding-top: 12px; }
 }
+
+/* ---- 0.6.0: port notes in the deploy form, the Check setup checklist, diagnostics, audit controls ---------------- */
+.port-notes { display: flex; flex-direction: column; gap: 6px; }
+.port-notes:empty { display: none; }
+.port-note { display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap; border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 10px; background: var(--panel); font-size: 13.5px; }
+.port-note.level-conflict { border-color: var(--red); background: rgba(218,54,51,.10); }
+.port-note.level-warn { border-color: #8a6a1d; background: rgba(210,153,34,.10); }
+.port-note .badge { flex: none; }
+.port-note-text { flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere; }
+.port-note button { flex: none; }
+.dialog-body .banner { margin: 0; }
+.dialog-body .checks { margin: 8px 0 0; }
+.suggest { margin-top: 12px; border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; background: var(--panel); }
+.suggest h4 { margin: 0 0 6px; }
+.suggest ul { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; font-size: 13.5px; overflow-wrap: anywhere; }
+details.diag { margin-top: 12px; }
+details.diag summary { cursor: pointer; color: var(--muted); font-size: 13.5px; }
+pre.diagbox { margin: 8px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px;
+  background: #0d1117; border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
+.audit-controls { margin-bottom: 8px; }
+.audit-controls .hint { flex: 1 1 260px; font-size: 12.5px; }

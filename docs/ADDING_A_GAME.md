@@ -5,7 +5,7 @@ This page is for people and for AI agents. It explains how to add a new game, su
 There are two ways to add a game, and the procedure is the same for both:
 
 - **By hand.** Copy `catalog/_template.yaml` to `catalog/<id>.yaml`, fill it in, and reload the Catalog page.
-- **By an AI agent through GameDock's MCP endpoint.** The agent calls `get_add_game_guide`, `inspect_image`, `validate_catalog_entry` and `add_catalog_entry`. Entries added this way are marked **Added by AI, needs your review** and **cannot be deployed until a person approves them** in the web page. See [Adding a game through MCP](#adding-a-game-through-mcp).
+- **By an AI agent through GameDock's MCP endpoint.** The agent calls `get_add_game_guide`, `inspect_image`, `validate_catalog_entry` and `add_catalog_entry`, then (after a person approves) `get_catalog_review_status`, `preview_deploy`, `check_ports`, `verify_game_setup` and `get_server_diagnostics`. Entries added this way are marked **Added by AI, needs your review** and **cannot be deployed until a person approves them** in the web page. See [Adding a game through MCP](#adding-a-game-through-mcp).
 
 ## 1. What a catalog entry is
 
@@ -27,6 +27,7 @@ For every step, write down **where you found the answer** (a link). You will put
 - Prefer an image that is updated recently, has a documentation page with a table of ports, folders and environment variables, and has many users or stars. A good image's page describes `docker run` or `docker-compose` examples; those examples are the best source for the next steps.
 - Note the exact image name and a **specific tag** (for example `1.2.3` or `stable`). Use `latest` only if the image has no other tag.
 - Make sure the image supports a normal PC or server processor (`linux/amd64`). On a machine with Docker, `inspect_image` shows what the registry says without downloading anything.
+- **Inspect the exact tag you will use** (`inspect_image` with that tag, for example `inspect_image image="someuser/some-server:1.2"`). Never assume `latest` exists: many images do not publish it. If the tag does not exist, `inspect_image` answers `tag_status: not_found` and lists the tags that do exist (for Docker Hub images), so pick one of those and inspect again. `validate_catalog_entry` warns when the tag was never inspected, or when the inspection failed.
 - Never invent an image name. If you cannot find a maintained image, stop and say so.
 
 ### Step 2. Confirm the ports and their protocols
@@ -47,6 +48,7 @@ For every step, write down **where you found the answer** (a link). You will put
 
 - Environment variables are how most images are configured. List the ones the documentation says matter: server name, number of player slots, password, admin password, world name, and so on.
 - Values people choose go in `fields`. Fixed values that should always be set go in `env`.
+- **Expose every documented player-facing setting as a field** (game mode, world name or seed, difficulty, save options, player slots, and so on), or list in `notes` which ones you left out and why. An entry with only a few fields gets a warning. If the image is stored on the machine, `inspect_image` shows the variable names the image knows, and `validate_catalog_entry` lists those that the entry neither exposes nor sets.
 - **Every password or token must be a field with `secret: true`.** Never write a real password in the file: catalog files are public in git.
 - Read what an empty value means. Some images treat "empty" as "no password"; others keep a generated one. See the common traps below.
 - If the image runs as a chosen user id (`PUID` and `PGID` variables), set them in `env` to match the user GameDock runs as, so backups can read the files.
@@ -76,18 +78,29 @@ For every step, write down **where you found the answer** (a link). You will put
 ### Step 8. Validate
 
 - By hand: put the file in `catalog/`, open the Catalog page (or run `python -m gamedock doctor`). A mistake is reported in plain words, and the Health page lists files that could not be read.
-- Through MCP: call `validate_catalog_entry` with the text until `valid` is true. It saves nothing. Read the `warnings` too: they point at things that are legal but suspicious, such as a password with a default value or no ready line.
+- Through MCP: call `validate_catalog_entry` with the text until `valid` is true. It saves nothing. Read the `warnings` too: they point at things that are legal but suspicious, such as a password with a default value, no ready line, an image tag that was never inspected, variables, ports or folders the image declares but the entry does not use, a `steam_app_id` that GameDock could never confirm (no mounted folder), a very short settings list, or a default host port that another catalog game also uses.
+- From the command line: `.venv/bin/python scripts/lint_catalog.py` checks every file in `catalog/` (add `--strict` to fail on warnings, `--notes` to show notes). The test suite runs it, so a broken catalog file fails the build.
 
 ### Step 9. Deploy a test copy on spare ports
 
-- Deploy the entry with a name such as `test-<game>`, and choose **spare host ports** (for example 20000 and up) so a real server on the default ports is not disturbed.
+- Before deploying, ask for a dry run: `preview_deploy` (or the Deploy dialog's own checks) shows the image, ports, folders and the exact container command with secrets hidden, and lists every problem at once (unapproved entry, name taken, missing required setting, port conflict). `check_ports` tells whether the host ports are free and suggests free ones.
+- Deploy the entry with a name such as `test-<game>`, and choose **spare host ports** (for example 20000 and up) so a real server on the default ports is not disturbed. The Deploy dialog warns, as you type, when a port is used by another GameDock server or by another program, and offers a free port.
 - Do not delete or change any existing server to test a new game.
 - The first start downloads the game and can take many minutes. The tile shows Installing with a percentage. Wait for **Ready to join**.
 - An entry added by an AI agent must be approved by a person before this step is possible (the Deploy button is disabled and the deploy call is refused until then).
 
 ### Step 10. Verify, then mark as reviewed
 
-Work through the [verification checklist](#verification-checklist). When everything passes, update the entry's `notes` to say what was verified and on which date, remove any "unverified" remarks that are now confirmed, and (for entries added by an AI agent) ask the person to review and approve it in the web page. Delete the test server when you are done, if the person agrees.
+Run `verify_game_setup` (the **Check setup** button on the server's card does the same): it checks, read-only, that the container runs, the ready line and health check, the Steam record and `steam_app_id`, each config file, each published port, each folder, the required settings, and whether the catalog entry changed after the test copy was deployed. Every failed check carries a concrete fix for the entry. `get_server_diagnostics` (the **Copy diagnostics** button in the same dialog) bundles the facts and the newest log lines, with passwords hidden, for pasting into a chat. Then work through the [verification checklist](#verification-checklist). When everything passes, update the entry's `notes` to say what was verified and on which date, remove any "unverified" remarks that are now confirmed, and (for entries added by an AI agent) ask the person to review and approve it in the web page. Delete the test server when you are done, if the person agrees.
+
+### The loop for an AI agent: add, approve, test, fix, re-review
+
+1. `validate_catalog_entry` until it is valid and the warnings are explained, then `add_catalog_entry`. The entry waits for approval.
+2. Poll `get_catalog_review_status`: `waiting_for_approval` means a person has not approved it yet; `approved` means it can be deployed; `changed_since_approval` means the file differs from what was approved. While it is not approved, `deploy_server` stays blocked (and so does the web page's Deploy). There is no tool for approving.
+3. `preview_deploy` and `check_ports`, then `deploy_server` a test copy on spare ports.
+4. `verify_game_setup`, `get_server_logs`, `get_server_diagnostics`. Write down what failed.
+5. Fix the entry with `update_catalog_entry`. This makes it unapproved again: tell the person, wait for `approved`, and deploy the test copy again. A deployed server keeps a **snapshot** of the entry it was created from, so a fix only reaches a server that is deleted and deployed again (`verify_game_setup` and `get_catalog_review_status` say when a server is on an older snapshot).
+6. Repeat until the checks pass, then report.
 
 ## 3. Field reference
 
@@ -171,11 +184,14 @@ These were all learned on real servers (Palworld and Enshrouded). Check each one
 10. **Pin the image version when you can.** `latest` can change under you and break a working server.
 11. **Do not trust a log line that appears early.** Pick the line printed when the game is really listening.
 12. **Wine games are slow to start** and print many warnings. Warnings are normal; look for the real ready line.
+13. **The Steam app id of the game is not the id of its dedicated server.** If `steam_app_id` is wrong, version tracking says unknown forever. `verify_game_setup` lists the Steam records (`appmanifest_<id>.acf`) it really finds and names the id to use.
+14. **Two games with the same default port cannot run together.** Pick defaults other games do not use; the Deploy dialog warns when a chosen port is taken.
 
 ## 5. Verification checklist
 
 After the test copy is deployed on spare ports, check each item and write down the result:
 
+- [ ] **Check setup** (or `verify_game_setup`) shows no problems, or each remaining one is understood.
 - [ ] The tile shows Installing with a percentage (or Starting) and then **Ready to join**, not Ready too early.
 - [ ] The game can be joined from another computer on the spare port (UDP and TCP as listed).
 - [ ] The Logs button shows the game's output, and the ready and version lines match the patterns.
@@ -193,8 +209,14 @@ An AI agent connected to GameDock's `/mcp` endpoint (modes `read_only`, `standar
 | Tool | Modes | What it does |
 |---|---|---|
 | `get_add_game_guide` | all | The procedure, the field reference, a template and the rules |
-| `inspect_image` | all | Read-only look at a Docker image. Never downloads or runs it. If the image is already on the machine it shows declared ports, volumes, user, environment variable names and health check; if not, it says so and how to pull it |
-| `validate_catalog_entry` | all | Dry run of the same checks as adding. Saves nothing. Returns errors, warnings and a plain summary |
+| `inspect_image` | all | Read-only look at a Docker image. Never downloads or runs it. If the image is already on the machine it shows declared ports, volumes, user, environment variable names and health check; if not, it says so and how to pull it. If the tag does not exist it says `tag_status: not_found`, why in plain words, and (Docker Hub only) which tags exist |
+| `validate_catalog_entry` | all | Dry run of the same checks as adding. Saves nothing. Returns errors, warnings (including those from the last `inspect_image` of the same tag) and a plain summary |
+| `get_catalog_review_status` | all | Read-only: `waiting_for_approval`, `approved`, `changed_since_approval` or `repository`, the fingerprints, timestamps, whether it can be deployed, and which deployed servers run an older snapshot. Never approves anything |
+| `preview_deploy` | all | Dry run of a deploy: the plan (ports, folders, container command with secrets hidden) and every problem at once. Creates nothing |
+| `check_ports` | all | Are these host ports free? Reports clashes with GameDock servers and (on the real Docker backend) with other programs, and suggests free ports |
+| `verify_game_setup` | all | Read-only checklist of a deployed server against its catalog entry, with a fix for each failure |
+| `get_server_diagnostics` | all | One bundle for troubleshooting: status, container facts, ports, disk, backups, update checks, newest log lines (passwords hidden) |
+| `get_mcp_audit` | all | The newest audit-log entries (what agents did and whether it worked); secrets and file bodies are never in it |
 | `add_catalog_entry` | `standard`, `full` | Saves a new entry as `catalog/<id>.yaml`. Refuses an existing id |
 | `update_catalog_entry` | `standard`, `full` | Replaces an entry that was added through MCP. Never an entry from the repository |
 
@@ -205,7 +227,8 @@ The same text is the resource `gamedock://add-a-game`, and the prompt `add_a_gam
 - An entry added through MCP is recorded (in `<data folder>/catalog-review.json`, not in the repository) as added by MCP, not reviewed, with the SHA-256 fingerprint of the file.
 - The Catalog page shows it with the badge **Added by AI, needs your review**, its Deploy button is disabled, and `deploy_server` and the web API refuse to deploy it.
 - A person presses **Review**, reads the full YAML and a plain summary (image, ports, folders, secret fields, anything unusual), and presses **Approve** or **Reject**. Approve records the fingerprint of exactly what was shown. If the file changes afterwards, by anyone, it is unreviewed again. Reject deletes the file after a confirmation.
-- Approving and rejecting exist only in the web page. There is no MCP tool for them.
+- Approving and rejecting exist only in the web page. There is no MCP tool for them, and none that re-records a config-file baseline.
+- `get_catalog_review_status` shows where an entry stands; `preview_deploy` shows `can_deploy: false` and why.
 - Entries that came from the repository (git-tracked files) are never overwritten or changed through MCP. `update_catalog_entry` works only on entries the agent itself added, and it resets them to unreviewed.
 - An entry added through MCP is a new, untracked file in your `catalog/` folder (it does not block the header Update GameDock button). To keep it permanently, review it, then `git add` and commit it yourself; from then on it is a repository file and MCP can no longer change it. If you later pull a repository file with the same name, delete the untracked one first.
 - Every authoring call is written to the audit log (the YAML text itself is not logged, only its size and fingerprint).

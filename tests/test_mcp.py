@@ -15,7 +15,10 @@ from tests.mcp_helpers import call, make_app, run
 READ = {"list_catalog", "get_catalog_entry", "list_servers", "get_server_status", "get_server_stats",
         "get_host_stats", "get_stats_history", "list_backups", "list_config_files", "read_config_file", "get_server_logs",
         "get_gamedock_version", "list_schedules", "check_game_update", "get_add_game_guide", "validate_catalog_entry",
-        "inspect_image", "get_config_changes"}
+        "inspect_image", "get_config_changes",
+        # 0.6.0: checking and troubleshooting (all read-only)
+        "get_catalog_review_status", "verify_game_setup", "check_ports", "preview_deploy", "get_server_diagnostics",
+        "get_mcp_audit"}
 STANDARD = {"deploy_server", "start_server", "stop_server", "restart_server", "update_server_settings",
             "update_server_image", "create_backup", "write_config_file", "set_backup_schedule",
             "set_maintenance_schedule", "update_game", "add_catalog_entry", "update_catalog_entry"}

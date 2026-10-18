@@ -37,6 +37,7 @@ from .catalog import entry_to_dict, load_catalog, parse_definition
 from .hoststats import HostMeter
 from .hostcheck import foreign_owners
 from .authoring_service import AuthoringMixin
+from .ops_service import OpsMixin
 from .game_updates import GameUpdateMixin
 from .errors import BackendError, BusyError, ConflictError, GameDockError, NotFoundError, ValidationError
 from .models import (
@@ -95,7 +96,7 @@ def slugify(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:40].strip("-")
 
 
-class GameDockService(GameUpdateMixin, AuthoringMixin):
+class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin):
     def __init__(self, backend: ContainerBackend, catalog_dir: Path, data_dir: Path,
                  backup_retention: int = 10, clock: Callable[[], datetime] | None = None,
                  stats_interval: float = 10.0, stats_history_seconds: int = 3600,
@@ -350,7 +351,9 @@ class GameDockService(GameUpdateMixin, AuthoringMixin):
         for r in requested or ():
             key = (r.protocol, r.container)
             if key not in base:
-                raise ValidationError(f"{t.name} has no container port {r.container}/{r.protocol}")
+                have = ", ".join(f"{c}/{pr}" for (pr, c) in base) or "none"
+                raise ValidationError(f"{t.name} has no container port {r.container}/{r.protocol}. Its container ports "
+                                      f"are: {have}. Only the host port can be changed, not the container port.")
             base[key] = r.host
         result = []
         for (proto, cont), host in base.items():
@@ -372,7 +375,9 @@ class GameDockService(GameUpdateMixin, AuthoringMixin):
             for p in ports:
                 if (p.protocol, p.host) in used:
                     raise ConflictError(
-                        f"Host port {p.host}/{p.protocol} is already used by server '{other.name}'")
+                        f"Host port {p.host}/{p.protocol} is already used by server '{other.name}' (another GameDock "
+                        f"server). Two servers cannot share a host port: choose a different host port."
+                        + self.free_port_hint(p.protocol, p.host, ignore_id))
 
     @staticmethod
     def _merge_env(t: CatalogEntry, provided: Mapping[str, str] | None,
@@ -383,7 +388,8 @@ class GameDockService(GameUpdateMixin, AuthoringMixin):
         for name, value in (provided or {}).items():
             f = by_name.get(name)
             if f is None:
-                raise ValidationError(f"Unknown setting '{name}' for {t.name}")
+                known = ", ".join(by_name) or "none"
+                raise ValidationError(f"Unknown setting '{name}' for {t.name}. The settings of this game are: {known}.")
             value = "" if value is None else str(value)
             if "\n" in value or "\r" in value or "\0" in value or len(value) > MAX_ENV_VALUE_LEN:
                 raise ValidationError(f"Invalid value for '{f.label}'")
@@ -392,7 +398,7 @@ class GameDockService(GameUpdateMixin, AuthoringMixin):
             values[name] = value
         for f in t.fields:
             if f.required and not values.get(f.name, "").strip():
-                raise ValidationError(f"'{f.label}' is required")
+                raise ValidationError(f"The setting '{f.label}' ({f.name}) is required: fill it in and try again.")
         return values
 
     def _unique_id(self, name: str) -> str:
@@ -458,7 +464,13 @@ class GameDockService(GameUpdateMixin, AuthoringMixin):
             activity="deploying",
             phase_detail="Downloading the game image and creating the server. This can take a few minutes.")
         try:
-            self.backend.create(spec)  # if this fails nothing is stored
+            try:
+                self.backend.create(spec)  # if this fails nothing is stored
+            except BackendError as e:
+                if type(e) is not BackendError:
+                    raise   # Docker itself is unusable: that message already says what to do
+                raise BackendError(f"Could not create the server '{name}' (image {t.image}): {e} Nothing was saved or "
+                                   "started, so there is nothing to clean up: fix the cause and deploy again.") from e
             self.store.put(inst)
             if start:
                 self._pending[inst.id] = replace(self._pending[inst.id], activity="starting")
@@ -513,7 +525,8 @@ class GameDockService(GameUpdateMixin, AuthoringMixin):
                 raise ConflictError(
                     f"Host port {p.host}/{p.protocol} is already in use on this machine by another program or "
                     f"container, so '{inst.name}' cannot start. Edit the server to pick another port, or stop "
-                    "whatever uses it (find it with: sudo ss -lntup | grep :" + str(p.host) + ").")
+                    "whatever uses it (find it with: sudo ss -lntup | grep :" + str(p.host) + ")."
+                    + self.free_port_hint(p.protocol, p.host, inst.id))
 
     def docker_status(self, max_age: float = 10.0) -> DockerDiagnosis:
         """Can GameDock use the container engine right now? Cached briefly; never raises."""

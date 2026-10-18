@@ -46,6 +46,11 @@ class PortSetting(BaseModel):
     host: int = Field(description="Port on this machine")
 
 
+class PortToCheck(BaseModel):
+    protocol: Literal["tcp", "udp"]
+    host: int = Field(ge=1, le=65535, description="Port on this machine you want to use")
+
+
 class TokenRejected(ToolError):
     """A confirmation token was missing, expired, reused or for different arguments."""
 
@@ -78,7 +83,7 @@ def _ann(read: bool = False, destructive: bool = False, idempotent: bool = False
                            idempotentHint=idempotent or read, openWorldHint=False)
 
 
-def make_tools(service: GameDockService, confirms: ConfirmationStore) -> list[ToolDef]:
+def make_tools(service: GameDockService, confirms: ConfirmationStore, audit: AuditLog | None = None) -> list[ToolDef]:
     """All tool definitions, tagged by tier. Which ones are served depends on the mode."""
     defs: list[ToolDef] = []
 
@@ -250,6 +255,91 @@ def make_tools(service: GameDockService, confirms: ConfirmationStore) -> list[To
         to get it pulled (a person runs `docker pull`), and still shows what the registry says (digest, platforms).
         Output is short and bounded."""
         return service.inspect_image(image)
+
+    # ------------------------------------------------------------------ checking and troubleshooting (read-only)
+    @tool(READ, _ann(read=True))
+    def get_catalog_review_status(
+        game_id: Annotated[str, Field(description="Catalog id of an entry (for example one you added)")],
+        include_yaml: Annotated[bool, Field(description="Also return the entry's current YAML text")] = False,
+    ) -> Result:
+        """Where a catalog entry stands in the approval process. Poll this after add_catalog_entry or update_catalog_entry:
+        `state` is waiting_for_approval, approved, changed_since_approval (the file was edited after approval) or repository
+        (needs no approval). Also: `reviewed`, `can_deploy`, the file's `fingerprint` and the `reviewed_fingerprint` a person
+        approved, when it was added / updated / approved, a `next_step`, and which deployed servers still run an older snapshot
+        of the entry. Read-only: only a person can approve, in the web page. Deploying an unapproved entry stays blocked."""
+        r = service.catalog_review_status(game_id, include_yaml)
+        r["_audit_detail"] = f"id={game_id} state={r['state']}"
+        return r
+
+    @tool(READ, _ann(read=True))
+    def verify_game_setup(server_id: ServerId) -> Result:
+        """Setup check of a DEPLOYED server (run it after the first deploy, and after fixing a catalog entry). A checklist
+        of pass / warn / fail with plain details: container running and restarts, Docker health, whether the ready log line
+        appeared, whether the installed game version (Steam appmanifest or installed_build_file) can be read and whether the
+        catalog's steam_app_id matches the record that is really there, each config file exists and parses in its declared
+        format, each port is published and bound, each folder exists and is used, required settings are filled (secrets only
+        as set / not set), free disk space, and whether the catalog entry changed since the server was deployed. `suggestions`
+        lists concrete fixes such as "appmanifest_X.acf was found with id Y, not your steam_app_id Z". Read-only."""
+        r = service.verify_game_setup(server_id)
+        r["_audit_detail"] = f"{r['overall']}: {r['summary']}"
+        return r
+
+    @tool(READ, _ann(read=True))
+    def check_ports(
+        ports: Annotated[list[PortToCheck], Field(min_length=1, max_length=64,
+                                                   description="Host ports (and protocol) you want to use")],
+        game_id: Annotated[str | None, Field(description="The catalog game these ports are for (its own defaults are "
+                                                          "not reported as clashes)")] = None,
+        server_id: Annotated[str | None, Field(description="A deployed server being changed (its own ports are not a "
+                                                            "clash)")] = None,
+    ) -> Result:
+        """Would these host ports collide with another GameDock server, with a program already listening on this machine, or
+        with another catalog game's default port (for example two games that both default to 27015/udp)? Each finding has a
+        `level` (conflict = would fail, warn, info = good to know), a plain message and a free alternative
+        (`suggested_host_port`). Read-only. preview_deploy and the web deploy dialog use the same check."""
+        return service.check_ports([(p.protocol, p.host) for p in ports], game_id, server_id)
+
+    @tool(READ, _ann(read=True))
+    def preview_deploy(
+        game_id: Annotated[str, Field(description="Catalog id from list_catalog")],
+        name: Annotated[str, Field(description="Name the server would get")],
+        ports: Annotated[list[PortSetting] | None, Field(description="Host ports to change, like deploy_server")] = None,
+        env: Annotated[dict[str, str] | None, Field(description="Settings, like deploy_server")] = None,
+    ) -> Result:
+        """Dry run of deploy_server: returns what WOULD be created (server id, ports, folders, environment variable names with
+        secrets masked, the docker create command) and every problem that would stop the deploy: entry not yet approved,
+        name taken, missing required setting, port conflicts (with a free alternative). Creates nothing (no folder, no
+        container, no stored server). Use it on an unapproved entry to see its state without being able to deploy it."""
+        r = service.preview_deploy(game_id, name, _ports(ports), env or {})
+        r["_audit_detail"] = f"game={game_id} ok={r['ok']} problems={len(r['problems'])}"
+        return r
+
+    @tool(READ, _ann(read=True))
+    def get_server_diagnostics(
+        server_id: ServerId,
+        log_lines: Annotated[int, Field(ge=1, le=200, description="How many of the newest log lines to include")] = 60,
+    ) -> Result:
+        """One bundle for troubleshooting a server: status and phase, container facts (health, exit code, out-of-memory flag,
+        restart count), configured and published ports, settings (secrets only set / not set), data folder size, free disk,
+        newest backup, last game and image update checks, GameDock's version and the newest log lines with passwords and
+        tokens redacted. Read-only. The web page has the same bundle as a Copy diagnostics button."""
+        return service.get_server_diagnostics(server_id, log_lines)
+
+    @tool(READ, _ann(read=True))
+    def get_mcp_audit(
+        limit: Annotated[int, Field(ge=1, le=200, description="How many of the newest entries")] = 30,
+        tool: Annotated[str | None, Field(description="Only calls of this tool, e.g. add_catalog_entry")] = None,
+        status: Annotated[str | None, Field(description="Only this result: ok, error, crashed, token_rejected, "
+                                                         "invalid_arguments, unknown_tool, confirmation_required")] = None,
+    ) -> Result:
+        """The newest entries of GameDock's audit log (AI agent calls, scheduled runs, approvals made in the web page), newest
+        first: time, tool, arguments, result, and a short detail. Secrets and file or YAML bodies are never in the log (only
+        their size). Use it to see what you or another agent did and why a call failed. Read-only."""
+        if audit is None:
+            raise ToolError("The audit log is not available.")
+        entries = audit.recent(limit, tool=tool, status=status)
+        return {"entries": entries, "count": len(entries),
+                "note": "Newest first. Secret values and file contents are never recorded."}
 
     # ------------------------------------------------------------------ standard (changes things, not destructive)
     @tool(STANDARD, _ann())

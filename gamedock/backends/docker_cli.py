@@ -26,6 +26,7 @@ from ..errors import BackendError, DockerUnavailableError, ForeignContainerError
 from ..models import IMAGE_RE, ContainerSpec, ContainerStats, Status, is_reserved_env_name
 from . import docker_errors
 from .base import ContainerState, DockerDiagnosis
+from .container_inspect import parse_container_details
 from .image_inspect import parse_imagetools, parse_local_inspect, parse_manifest
 from .docker_stats import INSPECT_FORMAT, parse_inspect_lines, parse_stats_lines
 
@@ -309,6 +310,8 @@ class DockerCliBackend:
                 first = (last.strip().splitlines() or ["no answer"])[0][:200]
                 out["remote_error"] = (f"The registry could not be asked ({first}). Is the machine online and is the "
                                        "image name right?")
+                out["remote_error_kind"] = docker_errors.classify_registry_error(last)
+                out["failure"] = docker_errors.registry_failure(out["remote_error_kind"], image, last)
         return out
 
     def local_image_digests(self, ref: str) -> tuple[str, ...]:
@@ -339,6 +342,24 @@ class DockerCliBackend:
         proc = self._run(["container", "inspect", "--format", "{{.Image}}", name], check=False,
                          timeout=QUICK_TIMEOUT_SECONDS)
         return proc.stdout.strip() or None if proc.returncode == 0 else None
+
+    def container_details(self, name: str) -> dict | None:
+        """Read-only facts about one of our containers for troubleshooting (state, exit code, out-of-memory flag,
+        restart count, published ports, mounts). None if it does not exist. Never reads its environment."""
+        proc = self._run(["container", "inspect", name], check=False, timeout=QUICK_TIMEOUT_SECONDS)
+        if proc.returncode != 0:
+            err = proc.stderr or proc.stdout or ""
+            if "no such" in err.lower() and not docker_errors.classify(err):
+                return None
+            raise docker_errors.friendly("inspect", err)
+        try:
+            doc = json.loads(proc.stdout)
+            labels = ((doc[0] if isinstance(doc, list) else doc).get("Config") or {}).get("Labels") or {}
+        except (ValueError, AttributeError, IndexError, TypeError):
+            labels = {}
+        if str(labels.get(LABEL_MANAGED, "")).lower() != "true":   # only ever describe containers GameDock made
+            raise ForeignContainerError(foreign_message(name))
+        return parse_container_details(proc.stdout)
 
     def get_stats(self, names: list[str]) -> dict[str, ContainerStats]:
         """One `docker container inspect` for every name (state, start time, memory limit) and, only if

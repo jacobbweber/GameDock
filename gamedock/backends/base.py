@@ -73,6 +73,12 @@ class ContainerBackend(Protocol):
         environment names, health check; only when local), "remote" (digest and platforms from the registry, or None),
         "remote_error"}. Must NEVER pull or run the image."""
 
+    def container_details(self, name: str) -> dict | None:
+        """Read-only facts about a container for troubleshooting: {"status", "exit_code", "oom_killed", "restart_count",
+        "started_at", "finished_at", "error", "health", "ports": [{"container", "protocol", "host_ip", "host_port"}],
+        "unpublished", "mounts": [{"source", "target", "writable", "type"}], "image"}, or None if there is no such
+        container. Never includes the container's environment."""
+
     def exec_in(self, name: str, argv: list[str], timeout: int = 60) -> str:
         """Run a command (no shell) inside the running container and return what it printed. Raises BackendError."""
 

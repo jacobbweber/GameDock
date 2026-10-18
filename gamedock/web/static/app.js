@@ -192,6 +192,7 @@ function serverCard(s) {
       btn("Logs", "secondary", () => openLogs(s.id), s.status === "not_created"),
       btn("Backups", "secondary", () => openBackups(s.id), false),
       btn("Schedules", "secondary", () => openSchedules(s.id), false),
+      btn("Check setup", "secondary", () => openCheckSetup(s.id), false),
       s.config_file_count > 0 ? btn("Config", "secondary", () => openConfig(s.id), false) : null,
       s.update_method !== "none" || s.steam_app_id ? btn("Updates", "secondary", () => openUpdate(s.id), false) : null,
       el("span", { class: "spacer" }),
@@ -478,8 +479,9 @@ function fieldInput(f, value, editing) {
 }
 
 // Builds the shared deploy/edit form. `ports` = [{protocol, container, host}], `fields` = env field defs.
-function buildServerForm({ title, submitText, name, nameEditable = true, ports, fields, values, editing, showStart, onSubmit }) {
+function buildServerForm({ title, submitText, name, nameEditable = true, ports, fields, values, editing, showStart, onSubmit, gameId = null, serverId = null }) {
   const err = el("div", { class: "form-error", hidden: true });
+  const portNotes = el("div", { class: "port-notes", id: "port-notes", "aria-live": "polite" });
   const nameInput = el("input", { type: "text", name: "name", value: name, required: true, maxLength: 64, disabled: !nameEditable });
   const portInputs = ports.map((p) => {
     const input = el("input", { type: "number", min: 1, max: 65535, value: p.host, required: true });
@@ -496,6 +498,7 @@ function buildServerForm({ title, submitText, name, nameEditable = true, ports, 
     el("label", { class: "field" }, el("span", {}, "Name", el("span", { class: "req", textContent: " *" })), nameInput),
     ports.length ? el("h4", { textContent: "Host ports" }) : null,
     ...portInputs,
+    portNotes,
     fields.length ? el("h4", { textContent: "Settings" }) : null,
     ...fields.map((f) => fieldInput(f, values[f.name], editing)),
     start ? el("label", { class: "check" }, start, "Start after deploy") : null,
@@ -503,6 +506,37 @@ function buildServerForm({ title, submitText, name, nameEditable = true, ports, 
     el("div", { class: "dialog-actions" },
       el("button", { type: "button", class: "secondary", textContent: "Cancel", onclick: closeDialog }),
       submit));
+
+  // Port conflicts (other servers, programs on this machine, other games' default ports), with a free port to use instead.
+  let portTimer = null, portSeq = 0;
+  const portInputEls = () => [...form.querySelectorAll(".portrow input")];
+  async function checkPortNow() {
+    if (!ports.length || (!gameId && !serverId)) return;
+    const mine = ++portSeq;
+    const asked = portInputEls().map((i) => ({ protocol: i.dataset.protocol, host: Number(i.value) }));
+    let r;
+    try { r = await api("/api/ports/check", "POST", { ports: asked, game_id: gameId, server_id: serverId }); }
+    catch (_) { portNotes.replaceChildren(); return; }     // the check is a help; the real deploy still checks
+    if (mine !== portSeq) return;
+    portNotes.replaceChildren(...r.findings.map((f) => {
+      const row = el("div", { class: `port-note level-${f.level}`, role: f.level === "conflict" ? "alert" : "note" },
+        el("span", { class: `badge ${f.level === "conflict" ? "chk-fail" : f.level === "warn" ? "chk-warn" : "chk-info"}`,
+          textContent: f.level === "conflict" ? "Port in use" : f.level === "warn" ? "Check" : "Note" }),
+        el("span", { class: "port-note-text", textContent: f.message }));
+      if (f.suggested_host_port) {
+        const use = el("button", { type: "button", class: "small secondary", textContent: `Use ${f.suggested_host_port}` });
+        use.addEventListener("click", () => {
+          const target = portInputEls().find((i) => i.dataset.protocol === f.protocol && Number(i.value) === f.host);
+          if (target) { target.value = f.suggested_host_port; checkPortNow(); }
+        });
+        row.append(use);
+      }
+      return row;
+    }));
+  }
+  const queuePortCheck = () => { clearTimeout(portTimer); portTimer = setTimeout(checkPortNow, 350); };
+  portInputEls().forEach((i) => i.addEventListener("input", queuePortCheck));
+  checkPortNow();
 
   form.addEventListener("submit", async (ev) => {
     ev.preventDefault();
@@ -538,7 +572,7 @@ function openDeploy(entry) {
   const values = Object.fromEntries(entry.fields.map((f) => [f.name, f.default]));
   openDialog(buildServerForm({
     title: `Deploy ${entry.name}`, submitText: "Deploy", name: entry.name,
-    ports: entry.ports, fields: entry.fields, values, editing: false, showStart: true,
+    ports: entry.ports, fields: entry.fields, values, editing: false, showStart: true, gameId: entry.id,
     onSubmit: async (body, startAfter) => {
       // Quick problems (name taken, port in use, missing field) come back within a moment and are shown in this
       // form. If the request is still running after that, deploying is slow (downloading the image): close the
@@ -564,7 +598,7 @@ function openEdit(s) {
   const values = Object.fromEntries(s.env.map((f) => [f.name, f.value]));
   openDialog(buildServerForm({
     title: `Edit ${s.name}`, submitText: "Save", name: s.name,
-    ports: s.ports, fields: s.env, values, editing: true, showStart: false,
+    ports: s.ports, fields: s.env, values, editing: true, showStart: false, serverId: s.id,
     onSubmit: async (body) => {
       await api(`/api/servers/${encodeURIComponent(s.id)}`, "PATCH", body);
       await refresh();
@@ -984,6 +1018,72 @@ async function openLogs(id) {
   paintState();
   await load();
   schedule();
+}
+
+// -------------------------------------------------------------------- check setup + diagnostics
+const CHK_BADGE = { pass: ["chk-ok", "OK"], warn: ["chk-warn", "Check"], fail: ["chk-fail", "Problem"], skip: ["chk-info", "Skipped"] };
+async function openCheckSetup(id) {
+  await refresh();
+  const s0 = findServer(id);
+  if (!s0) return;
+  const result = el("div", { id: "check-result", "aria-live": "polite" });
+  const diagPre = el("pre", { class: "diagbox", id: "diag-text", tabIndex: 0 });
+  const diag = el("details", { class: "diag", id: "diag-details" },
+    el("summary", { textContent: "Diagnostics (what Copy diagnostics copies; passwords are hidden)" }), diagPre);
+  const err = el("div", { class: "form-error", hidden: true });
+  const again = el("button", { type: "button", class: "primary", id: "check-again", textContent: "Check again" });
+  const copy = el("button", { type: "button", class: "secondary", id: "diag-copy", textContent: "Copy diagnostics" });
+  let diagText = "";
+
+  async function loadDiagnostics() {
+    try {
+      const r = await api(`/api/servers/${sid(id)}/diagnostics?lines=60`);
+      diagText = r.text;
+      diagPre.textContent = r.text;
+    } catch (e) { diagText = ""; diagPre.textContent = `Diagnostics could not be read: ${e.message}`; }
+  }
+  async function run() {
+    again.disabled = true;
+    err.hidden = true;
+    result.replaceChildren(el("p", { class: "empty-small", role: "status" }, spinner(), " Checking the server\u2026"));
+    try {
+      const r = await api(`/api/servers/${sid(id)}/check-setup`);
+      const banner = r.overall === "pass" ? "okbanner" : r.overall === "warn" ? "warn" : "error";
+      result.replaceChildren(
+        el("div", { class: `banner ${banner}`, id: "check-summary" }, el("strong", { textContent: r.overall === "pass" ? "Everything checked looks right. " : r.overall === "warn" ? "Nothing is broken, but a few things need a look. " : "Something needs fixing. " }), r.summary + "."),
+        el("ul", { class: "checks", id: "check-list" }, ...r.checks.map((c) => {
+          const [cls, label] = CHK_BADGE[c.status] || ["chk-info", c.status];
+          return el("li", { class: `chk-item ${c.status}`, "data-check": c.id },
+            el("span", { class: `badge ${cls}`, textContent: label }),
+            el("div", {},
+              el("div", { class: "check-title", textContent: c.title }),
+              el("div", { class: "check-msg", textContent: c.detail }),
+              c.fix && (c.status === "warn" || c.status === "fail") ? el("div", { class: "check-fix" }, el("strong", { textContent: "How to fix: " }), c.fix) : null));
+        })),
+        r.suggestions.length ? el("div", { class: "suggest", id: "check-suggestions" },
+          el("h4", { textContent: "Suggested fixes" }), el("ul", {}, ...r.suggestions.map((t) => el("li", { textContent: t })))) : null,
+        el("p", { class: "hint", textContent: `Checked ${new Date().toLocaleTimeString()}. Nothing was changed by this check.` }));
+    } catch (e) {
+      result.replaceChildren();
+      err.textContent = `Could not check the server: ${e.message}`;
+      err.hidden = false;
+    } finally { again.disabled = false; }
+    loadDiagnostics();
+  }
+  again.addEventListener("click", run);
+  copy.addEventListener("click", async () => {
+    if (!diagText) await loadDiagnostics();
+    if (diagText) copyText(diagText, copy);
+  });
+  openTall(el("div", { class: "panel" },
+    el("h3", { textContent: `Check setup \u2013 ${s0.name}` }),
+    el("p", { class: "hint", textContent: "A read-only checklist: the container, the ready line, the game version, the settings files, the ports, the folders and the required settings." }),
+    result, diag,
+    err,
+    el("div", { class: "dialog-actions" },
+      copy, el("span", { class: "spacer" }), again,
+      el("button", { type: "button", class: "secondary", textContent: "Close", onclick: closeDialog }))));
+  await run();
 }
 
 // -------------------------------------------------------------------- config editor
@@ -1491,6 +1591,7 @@ async function refreshStats() {
 // -------------------------------------------------------------------- MCP page
 let mcpInfo = null;
 let mcpAudit = [];
+const auditView = { limit: 15, problems: false };
 const DESTRUCTIVE_TOOLS = ["delete_server", "restore_backup", "delete_backup", "wipe_server_data"];
 
 function copyText(text, button) {
@@ -1582,22 +1683,31 @@ function renderMcpAudit() {
     return t.length > 140 ? t.slice(0, 140) + "\u2026" : t;
   };
   const fmt = (iso) => { const d = new Date(iso); return isNaN(d) ? iso : d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" }); };
-  $("mcp-audit").replaceChildren(mcpAudit.length
+  const rows = auditView.problems ? mcpAudit.filter((e) => !["ok", "confirmation_required"].includes(e.status)) : mcpAudit;
+  const limitSel = el("select", { id: "audit-limit", "aria-label": "How many entries" },
+    ...[15, 50, 200].map((n) => el("option", { value: String(n), textContent: `Newest ${n}`, selected: n === auditView.limit })));
+  limitSel.addEventListener("change", () => { auditView.limit = Number(limitSel.value); refreshMcp(); });
+  const onlyProblems = el("input", { type: "checkbox", id: "audit-problems", checked: auditView.problems });
+  onlyProblems.addEventListener("change", () => { auditView.problems = onlyProblems.checked; renderMcpAudit(); });
+  const controls = el("div", { class: "toolbar wrap audit-controls" }, limitSel,
+    el("label", { class: "check" }, onlyProblems, "Only problems (errors, rejected calls)"),
+    el("span", { class: "hint", textContent: "Passwords, tokens and file contents are never recorded. Agents can read this log with the tool get_mcp_audit." }));
+  $("mcp-audit").replaceChildren(controls, rows.length
     ? el("table", { class: "list audit" },
         el("thead", {}, el("tr", {}, el("th", { textContent: "Time" }), el("th", { textContent: "Tool" }), el("th", { textContent: "Arguments (secrets hidden)" }), el("th", { textContent: "Result" }))),
-        el("tbody", {}, ...mcpAudit.map((e) => el("tr", {},
+        el("tbody", {}, ...rows.map((e) => el("tr", {},
           el("td", { class: "nowrap", textContent: fmt(e.time) }),
           el("td", {}, el("code", { textContent: e.tool })),
           el("td", { class: "mono small", textContent: argText(e.args) }),
           el("td", {}, el("span", { class: `abadge st-${e.status}`, textContent: e.status.replaceAll("_", " ") }),
             e.detail ? el("div", { class: "live-sub", textContent: e.detail }) : null)))))
-    : el("p", { class: "empty-small", textContent: "No MCP calls yet." }));
+    : el("p", { class: "empty-small", textContent: auditView.problems ? "No problems in the newest entries." : "No MCP calls yet." }));
 }
 
 async function refreshMcp() {
   try {
     mcpInfo = await api("/api/mcp/info");
-    mcpAudit = (await api("/api/mcp/audit?limit=15")).entries;
+    mcpAudit = (await api(`/api/mcp/audit?limit=${auditView.limit}`)).entries;
   } catch (e) { /* connection indicator shows problems */ }
   renderMcp();
 }

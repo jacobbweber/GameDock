@@ -28,7 +28,8 @@ import yaml
 
 from .catalog import ENTRY_KEYS, MAX_PATTERN_LEN, parse_definition, safety_problems
 from .errors import CatalogError, ConflictError, NotFoundError, OperationError, ValidationError
-from .models import ID_RE, CatalogEntry
+from . import portcheck
+from .models import ID_RE, CatalogEntry, is_reserved_env_name
 
 REVIEW_FILENAME = "catalog-review.json"
 MAX_YAML_BYTES = 20 * 1024
@@ -291,6 +292,12 @@ class Flag:
 
 
 SECRET_NAME_RE = re.compile(r"pass|secret|token|key|pwd|credential", re.I)
+FEW_FIELDS = 5   # fewer settings than this on the deploy form earns a warning (unless the notes explain what was left out)
+_OMISSION_RE = re.compile(r"left out|not exposed|omitted|not included|deliberately|on purpose|not expose|only the", re.I)
+
+
+def _explains_omissions(notes: str) -> bool:
+    return bool(_OMISSION_RE.search(notes or ""))
 RISKY_CONTAINER_PATHS = {"/", "/etc", "/proc", "/sys", "/dev", "/bin", "/sbin", "/usr", "/lib", "/lib64", "/boot",
                          "/run", "/var/run"}
 
@@ -362,12 +369,174 @@ def analyze_entry(e: CatalogEntry, others: Mapping[str, CatalogEntry] | None = N
         add("info", "Backups of a running server copy the files while the game runs (no save_command and "
                     "backup_stop_first is false). Fine for games that save to disk continuously.")
     if others:
-        for p in e.ports:
-            for o in others.values():
-                if o.id != e.id and any(q.host == p.host and q.protocol == p.protocol for q in o.ports):
-                    add("info", f"The default host port {p.host}/{p.protocol} is also the default of '{o.id}'. They "
-                                "can still both be deployed if one of them is given another host port.")
-                    break
+        defaults = [(o.id, o.name, {(q.protocol, q.host) for q in o.ports}) for o in others.values()]
+        taken = {pp for _, _, ps in defaults for pp in ps} | {(q.protocol, q.host) for q in e.ports}
+        for proto, host, oid, oname in portcheck.default_collisions(e.id, [(p.protocol, p.host) for p in e.ports], defaults):
+            alt = portcheck.suggest_free(proto, host, lambda pr, po: (pr, po) in taken)
+            add("warn", f"Port clash between catalog games: the default host port {host}/{proto} is also the default of "
+                        f"'{oname}' ({oid}). Both can still be deployed if one of them is given another host port (the "
+                        "deploy dialog and preview_deploy warn about it), but a different default avoids the clash"
+                        + (f", for example {alt}." if alt else "."))
+    # a few more checks that need only the entry itself
+    exposed = len(e.fields)
+    if exposed < FEW_FIELDS and not _explains_omissions(e.notes):
+        add("warn", f"Only {exposed} setting(s) are exposed as fields. Rule: expose every documented player-facing setting "
+                    "(game mode, world name or seed, difficulty, save options, slot count...) as a field, or list in the "
+                    "notes which ones were left out and why.")
+    if e.steam_app_id and not e.installed_build_file:
+        if not e.volumes:
+            add("warn", "steam_app_id is set but no folder is mounted, so GameDock can never find the game's Steam record "
+                        f"(appmanifest_{e.steam_app_id}.acf) or an installed_build_file: version tracking cannot work. Mount "
+                        "the game's install folder, or set installed_build_file.")
+        elif not e.steam_manifest_dir:
+            add("info", f"GameDock will look for appmanifest_{e.steam_app_id}.acf inside the mounted folders ("
+                        + ", ".join(v.host for v in e.volumes) + "). If the image installs the game somewhere that is not "
+                        "mounted, version tracking shows 'unknown': after the first deploy run verify_game_setup, which "
+                        "names the exact fix (steam_manifest_dir or installed_build_file).")
+    return flags
+
+
+# --------------------------------------------------------------------------- what inspect_image saw
+# Variables every base image has; they are not settings of the game and are never reported as "not exposed".
+BASE_ENV_NAMES = frozenset({
+    "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "TERM", "HOSTNAME", "DEBIAN_FRONTEND", "TZ", "TMPDIR", "SSL_CERT_FILE",
+    "SSL_CERT_DIR", "GOSU_VERSION", "GPG_KEY", "PYTHON_VERSION", "NODE_VERSION", "JAVA_HOME", "JAVA_VERSION",
+    "LD_LIBRARY_PATH", "container", "APPDIR", "STEAMCMDDIR", "STEAMCMD_DIR", "SHLVL", "OLDPWD", "_",
+})
+MAX_REPORTED_NAMES = 15
+INSPECTIONS_FILENAME = "inspected-images.json"
+MAX_INSPECTIONS = 100
+
+
+def norm_image(ref: str) -> str:
+    """One spelling for 'the same image': no docker.io/ or library/ prefix, and a missing tag means latest."""
+    ref = (ref or "").strip()
+    if ref.startswith("docker.io/"):
+        ref = ref[len("docker.io/"):]
+    if ref.startswith("library/"):
+        ref = ref[len("library/"):]
+    name, at, digest = ref.partition("@")
+    last = name.rsplit("/", 1)[-1]
+    if ":" not in last and not at:
+        name += ":latest"
+    return name + at + digest
+
+
+class InspectionStore:
+    """<data>/inspected-images.json: which image references inspect_image has looked at, when, and what it saw. Small,
+    bounded, no secrets (environment variable NAMES only). Read by validate_catalog_entry."""
+
+    def __init__(self, path: Path, clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
+        self.path = Path(path)
+        self._clock = clock
+        self._lock = threading.RLock()
+
+    def _load(self) -> dict[str, dict]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeDecodeError):
+            return {}
+        return {str(k): v for k, v in data.items() if isinstance(v, dict)} if isinstance(data, dict) else {}
+
+    def get(self, image: str) -> dict | None:
+        with self._lock:
+            return self._load().get(norm_image(image))
+
+    def record(self, image: str, result: dict) -> dict:
+        """Remember one inspect_image answer (never raises: this is a convenience for later warnings)."""
+        local = bool(result.get("local"))
+        details = result.get("local_details") or {}
+        ok = local or bool(result.get("remote"))
+        rec = {
+            "image": image, "at": self._clock().isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "ok": ok, "local": local, "registry_answered": bool(result.get("remote")),
+            "kind": "" if ok else str(result.get("remote_error_kind") or "other"),
+            "failure": "" if ok else str(result.get("failure") or result.get("remote_error") or "")[:300],
+        }
+        if local and details:
+            rec["facts"] = {"env_names": list(details.get("env_names") or [])[:120],
+                            "exposed_ports": list(details.get("exposed_ports") or [])[:60],
+                            "volumes": list(details.get("volumes") or [])[:60],
+                            "healthcheck": bool(details.get("healthcheck")), "user": str(details.get("user") or "")[:80]}
+        try:
+            with self._lock:
+                data = self._load()
+                data[norm_image(image)] = rec
+                if len(data) > MAX_INSPECTIONS:
+                    for k in sorted(data, key=lambda k: str(data[k].get("at", "")))[:len(data) - MAX_INSPECTIONS]:
+                        data.pop(k, None)
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = self.path.with_name(self.path.name + ".tmp")
+                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=1, sort_keys=True)
+                os.replace(tmp, self.path)
+        except OSError:
+            pass
+        return rec
+
+
+def _setting_like(name: str) -> bool:
+    return bool(name) and name not in BASE_ENV_NAMES and not is_reserved_env_name(name) and not name.startswith("_")
+
+
+def _covered(image_path: str, mounted: list[str]) -> bool:
+    ip = image_path.rstrip("/") or "/"
+    return any(ip == m.rstrip("/") or ip.startswith(m.rstrip("/") + "/") for m in mounted)
+
+
+def analyze_image_facts(e: CatalogEntry, rec: dict | None) -> list[Flag]:
+    """Compare the entry with what inspect_image saw of exactly its image tag (rec = InspectionStore.get)."""
+    flags: list[Flag] = []
+    add = lambda level, text: flags.append(Flag(level, text))  # noqa: E731
+    _, tag, digest = _image_parts(e.image)
+    if rec is None:
+        add("warn", f"The image '{e.image}' was never inspected: GameDock has no record of an inspect_image call for exactly "
+                    f"this tag. Call inspect_image with '{e.image}' first, to confirm that the tag exists and to see its "
+                    "ports, volumes, environment variables and health check. Always inspect the exact tag you use.")
+        return flags
+    if not rec.get("ok"):
+        why = rec.get("failure") or "the registry did not answer"
+        if not digest and tag in ("", "latest"):
+            add("warn", f"inspect_image could not find '{e.image}' ({why}) and the entry uses the tag "
+                        f"'{tag or 'latest'}', which many images do not publish. Check the image's page for the real tag "
+                        "names (inspect_image lists the tags it knows) and use one that exists.")
+        else:
+            add("warn", f"inspect_image could not confirm '{e.image}' ({why}). Check the image name and the tag before "
+                        "adding the entry.")
+        return flags
+    facts = rec.get("facts")
+    if not facts:
+        add("info", f"'{e.image}' was only checked at the registry; it is not stored on this machine, so its ports, "
+                    "volumes, variables and health check could not be compared with the entry. Ask the person to run "
+                    f"`docker pull {e.image}` on the GameDock machine, then call inspect_image again.")
+        return flags
+    mapped = {f.name for f in e.fields} | set(e.env)
+    unmapped = [n for n in facts.get("env_names", []) if _setting_like(n) and n not in mapped]
+    if unmapped:
+        more = f" (and {len(unmapped) - MAX_REPORTED_NAMES} more)" if len(unmapped) > MAX_REPORTED_NAMES else ""
+        add("warn", "The image knows these environment variables that the entry neither exposes as a field nor sets in env: "
+                    + ", ".join(unmapped[:MAX_REPORTED_NAMES]) + more + ". If any is a documented player-facing setting, "
+                    "expose it as a field; otherwise say in the notes why it was left out. (Base-image variables such as "
+                    "PATH and HOME are ignored.)")
+    have_ports = {(p.protocol, p.container) for p in e.ports}
+    missing_ports = []
+    for item in facts.get("exposed_ports", []):
+        num, _, proto = str(item).partition("/")
+        if num.isdigit() and (proto or "tcp", int(num)) not in have_ports:
+            missing_ports.append(str(item))
+    if missing_ports:
+        add("warn", "The image declares these ports that the entry does not map: " + ", ".join(missing_ports[:MAX_REPORTED_NAMES])
+                    + ". Map the ones players or tools need, or say in the notes why not.")
+    mounted = [v.container for v in e.volumes]
+    loose = [v for v in facts.get("volumes", []) if not _covered(str(v), mounted)]
+    if loose:
+        add("warn", "The image declares these volumes that no mounted folder covers: " + ", ".join(loose[:MAX_REPORTED_NAMES])
+                    + ". Anything written there is lost when the container is removed and is not backed up.")
+    if not e.ready_log_pattern and not facts.get("healthcheck"):
+        add("warn", "The entry has no ready_log_pattern and the image has no health check, so the tile will say Ready to join "
+                    "as soon as the container runs. Find the log line the game prints when players can join and set "
+                    "ready_log_pattern.")
     return flags
 
 
@@ -472,6 +641,7 @@ class CatalogAuthoring:
                  clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
         self.catalog_dir = Path(catalog_dir)
         self.store = ReviewStore(Path(data_dir) / REVIEW_FILENAME)
+        self.inspections = InspectionStore(Path(data_dir) / INSPECTIONS_FILENAME, clock)
         self._entries = entries
         self._changed = changed
         self._clock = clock
@@ -533,6 +703,9 @@ class CatalogAuthoring:
     def _result(self, c: Checked) -> dict:
         entries = self._entries()
         flags = analyze_entry(c.entry, entries) if c.entry else []
+        insp = self.inspections.get(c.entry.image) if c.entry else None
+        if c.entry:
+            flags = flags + analyze_image_facts(c.entry, insp)
         gid = (c.data or {}).get("id") if isinstance(c.data, dict) else None
         info: dict = {
             "valid": c.ok, "errors": list(c.errors),
@@ -542,6 +715,9 @@ class CatalogAuthoring:
             "file_name": f"{c.entry.id}.yaml" if c.entry else None,
             "summary": summarize_entry(c.entry) if c.entry else None,
             "size_bytes": len(c.text.encode("utf-8", "replace")),
+            "image_inspection": ({"inspected": insp is not None, "at": (insp or {}).get("at"),
+                                  "ok": bool((insp or {}).get("ok")), "stored_here": bool((insp or {}).get("local"))}
+                                 if c.entry else None),
         }
         info.update(self._standing(c.entry.id) if c.entry else {"exists": False, "can_add": False, "can_update": False})
         return info
@@ -627,6 +803,8 @@ class CatalogAuthoring:
 
             def fn(d: dict) -> None:
                 r = dict(d.get(gid) or rec)
+                if r.get("reviewed_at"):
+                    r["last_approved_at"] = r["reviewed_at"]   # so get_catalog_review_status can say "was approved before"
                 r.update({"reviewed": False, "yaml_sha256": digest, "updated_at": now, "file": path.name})
                 r.pop("reviewed_sha256", None)
                 r.pop("reviewed_at", None)
@@ -653,7 +831,7 @@ class CatalogAuthoring:
             text = (self.catalog_dir / entry.source_file).read_text(encoding="utf-8")
         except OSError as e:
             raise OperationError(f"The file of '{gid}' cannot be read: {e.strerror or e}") from e
-        flags = analyze_entry(entry, self._entries())
+        flags = analyze_entry(entry, self._entries()) + analyze_image_facts(entry, self.inspections.get(entry.image))
         changed_after_review = bool(rec and rec.get("reviewed") and not entry.reviewed)
         return {
             "id": gid, "name": entry.name, "origin": entry.origin, "reviewed": entry.reviewed,
@@ -665,6 +843,57 @@ class CatalogAuthoring:
             "flags": [{"level": f.level, "text": f.text} for f in flags],
             "can_approve": bool(rec) and not entry.reviewed, "can_reject": bool(rec),
         }
+
+    def review_status(self, gid: str, include_yaml: bool = False) -> dict:
+        """Read-only: where an entry stands in the approval process. Never shows or changes anything secret; the same
+        facts the Catalog page shows. This is how an agent finds out that a person approved (or has not yet)."""
+        entry = self._entries().get(gid)
+        if entry is None:
+            known = ", ".join(sorted(self._entries())) or "none"
+            raise NotFoundError(f"Unknown catalog entry '{gid}'. Entries: {known}. (An entry whose file has a problem is "
+                                "not loaded: validate_catalog_entry or the Catalog page shows the problem.)")
+        rec = self.records().get(gid)
+        try:
+            text = (self.catalog_dir / entry.source_file).read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        current = entry.file_sha256 or sha256_bytes(text.encode("utf-8"))
+        out: dict = {"id": gid, "name": entry.name, "origin": "mcp" if rec else "repo", "file": entry.source_file,
+                     "reviewed": entry.reviewed, "can_deploy": entry.reviewed,
+                     "fingerprint": current, "fingerprint_short": current[:12]}
+        if rec is None:
+            out.update({"state": "repository", "changed_since_review": False, "reviewed_fingerprint": None,
+                        "added_at": None, "reviewed_at": None, "updated_at": None,
+                        "summary": "This entry came from the repository, so it needs no approval and can be deployed.",
+                        "next_step": "Deploy it (preview_deploy first)."})
+        else:
+            approved = bool(rec.get("reviewed"))
+            changed = approved and not entry.reviewed
+            if entry.reviewed:
+                state, summary, nxt = ("approved", "A person approved exactly this version of the file. It can be deployed.",
+                                       "Deploy a test copy: preview_deploy, check_ports, deploy_server, then verify_game_setup.")
+            elif changed:
+                state = "changed_since_approval"
+                summary = ("The file was approved, but it has changed since (it no longer matches the approved fingerprint). "
+                           "It cannot be deployed until a person approves it again.")
+                nxt = "Tell the person the file changed and needs a new approval in the web page (Catalog -> Review)."
+            elif rec.get("last_approved_at") or rec.get("updated_at"):
+                state = "waiting_for_approval"
+                summary = ("This entry was updated through update_catalog_entry and is waiting for a new approval"
+                           + (" (an earlier version was approved)." if rec.get("last_approved_at") else "."))
+                nxt = ("Ask the person to approve the new version in the web page (Catalog -> Review). Servers already "
+                       "deployed keep the old snapshot: after approval, delete the test server and deploy it again.")
+            else:
+                state, summary = "waiting_for_approval", "Added by AI and waiting for a person to approve it in the web page."
+                nxt = "Ask the person to open Catalog -> Review and press Approve. You cannot approve it yourself."
+            out.update({"state": state, "changed_since_review": changed,
+                        "reviewed_fingerprint": rec.get("reviewed_sha256"),
+                        "added_at": rec.get("added_at"), "reviewed_at": rec.get("reviewed_at") if entry.reviewed else None,
+                        "last_approved_at": rec.get("last_approved_at") or (rec.get("reviewed_at") if changed else None),
+                        "updated_at": rec.get("updated_at"), "summary": summary, "next_step": nxt})
+        if include_yaml:
+            out["yaml"] = text
+        return out
 
     def approve(self, gid: str, yaml_sha256: str) -> dict:
         with self._lock:

@@ -117,7 +117,7 @@ def build_mcp(service: GameDockService, config: McpConfig | None = None,
     if config.mode == "off" or config.mode not in MODE_TIERS:
         return McpIntegration(config, audit, confirms, None, [], None)
     ttl = int(confirms.ttl)
-    tool_defs = make_tools(service, confirms)
+    tool_defs = make_tools(service, confirms, audit)
     names = [d.name for d in tool_defs if d.tier in MODE_TIERS[config.mode]]
 
     def factory() -> MCPServer:
@@ -148,14 +148,20 @@ def build_mcp(service: GameDockService, config: McpConfig | None = None,
                     "2. Research a maintained Docker image for the dedicated server, its ports and protocols, the save and "
                     "settings folders, the environment variables and the Steam app id of the dedicated server. NEVER invent "
                     "any of these; write what you could not confirm in the entry's notes.\n"
-                    "3. Call inspect_image on the image (it never downloads or runs it).\n"
-                    "4. Write the entry from the template and call validate_catalog_entry until valid is true.\n"
+                    "3. Call inspect_image on the EXACT image tag you will use (it never downloads or runs the image; if the "
+                    "tag is not found it lists the tags that exist).\n"
+                    "4. Write the entry from the template (expose every documented player-facing setting as a field, or say "
+                    "in notes why one was left out) and call validate_catalog_entry until valid is true and every warning is "
+                    "explained or fixed.\n"
                     + ("5. Call add_catalog_entry, then tell the person the entry is waiting for their approval in the web "
-                       "page (Catalog -> Review). You cannot approve it and it cannot be deployed before.\n"
+                       "page (Catalog -> Review). You cannot approve it and it cannot be deployed before. Poll "
+                       "get_catalog_review_status to see when it is approved.\n"
                        if can_add else
                        "5. This connection is read-only: give the validated entry to the person to add.\n")
-                    + "6. After approval, with the person's agreement, deploy a test copy on spare ports and verify "
-                    "joining, config editing, backup and restore. Report the result.")
+                    + "6. After approval, with the person's agreement: preview_deploy and check_ports, then deploy a test copy "
+                    "on spare ports, then verify_game_setup. Read get_server_logs / get_server_diagnostics for anything it "
+                    "flags, fix the entry with update_catalog_entry (it needs approval again), redeploy the test copy "
+                    "(a deployed server keeps a snapshot of the entry) and report the result.")
 
         @server.prompt(name="gamedock_overview", title="GameDock overview",
                        description="How GameDock works and how to use its tools safely")

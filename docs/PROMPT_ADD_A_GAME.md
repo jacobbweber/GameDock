@@ -37,28 +37,33 @@ STEPS
    variables (and which are secret), the Steam app id of the DEDICATED SERVER (not the game client) and how
    the image updates the game with SteamCMD, and the log lines for ready, version and download progress.
    Optional hints from me: <<IMAGE / LINKS / NOTES, or "none">>.
-3. Call inspect_image on the image. It never downloads or runs the image. If the image is not on the
-   machine, say so; ask me to run "docker pull <image>" on the GameDock machine if you need its declared
-   ports and folders, then call inspect_image again.
-4. Write the catalog entry from the template in the guide. Call validate_catalog_entry repeatedly until
-   "valid" is true. Read the warnings and fix those that apply.
+3. Call inspect_image on the EXACT image tag you intend to use. It never downloads or runs the image.
+   Never assume "latest" exists. If it answers tag_status "not_found", pick one of the tags it lists and
+   inspect again. If the image is not on the machine, say so; ask me to run "docker pull <image>" on the
+   GameDock machine if you need its declared ports, variables and folders, then call inspect_image again.
+4. Write the catalog entry from the template in the guide. Expose every documented player-facing setting
+   as a field (or say in "notes" which ones you left out and why). Call validate_catalog_entry repeatedly
+   until "valid" is true. Read the warnings and fix those that apply.
 5. If you have standard or full mode: call add_catalog_entry. If you only have read-only mode: stop here
    and give me the validated YAML in your report. After adding, tell me the entry is waiting for my review
-   (GameDock web page > Catalog > Review > Approve). Wait for me to say it is approved. Do not deploy
-   before that.
+   (GameDock web page > Catalog > Review > Approve). Poll get_catalog_review_status until its state is
+   "approved" (or I say so). Do not deploy before that: deploy_server is refused for an unapproved entry.
 6. After my approval:
    - If you have FULL mode and I have said you may test: deploy_server a test copy named
      "test-<<game id>>" on SPARE host ports (20000 or higher; call list_servers first so you do not use a
      port that is taken), with start=true.
    - Otherwise (standard or read-only mode, or if I have not said you may test): ask me before you deploy,
      and tell me exactly which ports you would use.
+   Before deploying, call preview_deploy and check_ports and fix every problem they list.
    Wait for "ready" to be true (the first start can take many minutes: poll get_server_status and read
    get_server_logs). Do not tell me to join before it is ready.
-7. Verify, using the checklist in the guide: logs show the ready and version lines and they match the
+7. Verify: call verify_game_setup first (and get_server_diagnostics if anything fails) and act on each
+   fix it names. Then use the checklist in the guide: logs show the ready and version lines and they match the
    patterns; read_config_file works for each listed config file; an empty password means no password;
    create_backup works and list_backups shows it; stop_server and start_server work. Do not restore or
    delete anything. If something fails, use update_catalog_entry to fix the entry (it goes back to "needs
-   review", so tell me), and try again.
+   review", so tell me, then wait for "approved" and deploy the test copy again: a server keeps the entry it
+   was created from, so a fix only reaches a newly deployed copy), and try again.
 8. Stop the test server when finished only if I have said so; otherwise leave it running and tell me.
 
 REPORT (use exactly this structure)

@@ -81,22 +81,37 @@ class AuditLog:
         except FileNotFoundError:
             pass
 
-    def recent(self, limit: int = 50) -> list[dict]:
-        """Newest first. Unreadable lines are skipped."""
+    def recent(self, limit: int = 50, tool: str | None = None, status: str | None = None) -> list[dict]:
+        """Newest first. Unreadable lines are skipped. `tool` / `status` keep only matching entries. Arguments are masked
+        again on the way out (they were masked when written; this is a second safety net)."""
         limit = max(1, min(500, limit))
         with self._lock:
             files = [self.path.with_name(self.path.name + ".1"), self.path]
-            lines: deque[str] = deque(maxlen=limit)
+            lines: deque[str] = deque(maxlen=None if (tool or status) else limit)
             for f in files:
                 try:
                     with open(f, encoding="utf-8") as fh:
                         lines.extend(fh)
                 except FileNotFoundError:
                     continue
+        try:
+            names = list(self._secret_names())
+        except Exception:  # noqa: BLE001
+            names = []
         out = []
         for line in reversed(lines):
             try:
-                out.append(json.loads(line))
+                rec = json.loads(line)
             except ValueError:
                 continue
+            if not isinstance(rec, dict):
+                continue
+            if tool and rec.get("tool") != tool:
+                continue
+            if status and rec.get("status") != status:
+                continue
+            rec["args"] = mask_args(rec.get("args") or {}, names)
+            out.append(rec)
+            if len(out) >= limit:
+                break
         return out
