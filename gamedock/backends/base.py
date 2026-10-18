@@ -30,3 +30,12 @@ class ContainerBackend(Protocol):
 
     def remove(self, name: str) -> None:
         """Remove the container (not its data volumes). No-op if missing."""
+
+    def pull_image(self, image: str) -> None:
+        """Download the newest version of an image."""
+
+    def get_image_id(self, image: str) -> str | None:
+        """Id (digest) of the locally stored image, or None if it is not present."""
+
+    def get_container_image_id(self, name: str) -> str | None:
+        """Id of the image the container was created from, or None if no such container."""

@@ -57,3 +57,15 @@ def test_missing_docker_binary():
 
     with pytest.raises(BackendError, match="not found"):
         DockerCliBackend(runner=runner).start("x")
+
+
+def test_pull_and_image_ids():
+    r = Recorder([(0, "pulled", ""), (0, "sha256:abc\n", ""), (1, "", "No such image"), (0, "sha256:def\n", ""),
+                  (1, "", "No such object")])
+    b = DockerCliBackend(runner=r)
+    b.pull_image("img:1")
+    assert r.calls[0][0] == ["docker", "pull", "img:1"] and r.calls[0][1]["timeout"] >= 600
+    assert b.get_image_id("img:1") == "sha256:abc"
+    assert b.get_image_id("img:2") is None
+    assert b.get_container_image_id("c") == "sha256:def"
+    assert b.get_container_image_id("gone") is None

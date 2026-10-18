@@ -26,6 +26,7 @@ class Settings:
     catalog_dir: Path = Path("catalog")
     data_dir: Path = Path("data")
     backend: str = "docker"  # "docker" or "fake"
+    backup_retention: int = 10  # keep the newest N backups per server
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -36,4 +37,5 @@ class Settings:
             catalog_dir=Path(env.get("GAMEDOCK_CATALOG_DIR", "catalog")),
             data_dir=Path(env.get("GAMEDOCK_DATA_DIR", "data")),
             backend=env.get("GAMEDOCK_BACKEND", "docker").lower(),
+            backup_retention=max(1, int(env.get("GAMEDOCK_BACKUP_RETENTION", "10"))),
         )

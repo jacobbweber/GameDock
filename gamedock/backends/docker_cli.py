@@ -15,6 +15,7 @@ from ..models import ContainerSpec, Status
 from .base import ContainerState
 
 STOP_TIMEOUT_SECONDS = 60  # give game servers time to save on SIGTERM
+PULL_TIMEOUT_SECONDS = 3600  # game images can be many GB
 
 Runner = Callable[..., subprocess.CompletedProcess]
 
@@ -33,7 +34,8 @@ class DockerCliBackend:
         self.docker_bin = docker_bin
         self._runner = runner or subprocess.run
 
-    def _run(self, args: list[str], env: dict[str, str] | None = None, check: bool = True):
+    def _run(self, args: list[str], env: dict[str, str] | None = None, check: bool = True,
+             timeout: int | None = None):
         full_env = {**os.environ, **env} if env else None
         try:
             proc = self._runner(
@@ -41,7 +43,7 @@ class DockerCliBackend:
                 capture_output=True,
                 text=True,
                 env=full_env,
-                timeout=STOP_TIMEOUT_SECONDS + 30,
+                timeout=timeout or STOP_TIMEOUT_SECONDS + 30,
             )
         except FileNotFoundError as e:
             raise BackendError("docker command not found; is Docker installed and on PATH?") from e
@@ -90,3 +92,14 @@ class DockerCliBackend:
         if self.get_state(name).status == Status.NOT_CREATED:
             return
         self._run(["rm", "-f", name])
+
+    def pull_image(self, image: str) -> None:
+        self._run(["pull", image], timeout=PULL_TIMEOUT_SECONDS)
+
+    def get_image_id(self, image: str) -> str | None:
+        proc = self._run(["image", "inspect", "--format", "{{.Id}}", image], check=False)
+        return proc.stdout.strip() or None if proc.returncode == 0 else None
+
+    def get_container_image_id(self, name: str) -> str | None:
+        proc = self._run(["inspect", "--format", "{{.Image}}", name], check=False)
+        return proc.stdout.strip() or None if proc.returncode == 0 else None

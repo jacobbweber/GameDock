@@ -20,3 +20,15 @@ class BackendError(GameDockError):
 
 class CatalogError(GameDockError):
     pass
+
+
+class AccessError(GameDockError):
+    """A file could not be read or written because of permissions (HTTP 403)."""
+
+
+class TooLargeError(GameDockError):
+    """A file is bigger than GameDock is willing to handle (HTTP 413)."""
+
+
+class OperationError(GameDockError):
+    """An operation failed for a reason other than bad input (HTTP 500), e.g. disk full."""
