@@ -4,6 +4,10 @@ name: Minecraft (Java) Server
 image: itzg/minecraft-server:latest
 description: Minecraft Java Edition server using a popular community image.
 notes: Example values. You must accept the Minecraft EULA (https://aka.ms/MinecraftEULA) by setting EULA to TRUE.
+update_note: >-
+  Minecraft servers update when the image's VERSION setting says so (LATEST by default picks the newest release at each
+  start), so a restart can also bring a new game version. "Update available" only means the image itself has a newer
+  version; Update now replaces it and keeps your world.
 ports:
   - { protocol: tcp, host: 25565, container: 25565 }
 volumes:

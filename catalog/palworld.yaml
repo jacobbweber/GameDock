@@ -13,6 +13,15 @@ notes: >-
 # instead of Running until the server really accepts players.
 ready_log_pattern: "Running Palworld dedicated server on"      # used when there is no health check or it lags behind
 progress_log_pattern: "progress: *([0-9]+(?:[.][0-9]+)?)"      # SteamCMD: "Update state (0x61) downloading, progress: 51.68"
+# How updates work for this image (shown next to the Update button), and optional backup hints.
+update_note: >-
+  This image downloads the newest Palworld server files with SteamCMD every time the container starts (its setting
+  UPDATE_ON_BOOT is on by default), so restarting the server is how the game itself gets updated. "Update available"
+  only means the image (the helper program around the game) has a newer version; Update now replaces it and keeps your
+  world.
+# Run inside the game container before a backup that does not stop the server, so the world is written to disk first.
+# Unverified: it needs the image's RCON to be enabled (the image's default). A failure only adds a note.
+save_command: [rcon-cli, save]
 ports:
   - { protocol: udp, host: 8211, container: 8211 }
   - { protocol: udp, host: 27015, container: 27015 }

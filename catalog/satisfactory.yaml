@@ -4,6 +4,10 @@ name: Satisfactory Dedicated Server
 image: wolveix/satisfactory-server:latest
 description: Satisfactory dedicated server using a popular community image.
 notes: Example values. Check the image documentation before real use.
+update_note: >-
+  This image downloads the newest Satisfactory server files with SteamCMD when the container starts, so restarting the
+  server is how the game itself gets updated. "Update available" only means the image has a newer version; Update now
+  replaces it and keeps your saves.
 ports:
   - { protocol: udp, host: 7777, container: 7777 }
   - { protocol: tcp, host: 7777, container: 7777 }

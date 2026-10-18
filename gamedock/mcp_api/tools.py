@@ -105,14 +105,18 @@ def make_tools(service: GameDockService, confirms: ConfirmationStore) -> list[To
         """List deployed servers with their status (running, stopped, not_created, error), ports and
         settings. Secret settings are never shown, only whether they are set. `status: running` only means the
         container is up: check `ready` (true = the game can be joined) and `phase` (starting, installing with
-        `progress` percent, ready, unhealthy). `activity` shows what GameDock is doing right now (e.g. deploying)."""
+        `progress` percent, ready, unhealthy). `activity` shows what GameDock is doing right now (e.g. deploying).
+        `update_available` says whether a newer game image exists (null = unknown) and `schedule` summarises the
+        server's scheduled backups and maintenance."""
         return {"servers": [server_to_dict(s) for s in service.list_servers()]}
 
     @tool(READ, _ann(read=True))
     def get_server_status(server_id: ServerId) -> Result:
         """Current status and settings of one server. `status: running` only means the container is up; the game can
         be joined when `ready` is true. `phase` is starting, installing (with `progress` percent), ready or
-        unhealthy; `phase_detail` explains it in plain words. `activity` is what GameDock is doing right now."""
+        unhealthy; `phase_detail` explains it in plain words. `activity` is what GameDock is doing right now.
+        `update_available` is true when the registry has a newer image than the container runs, false when it is current
+        and null when unknown; `update_note` explains how this game really updates."""
         return server_to_dict(service.get_status(server_id))
 
     @tool(READ, _ann(read=True))
@@ -175,7 +179,71 @@ def make_tools(service: GameDockService, confirms: ConfirmationStore) -> list[To
         why a server is not ready, what it is downloading, or why it stopped. Read-only."""
         return to_plain(service.get_logs(server_id, lines, max_chars=40_000))
 
+    @tool(READ, _ann(read=True))
+    def get_gamedock_version() -> Result:
+        """GameDock's own version, git commit and whether a newer GameDock exists on GitHub (`update_available` is
+        true, false, or null when it could not be checked: offline, switched off or never checked yet). Only a person
+        can install the update, with the Update GameDock button on the web page; there is no tool for it."""
+        s = service.updater.status()
+        return {"version": s["version"], "commit": s["commit_short"], "branch": s["branch"],
+                "update_check_enabled": s["check_enabled"], "update_available": s["update_available"],
+                "latest": s["latest"], "last_checked": s["checked_at"], "check_problem": s["check_error"] or None,
+                "repository": s["repo_url"],
+                "can_update_from_web_page": s["self_update"]["possible"]}
+
+    @tool(READ, _ann(read=True))
+    def list_schedules() -> Result:
+        """Every server's scheduled backups and scheduled maintenance (back up, update the image, restart): whether
+        they are on, how often, when each runs next (UTC), the last result, plus the machine's timezone that times of
+        day are read in. Also lists recent runs (newest first) including failures."""
+        return to_plain(service.list_schedules())
+
     # ------------------------------------------------------------------ standard (changes things, not destructive)
+    @tool(STANDARD, _ann(idempotent=True))
+    def set_backup_schedule(
+        server_id: ServerId,
+        enabled: Annotated[bool, Field(description="true to run scheduled backups, false to switch them off (the other "
+                                                   "settings are remembered)")],
+        frequency: Annotated[Literal["interval", "daily", "weekly"] | None, Field(
+            description="'interval' = every N hours, 'daily' = every day at a time, 'weekly' = on chosen days at a "
+                        "time. Required the first time; leave out to keep the stored schedule.")] = None,
+        every_hours: Annotated[int | None, Field(ge=1, le=168, description="For 'interval': hours between backups")] = None,
+        time: Annotated[str | None, Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$",
+                                          description="For 'daily' and 'weekly': 24-hour time like 03:00, in the "
+                                                      "machine's timezone")] = None,
+        days: Annotated[list[Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]] | None, Field(
+            max_length=7, description="For 'weekly': the weekdays")] = None,
+        retention: Annotated[int | None, Field(ge=1, le=100, description="How many backups of this server to keep; "
+                                                                           "leave out for GameDock's usual number")] = None,
+    ) -> Result:
+        """Create, change, switch on or switch off a server's scheduled backups. Only the schedule changes: nothing
+        runs now and nothing is deleted. A running server is copied while it runs, unless its game is set to stop first.
+        Missed runs (GameDock was off) run once when GameDock starts again."""
+        return service.set_backup_schedule(server_id, enabled, frequency, every_hours, time, list(days) if days else None,
+                                           retention)
+
+    @tool(STANDARD, _ann(idempotent=True))
+    def set_maintenance_schedule(
+        server_id: ServerId,
+        enabled: Annotated[bool, Field(description="true to run scheduled maintenance, false to switch it off")],
+        frequency: Annotated[Literal["daily", "weekly"] | None, Field(
+            description="'daily' or 'weekly' (with days). Required the first time; leave out to keep the stored schedule "
+                        "and options.")] = None,
+        time: Annotated[str | None, Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$",
+                                          description="24-hour time like 04:00, in the machine's timezone")] = None,
+        days: Annotated[list[Literal["mon", "tue", "wed", "thu", "fri", "sat", "sun"]] | None, Field(
+            max_length=7, description="For 'weekly': the weekdays")] = None,
+        backup_first: Annotated[bool, Field(description="Take a backup before changing anything")] = True,
+        update_image: Annotated[bool, Field(description="Download a newer game image if there is one and recreate the "
+                                                        "container with it (not for games that update inside the container)")] = True,
+        restart: Annotated[bool, Field(description="Restart the server (players are disconnected briefly)")] = True,
+    ) -> Result:
+        """Create, change, switch on or switch off a server's scheduled maintenance: at the chosen time GameDock can back
+        up, apply an image update and restart the server. Only the schedule changes now; nothing runs and nothing is
+        deleted. There is no 'only when nobody is playing' option because GameDock cannot see player counts."""
+        return service.set_maintenance_schedule(server_id, enabled, frequency, time, list(days) if days else None,
+                                                backup_first, update_image, restart)
+
     @tool(STANDARD, _ann())
     def deploy_server(
         game_id: Annotated[str, Field(description="Catalog id from list_catalog")],
