@@ -6,12 +6,14 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from .. import __version__
-from ..errors import BackendError, CatalogError, GameDockError, NotFoundError
-from ..models import ServerInfo
+from ..errors import BackendError, CatalogError, ConflictError, GameDockError, NotFoundError
+from ..models import CatalogEntry, PortMapping, ServerInfo
 from ..service import GameDockService
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -21,6 +23,40 @@ def server_to_dict(s: ServerInfo) -> dict:
     d = asdict(s)
     d["status"] = s.status.value
     return d
+
+
+def catalog_to_dict(e: CatalogEntry) -> dict:
+    return {
+        "id": e.id, "name": e.name, "image": e.image, "description": e.description, "notes": e.notes,
+        "ports": [asdict(p) for p in e.ports],
+        "fields": [asdict(f) for f in e.fields],  # defaults of secret fields are not secret values
+    }
+
+
+class PortIn(BaseModel):
+    protocol: str = Field(pattern="^(tcp|udp)$")
+    container: int
+    host: int
+
+
+class DeployIn(BaseModel):
+    game_id: str
+    name: str
+    ports: list[PortIn] = []
+    env: dict[str, str] = {}
+    start: bool = False
+
+
+class UpdateIn(BaseModel):
+    name: str | None = None
+    ports: list[PortIn] | None = None
+    env: dict[str, str] | None = None
+
+
+def _ports(items: list[PortIn] | None) -> list[PortMapping] | None:
+    if items is None:
+        return None
+    return [PortMapping(p.protocol, p.host, p.container) for p in items]
 
 
 def create_app(service: GameDockService) -> FastAPI:
@@ -38,6 +74,17 @@ def create_app(service: GameDockService) -> FastAPI:
     @app.exception_handler(NotFoundError)
     async def _nf(_: Request, e: NotFoundError):
         return JSONResponse({"error": str(e)}, status_code=404)
+
+    @app.exception_handler(ConflictError)
+    async def _co(_: Request, e: ConflictError):
+        return JSONResponse({"error": str(e)}, status_code=409)
+
+    @app.exception_handler(RequestValidationError)
+    async def _rv(_: Request, e: RequestValidationError):
+        first = e.errors()[0] if e.errors() else {}
+        where = ".".join(str(x) for x in first.get("loc", []) if x != "body")
+        return JSONResponse({"error": f"Invalid request: {where}: {first.get('msg', 'bad value')}"},
+                            status_code=422)
 
     @app.exception_handler(BackendError)
     async def _be(_: Request, e: BackendError):
@@ -59,6 +106,28 @@ def create_app(service: GameDockService) -> FastAPI:
     @app.get("/api/servers")
     def list_servers():
         return [server_to_dict(s) for s in service.list_servers()]
+
+    @app.get("/api/catalog")
+    def list_catalog():
+        return [catalog_to_dict(e) for e in service.list_catalog()]
+
+    @app.get("/api/catalog/{game_id}")
+    def get_catalog_entry(game_id: str):
+        return catalog_to_dict(service.get_catalog_entry(game_id))
+
+    @app.post("/api/servers", status_code=201)
+    def deploy_server(body: DeployIn):
+        return server_to_dict(service.deploy(body.game_id, body.name, _ports(body.ports), body.env, body.start))
+
+    @app.patch("/api/servers/{server_id}")
+    def update_server(server_id: str, body: UpdateIn):
+        return server_to_dict(service.update(server_id, body.name, _ports(body.ports), body.env))
+
+    @app.delete("/api/servers/{server_id}")
+    def delete_server(server_id: str, confirm: bool = False, delete_data: bool = False,
+                      confirm_delete_data: bool = False):
+        service.delete(server_id, confirm, delete_data, confirm_delete_data)
+        return {"deleted": server_id, "data_kept": True}
 
     @app.get("/api/servers/{server_id}")
     def get_server(server_id: str):
