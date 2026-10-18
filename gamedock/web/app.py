@@ -17,28 +17,12 @@ from ..errors import (
     AccessError, BackendError, CatalogError, ConflictError, GameDockError, NotFoundError, OperationError,
     TooLargeError,
 )
-from ..models import CatalogEntry, PortMapping, ServerInfo
+from ..models import PortMapping
+from ..serialize import catalog_to_dict, delete_result_to_dict, server_to_dict
 from ..metrics import render_metrics
 from ..service import GameDockService
 
 STATIC_DIR = Path(__file__).parent / "static"
-
-
-def server_to_dict(s: ServerInfo) -> dict:
-    d = asdict(s)
-    d["status"] = s.status.value
-    return d
-
-
-def catalog_to_dict(e: CatalogEntry) -> dict:
-    return {
-        "id": e.id, "name": e.name, "image": e.image, "description": e.description, "notes": e.notes,
-        "ports": [asdict(p) for p in e.ports],
-        "update_method": e.update_method,
-        "config_files": [{"path": c.path, "label": c.label, "format": c.format, "hot_edit": c.hot_edit}
-                         for c in e.config_files],
-        "fields": [asdict(f) for f in e.fields],  # defaults of secret fields are not secret values
-    }
 
 
 class PortIn(BaseModel):
@@ -173,10 +157,7 @@ def create_app(service: GameDockService, sampler=None, metrics_enabled: bool = F
     @app.delete("/api/servers/{server_id}")
     def delete_server(server_id: str, confirm: bool = False, delete_data: bool = False,
                       confirm_delete_data: bool = False):
-        r = service.delete(server_id, confirm, delete_data, confirm_delete_data)
-        return {"deleted": r.deleted, "data_kept": not r.data_deleted, "data_deleted": r.data_deleted,
-                "backup": r.backup.name if r.backup else None,
-                "backup_location": r.backup.path if r.backup else None, "note": r.note}
+        return delete_result_to_dict(service.delete(server_id, confirm, delete_data, confirm_delete_data))
 
     # ---- backups
     @app.get("/api/servers/{server_id}/backups")
