@@ -27,7 +27,7 @@ from .hoststats import HostMeter
 from .errors import BackendError, ConflictError, GameDockError, NotFoundError, ValidationError
 from .models import (
     BackupResult, CatalogEntry, ConfigContent, ConfigFile, ConfigFileInfo, ConfigSaveResult, ContainerSpec,
-    DeleteResult, EnvValue, HostStats, ImageInfo, Instance, PortMapping, RestoreResult, ServerInfo, ServerStats,
+    DataSummary, DeleteResult, EnvValue, HostStats, ImageInfo, Instance, PortMapping, RestoreResult, ServerInfo, ServerStats,
     StatsHistory, StatsPoint, StatsSnapshot, Status, UpdateResult, VolumeMapping, WipeResult,
 )
 from .store import InstanceStore
@@ -333,6 +333,29 @@ class GameDockService:
     def _require_stopped(self, inst: Instance, why: str) -> None:
         if self._is_running(inst):
             raise ConflictError(f"Stop the server before {why}")
+
+    def get_data_summary(self, server_id: str) -> DataSummary:
+        """File count and size of a server's data folder (read-only)."""
+        inst = self._instance(server_id)
+        path = self._data_dir_of(inst)
+        files, size, truncated = bk.folder_usage(path)
+        return DataSummary(str(path), files, size, truncated)
+
+    def secret_field_names(self) -> set[str]:
+        """Names of every field marked secret in the catalog or in a deployed server (used to mask audit logs)."""
+        names: set[str] = set()
+        try:
+            entries = list(self._catalog().values())
+        except GameDockError:
+            entries = []  # a broken catalog file must not break auditing
+        for inst in self.store.all():
+            try:
+                entries.append(self._template(inst))
+            except GameDockError:
+                continue
+        for e in entries:
+            names.update(f.name for f in e.fields if f.secret)
+        return names
 
     # ------------------------------------------------------------ backups
     def list_backups(self, server_id: str) -> list[bk.BackupInfo]:

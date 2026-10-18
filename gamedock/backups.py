@@ -233,3 +233,20 @@ def remove_tree(target: Path) -> None:
             f"The safety backup is intact.") from e
     except OSError as e:
         raise OperationError(f"Could not delete data: {e.strerror or e}") from e
+
+
+def folder_usage(target: Path, cap: int = 100_000) -> tuple[int, int, bool]:
+    """(file count, total bytes, truncated) for a folder, not following symlinks. Stops after `cap` entries."""
+    files = size = seen = 0
+    for root, dirs, names in os.walk(target, followlinks=False):
+        for n in names:
+            seen += 1
+            if seen > cap:
+                return files, size, True
+            try:
+                st = os.lstat(os.path.join(root, n))
+            except OSError:
+                continue
+            files += 1
+            size += st.st_size
+    return files, size, False

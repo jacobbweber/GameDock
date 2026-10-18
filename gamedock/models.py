@@ -173,6 +173,16 @@ class DeleteResult:
 
 
 @dataclass(frozen=True)
+class DataSummary:
+    """How much a server keeps in its data folder (used to describe destructive actions)."""
+
+    path: str
+    files: int
+    bytes: int
+    truncated: bool  # True if the folder was too big to count fully (numbers are then a lower bound)
+
+
+@dataclass(frozen=True)
 class ImageInfo:
     image: str
     image_id: str | None  # id of the image the container was created from
