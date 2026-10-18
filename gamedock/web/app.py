@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.routing import Route
 from pydantic import BaseModel, Field
 
 from .. import __version__
@@ -19,6 +20,8 @@ from ..errors import (
 )
 from ..models import PortMapping
 from ..serialize import catalog_to_dict, delete_result_to_dict, server_to_dict
+from ..mcp_api import McpConfig, build_mcp
+from ..mcp_api.confirm import ConfirmationStore
 from ..metrics import render_metrics
 from ..service import GameDockService
 
@@ -65,15 +68,19 @@ def _is_loopback(host: str | None) -> bool:
 
 
 def create_app(service: GameDockService, sampler=None, metrics_enabled: bool = False,
-               metrics_allow_remote: bool = False) -> FastAPI:
-    """`sampler` (optional) is started and stopped with the app. /metrics exists only if metrics_enabled."""
+               metrics_allow_remote: bool = False, mcp_config: McpConfig | None = None,
+               mcp_confirmations: ConfirmationStore | None = None) -> FastAPI:
+    """`sampler` (optional) is started and stopped with the app. /metrics exists only if metrics_enabled.
+    /mcp is served only if mcp_config asks for a mode other than "off"."""
+    mcp = build_mcp(service, mcp_config, mcp_confirmations)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         if sampler:
             sampler.start()
         try:
-            yield
+            async with mcp.lifespan():
+                yield
         finally:
             if sampler:
                 sampler.stop()
@@ -84,7 +91,8 @@ def create_app(service: GameDockService, sampler=None, metrics_enabled: bool = F
     @app.middleware("http")
     async def same_origin_for_writes(request: Request, call_next):
         # Basic CSRF guard: browsers send Origin on cross-site POSTs; refuse mismatches.
-        if request.method not in ("GET", "HEAD", "OPTIONS"):
+        # (/mcp has its own Origin/Host/token checks in the MCP guard, because its clients are not browsers.)
+        if request.method not in ("GET", "HEAD", "OPTIONS") and not request.url.path.startswith("/mcp"):
             origin = request.headers.get("origin")
             if origin and urlparse(origin).netloc != request.headers.get("host"):
                 return JSONResponse({"error": "cross-origin request refused"}, status_code=403)
@@ -245,6 +253,28 @@ def create_app(service: GameDockService, sampler=None, metrics_enabled: bool = F
     @app.get("/api/servers/{server_id}/stats/history")
     def server_stats_history(server_id: str, window: int = 600):
         return asdict(service.get_stats_history(server_id, window))
+
+    # ---- MCP (the endpoint itself is mounted below; these two routes feed the web UI)
+    @app.get("/api/mcp/info")
+    def mcp_info(request: Request):
+        return mcp.info(str(request.base_url).rstrip("/") + "/mcp")
+
+    @app.get("/api/mcp/audit")
+    def mcp_audit(limit: int = 50):
+        return {"entries": mcp.audit.recent(limit)}
+
+    if mcp.enabled:
+        # Raw routes for both spellings so /mcp does not redirect (clients may not follow a 307 on POST).
+        app.router.routes.append(Route("/mcp", endpoint=mcp.asgi))
+        app.router.routes.append(Route("/mcp/", endpoint=mcp.asgi))
+    else:
+        async def mcp_off(request: Request):
+            return JSONResponse({"error": "The MCP endpoint is switched off. " + (
+                mcp.config.disabled_reason or "Set GAMEDOCK_MCP_MODE to read_only, standard or full.")},
+                status_code=404)
+
+        app.router.routes.append(Route("/mcp", endpoint=mcp_off, methods=["GET", "POST", "DELETE"]))
+        app.router.routes.append(Route("/mcp/", endpoint=mcp_off, methods=["GET", "POST", "DELETE"]))
 
     if metrics_enabled:
         @app.get("/metrics", include_in_schema=False)

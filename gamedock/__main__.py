@@ -7,6 +7,7 @@ import uvicorn
 
 from .backends import make_backend
 from .config import Settings, load_dotenv
+from .mcp_api import McpConfig
 from .sampler import Sampler
 from .service import GameDockService
 from .web.app import create_app
@@ -22,7 +23,8 @@ def build_app(settings: Settings | None = None):
                               stats_history_seconds=settings.stats_history_seconds)
     sampler = Sampler(service) if settings.stats_enabled else None
     return create_app(service, sampler=sampler, metrics_enabled=settings.metrics_enabled,
-                      metrics_allow_remote=settings.metrics_allow_remote)
+                      metrics_allow_remote=settings.metrics_allow_remote,
+                      mcp_config=McpConfig.from_settings(settings))
 
 
 def main() -> None:
@@ -35,6 +37,14 @@ def main() -> None:
             "GameDock has no login yet.", settings.host)
     if settings.metrics_enabled and settings.metrics_allow_remote:
         log.warning("/metrics is open to remote clients (GAMEDOCK_METRICS_ALLOW_REMOTE=true).")
+    mode, reason = settings.effective_mcp_mode()
+    if reason:
+        log.warning(reason)
+    elif mode != "off":
+        log.info("MCP endpoint at /mcp, mode '%s', bearer token %s.", mode,
+                 "required" if settings.mcp_token else "NOT set (anyone who can reach this port can use it)")
+    if mode == "full":
+        log.warning("MCP mode 'full': agents may delete servers and data (each behind a two-step confirmation).")
     if settings.backend == "fake":
         log.warning("Using the FAKE in-memory backend: no real containers will be touched.")
     uvicorn.run(build_app(settings), host=settings.host, port=settings.port, log_level="info")
