@@ -328,5 +328,9 @@ def create_app(service: GameDockService, sampler=None, metrics_enabled: bool = F
     def index():
         return FileResponse(STATIC_DIR / "index.html")
 
+    @app.get("/favicon.ico", include_in_schema=False)
+    def favicon():
+        return FileResponse(STATIC_DIR / "favicon.svg", media_type="image/svg+xml")
+
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     return app

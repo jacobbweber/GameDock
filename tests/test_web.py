@@ -314,3 +314,11 @@ def test_security_headers(client):
     assert r.headers["x-frame-options"] == "DENY" and r.headers["x-content-type-options"] == "nosniff"
     assert "frame-ancestors 'none'" in r.headers["content-security-policy"]
     assert "content-security-policy" not in client.get("/api/health").headers
+
+
+def test_ui_has_title_favicon_and_skip_link(client):
+    html = client.get("/").text
+    assert "<title>" in html and 'rel="icon"' in html and 'class="skip"' in html and "theme-color" in html
+    fav = client.get("/favicon.ico")
+    assert fav.status_code == 200 and fav.headers["content-type"].startswith("image/svg")
+    assert client.get("/static/favicon.svg").status_code == 200

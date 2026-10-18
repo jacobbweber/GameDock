@@ -10,6 +10,9 @@ let stats = null;                // latest /api/stats snapshot
 let history = { servers: {}, host: [] };
 let rankSort = "cpu";            // monitoring table sort: cpu | memory | name
 let pollCount = 0;
+let serversLoaded = false;      // false until the first answer, so we can show "Loading" instead of "No servers"
+let appStatus = null;          // latest /api/status
+let connLost = false;
 
 const $ = (id) => document.getElementById(id);
 
@@ -18,6 +21,7 @@ function el(tag, props = {}, ...children) {
   for (const [k, v] of Object.entries(props)) {
     if (k === "class") node.className = v;
     else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
+    else if (k.startsWith("aria-") || k === "role") node.setAttribute(k, v);
     else node[k] = v;
   }
   for (const c of children) if (c !== null && c !== undefined && c !== false) node.append(c);
@@ -90,7 +94,8 @@ function serverCard(s) {
   const badgeClass = isBusy ? "busy" : s.status;
 
   const btn = (text, cls, onclick, disabled, title) =>
-    el("button", { class: cls, textContent: text, disabled: disabled || isBusy, title: title || "", onclick });
+    el("button", { class: cls, type: "button", textContent: text, disabled: disabled || isBusy, title: title || "",
+      onclick, "aria-label": `${text} ${s.name}` });
 
   return el("article", { class: "card", id: `card-${s.id}` },
     el("div", { class: "card-head" },
@@ -99,7 +104,7 @@ function serverCard(s) {
     el("p", { class: "desc", textContent: s.game_name }),
     el("div", { class: "meta" }, "Image: ", el("code", { textContent: s.image })),
     el("div", { class: "meta", textContent: `Host ports: ${portText(s.ports)}` }),
-    s.status === "error" && s.detail ? el("div", { class: "meta", textContent: s.detail }) : null,
+    s.detail ? el("div", { class: s.status === "error" ? "meta problem" : "meta", textContent: s.detail }) : null,
     liveBlock(s),
     el("div", { class: "actions" },
       btn("Start", "start", () => act(s.id, "start"), running),
@@ -136,7 +141,8 @@ function liveBlock(s) {
 
 function renderServers() {
   $("servers").replaceChildren(...servers.map(serverCard));
-  $("empty").hidden = servers.length > 0;
+  $("loading").hidden = serversLoaded;
+  $("empty").hidden = !serversLoaded || servers.length > 0;
 }
 
 async function act(id, action) {
@@ -158,7 +164,7 @@ function catalogCard(e) {
   return el("article", { class: "card", id: `catalog-${e.id}` },
     el("div", { class: "card-head" },
       el("h2", { textContent: e.name }),
-      el("button", { class: "primary", textContent: "Deploy", onclick: () => openDeploy(e) })),
+      el("button", { class: "primary", type: "button", textContent: "Deploy", "aria-label": `Deploy ${e.name}`, onclick: () => openDeploy(e) })),
     el("p", { class: "desc", textContent: e.description }),
     el("div", { class: "meta" }, "Image: ", el("code", { textContent: e.image })),
     el("div", { class: "meta", textContent: `Default ports: ${portText(e.ports)}` }),
@@ -167,6 +173,12 @@ function catalogCard(e) {
 
 function renderCatalog() {
   $("catalog").replaceChildren(...catalog.map(catalogCard));
+  const empty = $("catalog-empty");
+  empty.hidden = catalog.length > 0;
+  if (!catalog.length) {
+    empty.textContent = "No games found. Put a .yaml game file in the catalog folder (see the README, \"Adding a game\"), then reload this page. "
+      + "The Health page lists files that could not be read.";
+  }
 }
 
 // -------------------------------------------------------------------- dialogs
@@ -174,6 +186,9 @@ function openDialog(...content) {
   const d = $("dialog");
   d.className = "";
   d.replaceChildren(...content);
+  const h = d.querySelector("h3");
+  if (h) { h.id = "dialog-title"; d.setAttribute("aria-labelledby", "dialog-title"); }
+  else d.removeAttribute("aria-labelledby");
   if (!d.open) d.showModal();
   return d;
 }
@@ -737,15 +752,79 @@ async function refreshMcp() {
   renderMcp();
 }
 
+// ------------------------------------------------------------ status banners
+async function refreshStatus() {
+  try { appStatus = await api("/api/status"); } catch (_) { /* the connection banner covers this */ }
+  renderBanners();
+}
+
+function renderBanners() {
+  const notes = [];
+  if (connLost) {
+    notes.push(banner("error", "Lost connection to GameDock.", "The page keeps trying and will recover by itself. If it does not, check that GameDock is still running on the machine."));
+  }
+  if (appStatus && !connLost) {
+    if (!appStatus.docker.ok && !appStatus.docker.fake) {
+      notes.push(banner("error", "Docker is not available, so servers cannot be started or changed.", appStatus.docker.message, "#/health", "See how to fix this"));
+    }
+    if (appStatus.catalog_problems.length) {
+      const n = appStatus.catalog_problems.length;
+      notes.push(banner("warn", `${n} game file${n > 1 ? "s" : ""} could not be read and ${n > 1 ? "are" : "is"} hidden from the catalog.`,
+        appStatus.catalog_problems.map((p) => `${p.file}: ${p.problem}`).join(" "), "#/health", "Details"));
+    }
+  }
+  $("banners").replaceChildren(...notes);
+}
+
+function banner(kind, title, text, href, linkText) {
+  return el("div", { class: `banner ${kind}` },
+    el("strong", { textContent: title }), text ? el("span", { textContent: ` ${text}` }) : null,
+    href ? el("a", { href, textContent: ` ${linkText}` }) : null);
+}
+
+// ---------------------------------------------------------------- health page
+let doctorShown = false;
+async function runDoctor() {
+  const btn = $("run-doctor");
+  btn.disabled = true;
+  btn.textContent = "Checking\u2026";
+  $("doctor-result").replaceChildren(el("p", { class: "empty-small", role: "status", textContent: "Running checks\u2026" }));
+  try {
+    const r = await api("/api/doctor");
+    doctorShown = true;
+    const label = { ok: "OK", warn: "Warning", fail: "Problem", info: "Note" };
+    $("doctor-result").replaceChildren(
+      el("div", { class: `banner ${r.counts.fail ? "error" : r.counts.warn ? "warn" : "okbanner"}` }, el("strong", { textContent: r.summary })),
+      el("ul", { class: "checks" }, ...r.checks.map((c) => el("li", { class: `chk-item ${c.status}` },
+        el("span", { class: `badge chk-${c.status}`, textContent: label[c.status] || c.status }),
+        el("div", {},
+          el("div", { class: "check-title", textContent: c.title }),
+          el("div", { class: "check-msg", textContent: c.message }),
+          c.fix && (c.status === "warn" || c.status === "fail") ? el("div", { class: "check-fix" }, el("strong", { textContent: "How to fix: " }), c.fix) : null)))));
+    $("doctor-when").textContent = `Last run ${new Date().toLocaleTimeString()}`;
+  } catch (e) {
+    $("doctor-result").replaceChildren(el("div", { class: "error", role: "alert", textContent: `Could not run the checks: ${e.message}` }));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Run checks again";
+  }
+}
+$("run-doctor").addEventListener("click", runDoctor);
+
 // -------------------------------------------------------------------- routing
 function route() {
   const page = location.hash.startsWith("#/catalog") ? "catalog"
     : location.hash.startsWith("#/mcp") ? "mcp"
+    : location.hash.startsWith("#/health") ? "health"
     : location.hash.startsWith("#/monitoring") ? "monitoring" : "dashboard";
-  for (const p of ["dashboard", "catalog", "monitoring", "mcp"]) {
+  const titles = { dashboard: "Dashboard", catalog: "Catalog", monitoring: "Monitoring", mcp: "AI agents (MCP)", health: "Health" };
+  for (const p of Object.keys(titles)) {
     $(`page-${p}`).hidden = page !== p;
     $(`nav-${p}`).classList.toggle("active", page === p);
+    if (page === p) $(`nav-${p}`).setAttribute("aria-current", "page"); else $(`nav-${p}`).removeAttribute("aria-current");
   }
+  document.title = `${titles[page]} - GameDock`;
+  if (page === "health" && !doctorShown) runDoctor();
   if (page === "monitoring") renderMonitoring();
   if (page === "mcp") refreshMcp();
   showError("");
@@ -754,12 +833,16 @@ function route() {
 async function refresh() {
   try {
     servers = await api("/api/servers");
+    serversLoaded = true;
+    if (connLost) { connLost = false; refreshStatus(); }
     $("conn").textContent = "connected";
     $("conn").className = "conn ok";
     renderServers();
   } catch (e) {
+    connLost = true;
     $("conn").textContent = "disconnected";
     $("conn").className = "conn bad";
+    renderBanners();
   }
 }
 
@@ -769,6 +852,7 @@ async function loadCatalog() {
     renderCatalog();
   } catch (e) {
     showError(`Could not load the catalog: ${e.message}`);
+    $("catalog-empty").textContent = "The catalog could not be loaded.";
   }
 }
 
@@ -776,6 +860,8 @@ window.addEventListener("hashchange", route);
 route();
 loadCatalog();
 refresh().then(refreshStats);
+refreshStatus();
+setInterval(() => { if (!document.hidden) refreshStatus(); }, 15000);
 setInterval(() => {
   if (busy.size === 0 && !$("dialog").open && !document.hidden) refresh().then(refreshStats);
   if (location.hash.startsWith("#/mcp") && !document.hidden) refreshMcp();
