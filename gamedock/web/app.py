@@ -404,6 +404,12 @@ def create_app(service: GameDockService, sampler=None, metrics_enabled: bool = F
         """The "Check setup" checklist: pass / warn / fail with plain details and suggested fixes. Changes nothing."""
         return service.verify_game_setup(server_id)
 
+    @app.post("/api/servers/{server_id}/fix-ownership")
+    def fix_ownership(server_id: str):
+        """The Fix ownership button: give the files in this server's data folder back to GameDock's user with a
+        short-lived helper container. Non-destructive (only file owners change)."""
+        return service.fix_data_ownership(server_id)
+
     @app.get("/api/servers/{server_id}/diagnostics")
     def diagnostics(server_id: str, lines: int = 60):
         """The diagnostics bundle plus the same as redacted plain text (what the Copy diagnostics button copies)."""

@@ -41,6 +41,14 @@ def _mcp_mode(value: str) -> str:
     return v
 
 
+def _helper_image(value: str) -> str:
+    from .models import IMAGE_RE
+    v = (value or "").strip() or "alpine:3"
+    if not IMAGE_RE.match(v):
+        raise ValueError(f"GAMEDOCK_HELPER_IMAGE is not a valid image name (got '{v}')")
+    return v
+
+
 @dataclass(frozen=True)
 class Settings:
     host: str = "127.0.0.1"  # local only unless explicitly configured
@@ -65,6 +73,7 @@ class Settings:
     update_repo: str = "jacobbweber/GameDock"   # GitHub repository checked for updates (GAMEDOCK_UPDATE_REPO)
     self_update: bool = True         # show the Update GameDock button (GAMEDOCK_SELF_UPDATE=false hides it)
     steam_info_url: str = "https://api.steamcmd.net/v1/info/{appid}"   # where newest game build ids come from (GAMEDOCK_STEAM_INFO_URL)
+    helper_image: str = "alpine:3"   # small image of the file-owner repair helper (GAMEDOCK_HELPER_IMAGE)
 
     def effective_mcp_mode(self) -> tuple[str, str]:
         """(mode actually used, plain-language reason if it differs from the configured mode).
@@ -102,4 +111,5 @@ class Settings:
             update_repo=parse_repo(env.get("GAMEDOCK_UPDATE_REPO", "jacobbweber/GameDock") or "jacobbweber/GameDock"),
             self_update=_bool(env.get("GAMEDOCK_SELF_UPDATE", "true")),
             steam_info_url=SteamInfo.check_template(env.get("GAMEDOCK_STEAM_INFO_URL") or DEFAULT_INFO_URL),
+            helper_image=_helper_image(env.get("GAMEDOCK_HELPER_IMAGE", "")),
         )

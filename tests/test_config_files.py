@@ -223,8 +223,9 @@ def test_catalog_config_validation():
 def test_write_permission_error_is_clear(srv, tmp_path):
     d = root(tmp_path) / "conf"
     d.chmod(0o555)
+    srv.backend.ownership_fail = "simulated helper failure"   # 0.6.2: only when the automatic repair fails too
     try:
-        with pytest.raises(AccessError, match="another user.*PUID"):
+        with pytest.raises(AccessError, match="(?s)another user.*PUID.*helper container"):
             srv.write_config_file("one", HOT, "x")
     finally:
         d.chmod(0o755)

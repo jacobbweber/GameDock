@@ -2,6 +2,31 @@
 
 All notable changes. Dates are 2026.
 
+## 0.6.2: root-owned files no longer block backups or deletes, and games run as GameDock's user
+
+Built from a real case: deleting a Valheim server together with its data stopped with "Could not delete .../data/weber-brothers-2/config: permission denied (belongs to root)". The Valheim image runs the game as root unless told otherwise (its `PUID` defaults to 0), so the files it wrote into the mounted folder belonged to root, and GameDock (an ordinary user in the docker group, no sudo) could back them up only partly and not delete them. It was fixed by hand with a one-off `docker run ... chown`. GameDock now does that itself, and the bundled games no longer write root-owned files in the first place.
+
+### Added
+
+- **Automatic file owner repair (Docker backend).** When a backup, a restore, a wipe, a delete with data, or reading or saving a config file fails with "permission denied", GameDock runs a short-lived helper container that mounts **only that server's data folder** and gives every file in it to the user GameDock runs as (`chown -R -h <uid>:<gid>`), then tries the action **once** more. The helper runs with `--rm`, `--network none`, a read-only root file system, all capabilities dropped except the four chown needs, `no-new-privileges`, and never follows symbolic links. Before mounting anything GameDock checks that the folder is exactly `<data folder>/<server id>` (realpath, not a symbolic link, a plain server id); anything else is refused. The repair also runs **proactively** before a backup, restore, wipe or delete of a stopped server whose folder holds files of another user, and again right after the container is removed during a delete. The backup taken before a delete or wipe must still be complete (every file read) or nothing is deleted. If the helper itself fails, the old plain message is kept and now says what was tried and gives a command that works without sudo.
+- **Helper image.** `GAMEDOCK_HELPER_IMAGE` (default `alpine:3`). An image already stored on the machine is used first (the configured one, else `alpine:3`, `alpine:latest`, `busybox:latest`, `busybox`); only if none is there is the configured image downloaded, and the result says so.
+- **Check setup: File ownership row** (also in `verify_game_setup`). Passes when every file belongs to GameDock's user and says whether the game runs as that user; otherwise warns with the owner (for example "root (0)") and an example file, and the web page shows a **Fix ownership** button (non-destructive: only owners change). Web API `POST /api/servers/{id}/fix-ownership`.
+- **MCP tool `fix_data_ownership`** (standard and full modes, non-destructive, recorded in the audit log). Tool counts: read_only 24, **standard 38, full 42**.
+- **Catalog keys `user_env` and `run_as_user`.** `user_env: {PUID: uid, PGID: gid}` fills the image's own "run as this user" variables with GameDock's user and group id at deploy time; `run_as_user: true` starts the container with `docker --user <uid>:<gid>` (only for images that support any user). A `user_env` name may not also be in `env` or `fields`. `validate_catalog_entry`, the Review checks and `scripts/lint_catalog.py` warn when an entry writes fixed numbers into PUID/PGID/UID/GID-like variables, and when an inspected image has such variables that the entry does not map. Documented in ADDING_A_GAME (Step 4, traps 7 and 17, checklist), the agent prompt and `catalog/_template.yaml`.
+- **Built-in problem `k_EResultGSLTExpired`**: "Steam says the login token has expired" with how to regenerate or recreate it, and that an account without a phone number or a limited account can make new tokens show as expired too. Also the first `fail_log_patterns` item of `docs/catalog-entries/aska.yaml`.
+- `scripts/make_screenshots_ownership.py` and `docs/gamedock-062-*.png`.
+
+### Changed
+
+- **Bundled entries now run the game as GameDock's user** via `user_env` (each checked against the image's documentation): Valheim (`PUID`/`PGID`, image default 0 = root), Palworld (`PUID`/`PGID`, default 1000), Enshrouded (`PUID`/`PGID`, default 4711; the fixed `PUID: "1000"` / `PGID: "1000"` in `env` are replaced), Satisfactory (`PUID`/`PGID`, default 1000) and Minecraft Java (`UID`/`GID`, default 1000). The smoke-test entry is unchanged.
+- **Palworld notes**: joining by address always shows an "Input password" popup whose OK button stays disabled while it is empty; with no server password, type a single space and press OK.
+- The built-in "permission denied" problem now points to Fix ownership and `user_env`.
+- Version 0.6.2 (only the version lines of `pyproject.toml` and `gamedock/__init__.py`; dependencies unchanged).
+
+### Existing servers
+
+A deployed server keeps the catalog entry it was deployed with, so **servers deployed before 0.6.2 keep running as before** (Valheim as root, Enshrouded as 1000) until they are deleted (data can be kept) and deployed again. The automatic repair and the Fix ownership button protect them in the meantime.
+
 ## 0.6.1: say why a server is stuck (known problems), a clearer ASKA entry, and an updater that copes with a file in the way
 
 Built from a real case: Jacob's ASKA server installed but stayed Docker-"unhealthy", and GameDock only said "Docker's health check for this game is failing". The game's own log said `Failed to connect to Steam reason: k_EResultAccountNotFound` and `Disconnected with reason: CustomAuthenticationFailed`: Steam had refused the Game Server Login Token (a Steam Web API key looks the same and is refused). Now GameDock reads such lines and says so.

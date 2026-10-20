@@ -28,8 +28,14 @@ volumes:
 
 # ---- env: fixed values that are always set (not shown in the form). Quote every value. NEVER passwords.
 # env:
-#   PUID: "1000"                 # if the image runs as a chosen user id, match the user GameDock runs as
-#   PGID: "1000"
+#   TZ: "UTC"
+
+# ---- user_env: the image's own "run as this user" variables. GameDock fills in the user and group id it runs as at
+# deploy time, so the game writes files GameDock can back up, edit and delete (not root-owned ones). Use the names the
+# image documents (PUID/PGID, UID/GID, ...). Never put these in env or fields. If the image instead says it runs as any
+# user with docker --user, set run_as_user: true. If it has neither, leave both out and say so in the notes.
+# user_env: { PUID: uid, PGID: gid }   # REPLACE or remove after checking the image's documentation
+# run_as_user: false
 
 # ---- fields: what the person deploying fills in. Each becomes an environment variable of the same name.
 fields:

@@ -84,6 +84,11 @@ class ContainerBackend(Protocol):
     def exec_in(self, name: str, argv: list[str], timeout: int = 60) -> str:
         """Run a command (no shell) inside the running container and return what it printed. Raises BackendError."""
 
+    def repair_ownership(self, host_dir: str, uid: int, gid: int) -> str:
+        """Make uid:gid the owner of everything under `host_dir` (an absolute folder the caller has already checked
+        belongs to one server) with a short-lived helper container that mounts only that folder (--rm, --network none).
+        Returns a plain note about the helper image used; raises BackendError."""
+
     def diagnose(self) -> DockerDiagnosis:
         """Check that the engine is installed and reachable. Must not raise."""
 

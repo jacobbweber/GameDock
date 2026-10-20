@@ -45,7 +45,11 @@ STEPS
    as a field (or say in "notes" which ones you left out and why). Describe, in each secret field's
    "description", exactly where the person gets the key and what NOT to paste instead; give a value with a
    fixed shape a "pattern" and "pattern_hint". Write the image's documented error messages into
-   "fail_log_patterns" (plain "title", next-step "advice") and name the game's own log files in "log_files". Call validate_catalog_entry repeatedly
+   "fail_log_patterns" (plain "title", next-step "advice") and name the game's own log files in "log_files". If the image
+   documents "run as this user" variables (PUID/PGID, UID/GID or similar), map them with "user_env" (for example
+   user_env: {PUID: uid, PGID: gid}) so GameDock fills in its own user and group id; never put fixed numbers in env.
+   Use "run_as_user: true" only if the image's documentation says it runs as any user with docker --user. If it has
+   neither, say so in "notes". Call validate_catalog_entry repeatedly
    until "valid" is true. Read the warnings and fix those that apply.
 5. If you have standard or full mode: call add_catalog_entry. If you only have read-only mode: stop here
    and give me the validated YAML in your report. After adding, tell me the entry is waiting for my review
@@ -63,7 +67,8 @@ STEPS
 7. Verify: call verify_game_setup first (and get_server_diagnostics if anything fails) and act on each
    fix it names. Then use the checklist in the guide: logs show the ready and version lines and they match the
    patterns; read_config_file works for each listed config file; an empty password means no password;
-   create_backup works and list_backups shows it; stop_server and start_server work. Do not restore or
+   create_backup works and list_backups shows it; the "File ownership" check passes (if it warns, report it; with
+   standard or full mode you may call fix_data_ownership, which deletes nothing); stop_server and start_server work. Do not restore or
    delete anything. If something fails, use update_catalog_entry to fix the entry (it goes back to "needs
    review", so tell me, then wait for "approved" and deploy the test copy again: a server keeps the entry it
    was created from, so a fix only reaches a newly deployed copy), and try again.

@@ -35,6 +35,9 @@ PULL_TIMEOUT_SECONDS = 3600  # game images can be many GB; `docker create` also 
 QUICK_TIMEOUT_SECONDS = 20  # looking at things must never hang the web page
 STATS_TIMEOUT_SECONDS = 45
 START_TIMEOUT_SECONDS = 120
+HELPER_TIMEOUT_SECONDS = 600  # chown -R of a big game install (tens of thousands of files)
+DEFAULT_HELPER_IMAGE = "alpine:3"
+HELPER_FALLBACK_IMAGES = ("alpine:3", "alpine:latest", "busybox:latest", "busybox")  # reused when already stored here
 LABEL_MANAGED = "gamedock.managed"
 
 Runner = Callable[..., subprocess.CompletedProcess]
@@ -89,10 +92,12 @@ def _mount_arg(host: str, container: str) -> str:
 
 class DockerCliBackend:
     def __init__(self, docker_bin: str = "docker", runner: Runner | None = None,
-                 stop_timeout: int = STOP_TIMEOUT_SECONDS) -> None:
+                 stop_timeout: int = STOP_TIMEOUT_SECONDS, helper_image: str = DEFAULT_HELPER_IMAGE) -> None:
         self.docker_bin = docker_bin
         self._runner = runner or subprocess.run
         self.stop_timeout = int(stop_timeout)
+        self.check_image_name(helper_image)
+        self.helper_image = helper_image
 
     # ------------------------------------------------------------------ plumbing
     def _run(self, args: list[str], env: dict[str, str] | None = None, check: bool = True,
@@ -190,6 +195,10 @@ class DockerCliBackend:
         # restart policy: come back after a crash or a reboot, but stay stopped once the user stopped it.
         # stop-timeout: the same grace period applies when Docker itself stops the container (host shutdown).
         args = ["create", "--name", spec.name, "--restart", "unless-stopped", "--stop-timeout", str(stop_timeout)]
+        if spec.user:
+            if not re.fullmatch(r"\d{1,10}:\d{1,10}", spec.user):
+                raise BackendError(f"'{spec.user}' is not a numeric user:group")
+            args += ["--user", spec.user]
         for k, v in spec.labels.items():
             args += ["--label", f"{k}={v}"]
         for p in spec.ports:
@@ -236,6 +245,48 @@ class DockerCliBackend:
     def pull_image(self, image: str) -> None:
         self.check_image_name(image)
         self._run(["pull", "--", image], timeout=PULL_TIMEOUT_SECONDS)
+
+    # ------------------------------------------------------------------ ownership repair helper
+    def _helper_image(self) -> tuple[str, str]:
+        """(image, note): the configured helper image if stored here, else an already stored small fallback, else the
+        configured one is downloaded (it is small)."""
+        if self.get_image_id(self.helper_image):
+            return self.helper_image, f"used the helper image {self.helper_image} (already on this machine)"
+        for alt in HELPER_FALLBACK_IMAGES:
+            if alt != self.helper_image and self.get_image_id(alt):
+                return alt, f"used the helper image {alt} (already on this machine)"
+        try:
+            self.pull_image(self.helper_image)
+        except BackendError as e:
+            raise BackendError(f"The small helper image {self.helper_image} is not on this machine and could not be "
+                               f"downloaded ({e}). Set GAMEDOCK_HELPER_IMAGE to an image that is stored here, or "
+                               "check the internet connection.") from e
+        return self.helper_image, f"downloaded the small helper image {self.helper_image} first"
+
+    @staticmethod
+    def build_chown_args(image: str, host_dir: str, uid: int, gid: int) -> list[str]:
+        """`docker run` arguments of the ownership helper: removed when done, no network, read-only root, every
+        capability dropped except the ones chown needs, only `host_dir` mounted (at /d), symlinks not followed."""
+        if isinstance(uid, bool) or isinstance(gid, bool) or not (isinstance(uid, int) and isinstance(gid, int)
+                                                                  and uid >= 0 and gid >= 0):
+            raise BackendError("Bad user or group id for the ownership helper")
+        if not os.path.isabs(host_dir) or "\n" in host_dir or "\0" in host_dir:
+            raise BackendError("The ownership helper needs an absolute folder path")
+        DockerCliBackend.check_image_name(image)
+        return ["run", "--rm", "--network", "none", "--read-only", "--user", "0:0",
+                "--cap-drop", "ALL", "--cap-add", "CHOWN", "--cap-add", "DAC_OVERRIDE", "--cap-add", "DAC_READ_SEARCH",
+                "--cap-add", "FOWNER", "--security-opt", "no-new-privileges",
+                "--label", "gamedock.helper=ownership",
+                "--mount", _mount_arg(host_dir, "/d"),
+                "--entrypoint", "chown", "--", image, "-R", "-h", f"{uid}:{gid}", "/d"]
+
+    def repair_ownership(self, host_dir: str, uid: int, gid: int) -> str:
+        """Give every file under `host_dir` to uid:gid with a short-lived helper container that mounts ONLY that
+        folder. The caller decides which folder is allowed (see GameDockService._repair_ownership). Returns a plain
+        note about the helper image; raises BackendError with a plain sentence."""
+        image, note = self._helper_image()
+        self._run(self.build_chown_args(image, host_dir, uid, gid), timeout=HELPER_TIMEOUT_SECONDS)
+        return note
 
     def get_image_id(self, image: str) -> str | None:
         self.check_image_name(image)

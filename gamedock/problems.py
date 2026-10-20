@@ -68,6 +68,9 @@ _BUILTIN: tuple[tuple[str, str, str, str], ...] = (
      "Steam refused the login used to download the game.",
      "If this game needs a Steam account, check the username, password or login token on the server's settings (Edit). "
      "Repeated tries can lock the login for a while: wait a few minutes before starting again."),
+    ("steam-token-expired", r"\bk_EResultGSLTExpired\b",
+     "Steam says the login token has expired.",
+     "On steamcommunity.com/dev/managegameservers regenerate the token, or delete it and create a new one for the right App ID, then Edit the server and paste the new token. If new tokens also show as expired, the Steam account may be limited or lack a phone number."),
     ("steam-token", r"\bCustomAuthenticationFailed\b|\bk_EResult(?:AccountNotFound|InvalidPassword|AccessDenied|"
                     r"InvalidLoginAuthCode|Expired|Revoked)\b|\bFailed to connect to Steam\b[^\n]{0,60}\breason\b",
      "Steam refused the game server's login token.",
@@ -88,8 +91,9 @@ _BUILTIN: tuple[tuple[str, str, str, str], ...] = (
                           r"cannot write|failed to write|can't create)\b[^\n]{0,200}\bpermission denied\b|"
                           r"\bpermission denied\b[^\n]{0,80}(?:/home/|/data\b|/saves\b|/config\b|/server\b|/srv/)",
      "The game was not allowed to write to its data folder (permission denied).",
-     "The folder under GameDock's data folder is probably owned by another user (often root) or read-only. Check Health "
-     "for 'wrong owner' notes, fix the owner so the user the game runs as can write there, then start the server again."),
+     "The folder under GameDock's data folder is probably owned by another user (often root) or read-only. Open Check "
+     "setup and press Fix ownership (it gives the files to GameDock's user and deletes nothing); if the game runs as "
+     "yet another user, map its PUID/PGID with user_env in the catalog entry and redeploy. Then start the server again."),
     ("disk-full", r"\bNo space left on device\b|\bENOSPC\b|\bdisk (?:is )?full\b|\bnot enough (?:free )?disk space\b",
      "The disk is full (no space left on device).",
      "Free some space on the machine that holds GameDock's data folder: delete old backups or unused servers, then "

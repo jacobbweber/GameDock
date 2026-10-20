@@ -36,11 +36,14 @@ class BackupInfo:
 
 
 def ownership_hint(path: Path) -> str:
-    """Plain-language fix for files the game container created as another user (usually root)."""
+    """Plain-language fix for files the game container created as another user (usually root). Used only when
+    GameDock's automatic repair (a short-lived helper container) could not run."""
     q = shlex.quote(str(path))
-    return (f"Fix it once with: sudo chown -R $(id -u):$(id -g) {q}. To stop it coming back, make the game "
-            "container run as your user: many game images accept PUID and PGID settings (use the numbers from "
-            "'id -u' and 'id -g'); otherwise the container writes files as root.")
+    return (f"Fix it once without sudo (any user in the docker group can): docker run --rm --network none "
+            f"--mount type=bind,source={q},target=/d alpine:3 chown -R $(id -u):$(id -g) /d "
+            f"(or with sudo: sudo chown -R $(id -u):$(id -g) {q}). Then use Check setup > Fix ownership next time. To "
+            "stop it coming back, make the game container run as your user: add user_env (for example PUID and PGID) "
+            "or run_as_user to its catalog entry and redeploy.")
 
 
 def _info(path: Path) -> BackupInfo | None:

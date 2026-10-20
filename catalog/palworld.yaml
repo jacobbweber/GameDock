@@ -7,7 +7,9 @@ notes: >-
   Example values. Check the image documentation before real use. The first start downloads about 5 GB, so the server
   shows "Installing" and then "Starting" before it can be joined. This image rewrites PalWorldSettings.ini from the
   settings below every time it starts, so edits made in the config editor are lost unless you set
-  DISABLE_GENERATE_SETTINGS to true.
+  DISABLE_GENERATE_SETTINGS to true. Joining by address: in the game's Join by address box, Palworld always shows an
+  "Input password" popup whose OK button stays disabled while the box is empty. If the server has no password, type a
+  single space and press OK.
 # The container is "running" long before the game can be joined: on first start it downloads ~5 GB through SteamCMD.
 # GameDock uses the image's Docker health check, and these two optional log patterns, to show Installing / Starting
 # instead of Running until the server really accepts players.
@@ -45,6 +47,9 @@ config_files:               # editable from the Config button (example path; ver
     format: ini
     sensitive_keys: [AdminPassword, ServerPassword]
     # hot_edit: false  -> the server must be stopped before saving
+# Run the game as the user GameDock runs as, so the files it writes can be backed up, edited and deleted without
+# repairs. Documented in https://github.com/thijsvanloef/palworld-server-docker#environment-variables (PUID/PGID, default 1000).
+user_env: { PUID: uid, PGID: gid }
 fields:
   - { name: SERVER_NAME, label: Server name, default: "My Palworld Server", required: true }
   - { name: PLAYERS, label: Max players, default: "16" }

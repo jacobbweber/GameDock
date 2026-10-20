@@ -190,13 +190,14 @@ def test_restore_running_is_409_and_bad_names_rejected(client, seeded):
     assert client.post("/api/servers/one/backups/nope.tar.gz/restore?confirm=true").status_code in (400, 404)
 
 
-def test_backup_permission_error_is_403(client, seeded, tmp_path):
+def test_backup_permission_error_is_403(client, seeded, tmp_path, service):
     import os
     if os.geteuid() == 0:
         pytest.skip("root")
     f = tmp_path / "data" / "one" / "saves" / "locked.dat"
     f.write_text("x")
     f.chmod(0)
+    service.backend.ownership_fail = "simulated helper failure"   # 0.6.2: the error is only left when the repair fails
     try:
         r = client.post("/api/servers/one/backups")
         assert r.status_code == 403 and "another user" in r.json()["error"]

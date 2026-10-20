@@ -22,6 +22,9 @@ config_files:               # editable from the Config button (example path; ver
     label: Admin list (Steam IDs)
     format: text
     hot_edit: true
+# Run the game as the user GameDock runs as, so the files it writes can be backed up, edited and deleted without
+# repairs. Documented in https://github.com/community-valheim-tools/valheim-server-docker#environment-variables (PUID/PGID, default 0 = root).
+user_env: { PUID: uid, PGID: gid }
 fields:
   - { name: SERVER_NAME, label: Server name, default: "My Valheim Server", required: true }
   - { name: WORLD_NAME, label: World name, default: "Dedicated", required: true }

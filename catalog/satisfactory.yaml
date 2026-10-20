@@ -16,5 +16,8 @@ ports:
   - { protocol: tcp, host: 7777, container: 7777 }
 volumes:
   - { host: ./config, container: /config }
+# Run the game as the user GameDock runs as, so the files it writes can be backed up, edited and deleted without
+# repairs. Documented in https://github.com/wolveix/satisfactory-server#environment-variables (PUID/PGID, default 1000).
+user_env: { PUID: uid, PGID: gid }
 fields:
   - { name: MAXPLAYERS, label: Max players, default: "4" }

@@ -186,6 +186,16 @@ FIELD_REFERENCE: list[dict] = [
      "meaning": "GameDock also knows common failures of any game: out of memory, a port already in use, permission denied on "
                 "the data folder, a full disk, SteamCMD errors and a refused Steam login. false = do not apply them to this "
                 "game (use it only if they give false alarms for this game's normal log)."},
+    {"key": "user_env", "type": "mapping of variable name to uid or gid", "required": False, "default": "none",
+     "meaning": "The image's own 'run as this user' variables, filled in at deploy time with the user and group id GameDock "
+                "runs as, for example {PUID: uid, PGID: gid} (or {UID: uid, GID: gid}). Use it whenever the image's "
+                "documentation has such variables: the game then writes files GameDock can back up, edit and delete "
+                "instead of root-owned ones. A name here may not also be in env or fields. At most 4. Servers keep the "
+                "entry they were deployed with, so redeploy (data can be kept) to apply a change."},
+    {"key": "run_as_user", "type": "true or false", "required": False, "default": "false",
+     "meaning": "true = start the container with docker --user <GameDock uid>:<gid>. Only for images whose documentation "
+                "says they run as any user (many images need root at start to set up and then drop to PUID/PGID: use "
+                "user_env for those). Redeploy to apply."},
     {"key": "stop_timeout", "type": "whole number of seconds, 1-600", "required": False,
      "default": "0 (GameDock's usual stop time, 60 seconds)",
      "meaning": "How long this game gets to save and exit when stopped, before Docker kills it. Give slow-saving games "
@@ -342,6 +352,14 @@ def _image_parts(image: str) -> tuple[str, str, str]:
     return registry, tag, digest
 
 
+USER_ID_ENV_RE = re.compile(r"^(?:P?UID|P?GID|USER_?ID|GROUP_?ID|RUN_?UID|RUN_?GID|APP_?UID|APP_?GID|HOST_?UID|HOST_?GID)$", re.I)
+
+
+def user_id_env_names(names) -> list[str]:
+    """Names that look like an image's "run as this user / group id" variables (PUID, PGID, UID, GID, ...)."""
+    return [n for n in names if USER_ID_ENV_RE.match(str(n))]
+
+
 def analyze_entry(e: CatalogEntry, others: Mapping[str, CatalogEntry] | None = None) -> list[Flag]:
     """Things a person reviewing the entry (or the agent writing it) should look at, in plain words."""
     flags: list[Flag] = []
@@ -371,6 +389,12 @@ def analyze_entry(e: CatalogEntry, others: Mapping[str, CatalogEntry] | None = N
         if SECRET_NAME_RE.search(k) and v:
             add("warn", f"The fixed setting {k} looks like a password but has a value written in the file. Catalog "
                         "files are not secret: make it a field with secret: true instead.")
+    fixed_ids = user_id_env_names(e.env) + user_id_env_names(f.name for f in e.fields)
+    if fixed_ids:
+        add("warn", "The entry sets " + ", ".join(fixed_ids) + " as a fixed value or a field. Use user_env instead (for "
+                    "example user_env: {" + ", ".join(f"{n}: {'gid' if 'G' in n.upper() else 'uid'}" for n in fixed_ids)
+                    + "}): GameDock then fills in the user and group id it runs as, so the game writes files GameDock "
+                    "can back up and delete.")
     for f in e.fields:
         if f.secret and f.default:
             add("warn", f"The secret field {f.name} has a default value written in the file.")
@@ -567,8 +591,15 @@ def analyze_image_facts(e: CatalogEntry, rec: dict | None) -> list[Flag]:
                     "volumes, variables and health check could not be compared with the entry. Ask the person to run "
                     f"`docker pull {e.image}` on the GameDock machine, then call inspect_image again.")
         return flags
-    mapped = {f.name for f in e.fields} | set(e.env)
-    unmapped = [n for n in facts.get("env_names", []) if _setting_like(n) and n not in mapped]
+    mapped = {f.name for f in e.fields} | set(e.env) | set(e.user_env)
+    id_vars = [n for n in user_id_env_names(facts.get("env_names", [])) if n not in mapped]
+    if id_vars and not e.run_as_user:
+        add("warn", "The image has user id variables (" + ", ".join(id_vars) + ") but the entry does not map them, so the "
+                    "game may write its files as root or as an unknown user and GameDock would have to repair the owners "
+                    "before backups and deletes. Add user_env, for example user_env: {"
+                    + ", ".join(f"{n}: {'gid' if 'G' in n.upper() else 'uid'}" for n in id_vars)
+                    + "}, if the image's documentation says these choose the user the game runs as.")
+    unmapped = [n for n in facts.get("env_names", []) if _setting_like(n) and n not in mapped and n not in id_vars]
     if unmapped:
         more = f" (and {len(unmapped) - MAX_REPORTED_NAMES} more)" if len(unmapped) > MAX_REPORTED_NAMES else ""
         add("warn", "The image knows these environment variables that the entry neither exposes as a field nor sets in env: "

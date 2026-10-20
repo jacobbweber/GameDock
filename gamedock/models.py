@@ -125,6 +125,8 @@ class CatalogEntry:
     # Known failures (read-only hints: they change no container, so servers deployed earlier use the CURRENT values).
     fail_log_patterns: tuple[FailPattern, ...] = ()
     builtin_fail_patterns: bool = True  # False = do not apply GameDock's built-in problem patterns (out of memory, port in use, ...)
+    run_as_user: bool = False        # True = the container runs as GameDock's own user (docker --user uid:gid)
+    user_env: dict[str, str] = field(default_factory=dict)  # {"PUID": "uid", "PGID": "gid"}: filled with GameDock's ids at deploy
     log_files: tuple[str, ...] = ()  # extra log files (relative to the server's data folder) scanned for the patterns, tail only
     # Where the entry came from. NOT catalog keys: they are filled in by the loader (see gamedock/authoring.py) and
     # are not part of the entry's YAML form or of the snapshot a deployed server keeps.
@@ -159,6 +161,7 @@ class ContainerSpec:
     env: dict[str, str] = field(repr=False)
     labels: dict[str, str] = field(default_factory=dict)
     stop_timeout: int = 0  # 0 = the backend's default
+    user: str = ""         # "uid:gid" for docker --user (catalog run_as_user); "" = the image's own user
 
 
 @dataclass(frozen=True)

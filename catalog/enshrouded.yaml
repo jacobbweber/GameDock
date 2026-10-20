@@ -44,10 +44,6 @@ volumes:
   - { host: ./logs, container: /home/steam/enshrouded/logs }
 env:                         # fixed values, not shown in the deploy form (all quoted so YAML keeps them as text)
   UPDATE_CRON: "0 3 * * *"
-  # Run the game as user 1000. GameDock creates the host folders as its own user, which is uid 1000 on a typical
-  # single-user host; if GameDock runs as another user, the game cannot write there (see the README).
-  PUID: "1000"
-  PGID: "1000"
   SERVER_QUERYPORT: "15637"
   # One user group "Default" that everyone joins. The image only writes these into the game's settings when the variable
   # exists, so they are all listed. The password itself is the field below (empty = no password).
@@ -58,6 +54,9 @@ env:                         # fixed values, not shown in the deploy form (all q
   SERVER_ROLE_0_CAN_EDIT_BASE: "true"
   SERVER_ROLE_0_CAN_EXTEND_BASE: "true"
   SERVER_ROLE_0_RESERVED_SLOTS: "0"
+# Run the game as the user GameDock runs as (the image's PUID/PGID, default 4711; documented in
+# https://github.com/mornedhels/enshrouded-server#environment-variables), filled in at deploy time.
+user_env: { PUID: uid, PGID: gid }
 fields:                      # values the user can set when deploying or editing
   - { name: SERVER_NAME, label: Server name, default: "My Enshrouded Server", required: true }
   - { name: SERVER_SLOT_COUNT, label: Player slots, default: "16" }

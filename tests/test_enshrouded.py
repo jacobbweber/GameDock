@@ -90,7 +90,8 @@ def test_password_is_sent_through_the_role_variable_even_when_empty(ens):
         "SERVER_ROLE_0_CAN_KICK_BAN": "false", "SERVER_ROLE_0_CAN_ACCESS_INVENTORIES": "true",
         "SERVER_ROLE_0_CAN_EDIT_WORLD": "true", "SERVER_ROLE_0_CAN_EDIT_BASE": "true",
         "SERVER_ROLE_0_CAN_EXTEND_BASE": "true", "SERVER_ROLE_0_RESERVED_SLOTS": "0"}
-    assert (ens.env["PUID"], ens.env["PGID"], ens.env["SERVER_QUERYPORT"]) == ("1000", "1000", "15637")
+    assert ens.env["SERVER_QUERYPORT"] == "15637"
+    assert "PUID" not in ens.env and ens.user_env == {"PUID": "uid", "PGID": "gid"}   # 0.6.2: GameDock's own ids
     assert all(isinstance(v, str) for v in ens.env.values())   # "false" must not turn into "False"
 
 

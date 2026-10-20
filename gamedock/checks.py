@@ -23,11 +23,14 @@ class Check:
     status: str
     detail: str = ""
     fix: str = ""
+    action: str = ""  # a button the web page offers next to the check (e.g. "fix_ownership"); "" = none
 
     def to_dict(self) -> dict:
         d = {"id": self.id, "title": self.title, "status": self.status, "detail": self.detail}
         if self.fix:
             d["fix"] = self.fix
+        if self.action:
+            d["action"] = self.action
         return d
 
 

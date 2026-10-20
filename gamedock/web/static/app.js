@@ -1073,7 +1073,8 @@ async function openCheckSetup(id) {
             el("div", {},
               el("div", { class: "check-title", textContent: c.title }),
               el("div", { class: "check-msg", textContent: c.detail }),
-              c.fix && (c.status === "warn" || c.status === "fail") ? el("div", { class: "check-fix" }, el("strong", { textContent: "How to fix: " }), c.fix) : null));
+              c.fix && (c.status === "warn" || c.status === "fail") ? el("div", { class: "check-fix" }, el("strong", { textContent: "How to fix: " }), c.fix) : null,
+              c.action === "fix_ownership" ? fixOwnershipButton() : null));
         })),
         r.suggestions.length ? el("div", { class: "suggest", id: "check-suggestions" },
           el("h4", { textContent: "Suggested fixes" }), el("ul", {}, ...r.suggestions.map((t) => el("li", { textContent: t })))) : null,
@@ -1084,6 +1085,21 @@ async function openCheckSetup(id) {
       err.hidden = false;
     } finally { again.disabled = false; }
     loadDiagnostics();
+  }
+  function fixOwnershipButton() {
+    const out = el("div", { class: "check-msg", id: "fix-ownership-result", role: "status" });
+    const b = el("button", { type: "button", class: "secondary small", id: "fix-ownership", textContent: "Fix ownership" });
+    b.addEventListener("click", async () => {
+      b.disabled = true;
+      out.replaceChildren(spinner(), " Giving the files back to GameDock\u2026");
+      try {
+        const r = await api(`/api/servers/${sid(id)}/fix-ownership`, "POST");
+        out.textContent = [r.message, ...(r.warnings || [])].join(" ");
+        if (r.changed && !(r.after || []).length) setTimeout(run, 1200);
+        else b.disabled = false;
+      } catch (e) { out.textContent = `Could not fix ownership: ${e.message}`; b.disabled = false; }
+    });
+    return el("div", { class: "check-action" }, b, out);
   }
   again.addEventListener("click", run);
   copy.addEventListener("click", async () => {

@@ -25,7 +25,8 @@ log = logging.getLogger("gamedock")
 
 
 def build_service(settings: Settings) -> GameDockService:
-    return GameDockService(make_backend(settings.backend, settings.stop_timeout), settings.catalog_dir,
+    return GameDockService(make_backend(settings.backend, settings.stop_timeout,
+                                        getattr(settings, "helper_image", None)), settings.catalog_dir,
                            settings.data_dir,
                            backup_retention=settings.backup_retention,
                            stats_interval=settings.stats_interval,

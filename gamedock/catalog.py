@@ -181,6 +181,37 @@ def _parse_save_command(value: object, source: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+USER_ENV_VALUES = ("uid", "gid")
+MAX_USER_ENV = 4
+
+
+def _parse_user(data: Mapping, source: str, env_names: set[str], field_names: set[str]) -> tuple[bool, dict[str, str]]:
+    """run_as_user (docker --user <GameDock uid>:<gid>) and user_env ({PUID: uid, PGID: gid}: the image's own user
+    variables, filled with GameDock's ids at deploy time)."""
+    run_as_user = data.get("run_as_user", False)
+    if run_as_user is None:
+        run_as_user = False
+    if not isinstance(run_as_user, bool):
+        raise CatalogError(f"{source}: run_as_user must be true or false")
+    raw = data.get("user_env") or {}
+    if not isinstance(raw, dict):
+        raise CatalogError(f"{source}: 'user_env' must be a mapping such as {{PUID: uid, PGID: gid}}")
+    if len(raw) > MAX_USER_ENV:
+        raise CatalogError(f"{source}: 'user_env' may name at most {MAX_USER_ENV} variables")
+    out: dict[str, str] = {}
+    for k, v in raw.items():
+        k, v = str(k), str(v).strip().lower()
+        if not ENV_NAME_RE.match(k) or is_reserved_env_name(k):
+            raise CatalogError(f"{source}: bad name in 'user_env': {k!r}")
+        if v not in USER_ENV_VALUES:
+            raise CatalogError(f"{source}: 'user_env' value of {k} must be uid or gid (GameDock fills in its own user "
+                               f"or group id), got {v!r}")
+        if k in env_names or k in field_names:
+            raise CatalogError(f"{source}: {k} is in 'user_env' and also in 'env' or 'fields'; keep it only in user_env")
+        out[k] = v
+    return run_as_user, out
+
+
 def _parse_relative_path(value: object, name: str, source: str) -> str:
     """A file inside the server's data folder (relative, no '..'), or '' when not given."""
     if value in (None, ""):
@@ -230,7 +261,8 @@ def _parse_steam(data: dict, source: str) -> tuple[str, str, str, str]:
 ENTRY_KEYS = ("id", "name", "image", "description", "notes", "ports", "volumes", "env", "fields", "config_files",
               "update_method", "update_note", "backup_stop_first", "save_command", "ready_log_pattern",
               "progress_log_pattern", "steam_app_id", "steam_branch", "steam_manifest_dir", "version_log_pattern",
-              "game_update_method", "installed_build_file", "stop_timeout", "fail_log_patterns", "log_files", "builtin_fail_patterns")
+              "game_update_method", "installed_build_file", "stop_timeout", "fail_log_patterns", "log_files", "builtin_fail_patterns",
+              "run_as_user", "user_env")
 PORT_KEYS = ("protocol", "host", "container")
 VOLUME_KEYS = ("host", "container")
 FIELD_KEYS = ("name", "label", "default", "secret", "required", "description", "pattern", "pattern_hint")
@@ -416,6 +448,7 @@ def parse_definition(data: object, source: str = "<definition>", origin: str = "
     if isinstance(stop_timeout, bool) or not isinstance(stop_timeout, int) or not (0 <= stop_timeout <= 600):
         raise CatalogError(f"{source}: stop_timeout must be a whole number of seconds from 1 to 600 (or left out)")
 
+    run_as_user, user_env = _parse_user(data, source, set(env), set(names))
     fail_patterns = _parse_fail_patterns(data.get("fail_log_patterns"), source)
     log_files = _parse_log_files(data.get("log_files"), source)
     builtin = data.get("builtin_fail_patterns", True)
@@ -451,6 +484,8 @@ def parse_definition(data: object, source: str = "<definition>", origin: str = "
         fail_log_patterns=fail_patterns,
         log_files=log_files,
         builtin_fail_patterns=builtin,
+        run_as_user=run_as_user,
+        user_env=user_env,
         origin=origin,
     )
 
@@ -479,6 +514,8 @@ def entry_to_dict(e: CatalogEntry) -> dict:
         "fail_log_patterns": [{"pattern": f.pattern, "title": f.title, "advice": f.advice} for f in e.fail_log_patterns],
         "log_files": list(e.log_files),
         "builtin_fail_patterns": e.builtin_fail_patterns,
+        "run_as_user": e.run_as_user,
+        "user_env": dict(e.user_env),
         "config_files": [
             {"path": c.path, "label": c.label, "format": c.format,
              "sensitive_keys": list(c.sensitive_keys), "hot_edit": c.hot_edit, "note": c.note}

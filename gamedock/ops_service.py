@@ -183,7 +183,8 @@ class OpsMixin:
                             "note": "" if hp.exists() else "will be created when the server is deployed"})
         spec = ContainerSpec(name=f"gamedock-{sid or 'server'}", image=t.image, ports=tuple(resolved),
                              volumes=tuple(VolumeMapping(x["host_path"], x["container"]) for x in volumes),
-                             env={**t.env, **values}, stop_timeout=t.stop_timeout,
+                             env={**t.env, **values, **self.user_env_values(t)}, stop_timeout=t.stop_timeout,
+                             user=self.run_as_value(t),
                              labels={"gamedock.managed": "true", "gamedock.server_id": sid, "gamedock.game_id": t.id})
         try:
             argv = DockerCliBackend.build_create_args(spec, spec.stop_timeout or 60)
@@ -589,13 +590,7 @@ class OpsMixin:
         # ownership and disk space (one look at the whole data folder)
         base = self._data_dir_of(inst)
         if base.is_dir():
-            owners, example = foreign_owners(base, cap=3000)
-            if owners:
-                checks.append(ck.Check("owner", "File ownership", ck.WARN,
-                                       f"Some files belong to another user (for example {self._rel(base, example)}), so "
-                                       "backups and the config editor may fail.",
-                                       "Fix with: sudo chown -R $(id -u):$(id -g) <data folder>, and make the game run as "
-                                       "that user (PUID/PGID if the image has them)."))
+            self._check_ownership(checks, inst, t, base)
         try:
             free, total = free_space(Path(self.data_dir))
             st = ck.FAIL if free < LOW_DISK_FAIL else ck.WARN if free < LOW_DISK_WARN else ck.PASS
@@ -603,6 +598,30 @@ class OpsMixin:
                                    "Free some space: game downloads and backups need room." if st != ck.PASS else ""))
         except OSError:
             pass
+
+    # -- file owners in the data folder
+    def _check_ownership(self, checks, inst, t, base: Path) -> None:
+        owners, example = foreign_owners(base, cap=20000)
+        me = f"{self.run_uid}:{self.run_gid}"
+        runs_as = ("the game runs as GameDock's user (catalog " + ("run_as_user" if t.run_as_user else
+                   "user_env " + ", ".join(t.user_env)) + ")") if (t.run_as_user or t.user_env) else \
+            "the game container runs as the image's own user"
+        if not owners:
+            checks.append(ck.Check("owner", "File ownership", ck.PASS,
+                                   f"Every file in the data folder belongs to GameDock's user ({me}); {runs_as}."))
+            return
+        ids = ", ".join(("root (0)" if u == 0 else str(u)) for u in sorted(owners))
+        prevent = ("" if (t.run_as_user or t.user_env) else
+                   " To stop it coming back, give the catalog entry user_env (PUID/PGID-style variables) or run_as_user "
+                   "if the image supports it, and redeploy.")
+        fix = ("Press Fix ownership: a short-lived helper container gives the files in this server's data folder back to "
+               f"GameDock's user ({me}). Nothing is deleted. Over MCP: fix_data_ownership." if self.ownership_supported()
+               else f"Give the files back to GameDock's user ({me}) by hand.") + prevent
+        checks.append(ck.Check("owner", "File ownership", ck.WARN,
+                               f"Some files in the data folder belong to user {ids}, not GameDock's user ({me}), for "
+                               f"example {self._rel(base, example)}. Backups, the config editor, wipe and delete may need "
+                               f"to repair them first (GameDock does that automatically); {runs_as}.",
+                               fix, action="fix_ownership" if self.ownership_supported() else ""))
 
     # -- required settings
     def _check_settings(self, checks, inst, t) -> None:

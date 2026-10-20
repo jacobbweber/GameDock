@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import re
 import shlex
 import threading
@@ -40,7 +41,7 @@ from .authoring_service import AuthoringMixin
 from .ops_service import OpsMixin
 from .problem_service import ProblemsMixin
 from .game_updates import GameUpdateMixin
-from .errors import BackendError, BusyError, ConflictError, GameDockError, NotFoundError, ValidationError
+from .errors import AccessError, BackendError, BusyError, ConflictError, GameDockError, NotFoundError, OperationError, ValidationError
 from .models import (
     BackupResult, BaselineInfo, CatalogEntry, ConfigContent, ConfigFile, ConfigFileInfo, ConfigForm, ConfigFormResult, ConfigSaveResult,
     ContainerSpec, FormField, LogsResult,
@@ -97,6 +98,17 @@ def slugify(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:40].strip("-")
 
 
+def _own_ids() -> tuple[int | None, int | None]:
+    """The user and group id GameDock runs as (None on systems without them)."""
+    try:
+        return os.getuid(), os.getgid()
+    except AttributeError:
+        return None, None
+
+
+SERVER_ID_SAFE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,80}$")
+
+
 class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin, ProblemsMixin):
     def __init__(self, backend: ContainerBackend, catalog_dir: Path, data_dir: Path,
                  backup_retention: int = 10, clock: Callable[[], datetime] | None = None,
@@ -109,6 +121,8 @@ class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin, ProblemsMixin):
         """`port_probe(protocol, port)` returns False when the host port is taken by another program (checked
         before a server starts); None/True mean "free or unknown". Tests leave it out."""
         self.backend = backend
+        self.run_uid, self.run_gid = _own_ids()   # containers with run_as_user / user_env get these; repairs chown to them
+        self._repair_notes: dict[str, list[str]] = {}  # server id -> automatic ownership repairs during the current action
         self.catalog_dir = Path(catalog_dir)
         self.data_dir = Path(data_dir)
         self.store = InstanceStore(self.data_dir / "instances.json")
@@ -219,10 +233,137 @@ class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin, ProblemsMixin):
             image=t.image,
             ports=inst.ports,
             volumes=tuple(volumes),
-            env={**t.env, **inst.env},
+            env={**t.env, **inst.env, **self.user_env_values(t)},
             stop_timeout=t.stop_timeout,
+            user=self.run_as_value(t),
             labels={LABEL_MANAGED: "true", LABEL_SERVER_ID: inst.id, LABEL_GAME_ID: inst.game_id},
         )
+
+    # ------------------------------------------------------------------ running as GameDock's user
+    def user_env_values(self, t: CatalogEntry) -> dict[str, str]:
+        """The entry's user_env filled with GameDock's own ids, e.g. {"PUID": "1000", "PGID": "1000"}."""
+        if self.run_uid is None or not t.user_env:
+            return {}
+        return {k: str(self.run_uid if v == "uid" else self.run_gid) for k, v in t.user_env.items()}
+
+    def run_as_value(self, t: CatalogEntry) -> str:
+        """"uid:gid" for docker --user when the entry asks for run_as_user, else ""."""
+        if not t.run_as_user or self.run_uid is None:
+            return ""
+        return f"{self.run_uid}:{self.run_gid}"
+
+    # ------------------------------------------------------------------ file owner repair
+    def _ownership_target(self, inst: Instance) -> Path:
+        """The ONE folder the owner repair may touch: <data dir>/<server id>, which must really be a folder directly
+        inside GameDock's data folder (not a symlink, no '..', realpath checked). Raises OperationError otherwise."""
+        sid = inst.id
+        if not SERVER_ID_SAFE_RE.match(sid or "") or sid in RESERVED_IDS or sid in (".", ".."):
+            raise OperationError(f"Refusing to repair file owners: '{sid}' is not a plain server id.")
+        root = os.path.realpath(self.data_dir)
+        raw = os.path.join(os.path.abspath(self.data_dir), sid)
+        if os.path.islink(raw):
+            raise OperationError(f"Refusing to repair file owners: {raw} is a symbolic link.")
+        real = os.path.realpath(raw)
+        if os.path.dirname(real) != root or os.path.basename(real) != sid:
+            raise OperationError(f"Refusing to repair file owners: {raw} is not inside GameDock's data folder.")
+        if not os.path.isdir(real):
+            raise OperationError(f"There is no data folder at {real} to repair.")
+        return Path(real)
+
+    def ownership_supported(self) -> bool:
+        return self.run_uid is not None and callable(getattr(self.backend, "repair_ownership", None))
+
+    def _repair_ownership(self, inst: Instance) -> str:
+        """Give every file in this server's data folder back to GameDock's user with the backend's short-lived helper
+        container (it mounts only that folder). Returns a plain note; raises GameDockError with a plain sentence."""
+        if not self.ownership_supported():
+            raise OperationError("this GameDock cannot run the owner repair helper (no Docker backend or no user ids)")
+        target = self._ownership_target(inst)
+        note = self.backend.repair_ownership(str(target), int(self.run_uid), int(self.run_gid))  # type: ignore[arg-type]
+        log.info("repaired file owners of %s (%s)", inst.id, note)
+        self._repair_notes.setdefault(inst.id, []).append(note)
+        return note
+
+    def _with_repair(self, inst: Instance, fn: Callable):
+        """Run fn(); when it fails with a permission problem (AccessError), repair the owners of this server's data
+        folder and try once more. The plain-language error is kept as the fallback and says what was tried."""
+        try:
+            return fn()
+        except AccessError as first:
+            try:
+                note = self._repair_ownership(inst)
+            except GameDockError as e:
+                raise AccessError(f"{first} GameDock also tried to give the files back to its own user automatically "
+                                  f"with a short-lived helper container, but that did not work: {e}") from first
+            try:
+                return fn()
+            except AccessError as second:
+                raise AccessError(f"{second} GameDock had already given the files back to its own user with a helper "
+                                  f"container ({note}) and tried once more, but it still failed.") from second
+
+    def _proactive_repair(self, inst: Instance) -> None:
+        """Before data is backed up, replaced or deleted (container stopped): if files belong to another user, repair
+        the owners first. Never raises: when this does not work, the action itself still falls back to _with_repair."""
+        if not self.ownership_supported():
+            return
+        base = self._data_dir_of(inst)
+        if not base.is_dir():
+            return
+        owners, _ = foreign_owners(base)
+        if not owners:
+            return
+        try:
+            self._repair_ownership(inst)
+        except GameDockError as e:
+            log.warning("could not repair file owners of %s before the action: %s", inst.id, e)
+
+    def _take_repair_note(self, inst: Instance) -> str:
+        notes = self._repair_notes.pop(inst.id, [])
+        if not notes:
+            return ""
+        return (" Some files belonged to another user (usually root, written by the game container); GameDock gave them "
+                f"back to its own user automatically ({notes[-1]}).")
+
+    def fix_data_ownership(self, server_id: str) -> dict:
+        """Non-destructive: make GameDock's user the owner of every file in the server's data folder (the helper
+        container mounts only that folder). Nothing is deleted or changed except file owners."""
+        with self._operation(server_id, "fixing file owners"):
+            inst = self._instance(server_id)
+            self._repair_notes.pop(inst.id, None)
+            base = self._data_dir_of(inst)
+            out = {"server_id": inst.id, "name": inst.name, "data_dir": str(base),
+                   "owner": f"{self.run_uid}:{self.run_gid}", "changed": False, "before": [], "after": [],
+                   "message": "", "warnings": []}
+            if not base.is_dir() and not os.path.islink(os.path.join(os.path.abspath(self.data_dir), inst.id)):
+                out["message"] = "This server has no data folder yet, so there is nothing to fix."
+                return out
+            self._ownership_target(inst)  # refuses a symlinked or escaped folder before anything else
+            before, example = foreign_owners(base)
+            out["before"] = sorted(before)
+            if not before:
+                out["message"] = (f"Every file already belongs to GameDock's user ({self.run_uid}:{self.run_gid}). "
+                                  "Nothing was changed.")
+                return out
+            note = self._repair_ownership(inst)
+            self._repair_notes.pop(inst.id, None)
+            after, example_after = foreign_owners(base)
+            out["after"] = sorted(after)
+            out["changed"] = True
+            if after:
+                out["message"] = (f"The helper ran ({note}), but some files still belong to user id(s) "
+                                  f"{', '.join(map(str, sorted(after)))}, for example {example_after}.")
+            else:
+                out["message"] = (f"Done: every file in {base} now belongs to GameDock's user "
+                                  f"({self.run_uid}:{self.run_gid}); {note}. Nothing was deleted.")
+            if self._is_running(inst):
+                out["warnings"].append("The server is running. If the game runs as a user other than root (and other "
+                                       "than GameDock's user), it may no longer be able to write; restart it and check.")
+            t = self._template(inst)
+            if not t.user_env and not t.run_as_user:
+                out["warnings"].append("The game container still runs as its own user, so new files may belong to "
+                                       "another user again. If the image has PUID/PGID-style settings, add user_env "
+                                       "(or run_as_user) to its catalog entry and redeploy.")
+            return out
 
     def _prepare_dirs(self, spec: ContainerSpec) -> None:
         # Make host folders ourselves so Docker doesn't create them owned by root.
@@ -637,7 +778,8 @@ class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin, ProblemsMixin):
 
     def _safety_backup(self, inst: Instance, kind: str, protect: set[str] | None = None) -> bk.BackupInfo:
         """Back up a stopped server's data into its backups folder (retention applied)."""
-        info = bk.create_archive(self._data_dir_of(inst), self._backup_dir(inst), inst.id, self._clock(), kind)
+        info = self._with_repair(inst, lambda: bk.create_archive(self._data_dir_of(inst), self._backup_dir(inst), inst.id,
+                                                                 self._clock(), kind))
         bk.prune(self._backup_dir(inst), self._retention_for(inst), protect=(protect or set()) | {info.name})
         return info
 
@@ -673,8 +815,12 @@ class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin, ProblemsMixin):
             save_note = self._run_save_command(inst, t)
         if stop_first:
             self._stop(inst)
+        self._repair_notes.pop(inst.id, None)
         try:
-            info = bk.create_archive(self._data_dir_of(inst), self._backup_dir(inst), inst.id, self._clock(), kind)
+            if not self._is_running(inst):
+                self._proactive_repair(inst)
+            info = self._with_repair(inst, lambda: bk.create_archive(self._data_dir_of(inst), self._backup_dir(inst),
+                                                                     inst.id, self._clock(), kind))
         except BaseException:
             if stop_first:
                 try:
@@ -704,6 +850,7 @@ class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin, ProblemsMixin):
                 note += " " + save_note
         if removed:
             note += f" Removed {len(removed)} old backup(s) to keep the newest {keep}."
+        note += self._take_repair_note(inst)
         return BackupResult(info, was_running, stop_first, restarted, was_running and live,
                             tuple(removed), note, tuple(warnings))
 
@@ -715,9 +862,13 @@ class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin, ProblemsMixin):
                 raise ValidationError("Restoring replaces the current data and needs explicit confirmation (confirm=true)")
             archive = bk.backup_path(self._backup_dir(inst), name)
             self._require_stopped(inst, "restoring a backup")
-            safety = self._safety_backup(inst, "pre-restore", protect={name})  # aborts the restore if it fails
+            self._repair_notes.pop(inst.id, None)
             owners, example = foreign_owners(self._data_dir_of(inst))
-            warnings = bk.restore_archive(archive, self._data_dir_of(inst))
+            self._proactive_repair(inst)
+            safety = self._safety_backup(inst, "pre-restore", protect={name})  # aborts the restore if it fails
+            warnings = self._with_repair(inst, lambda: bk.restore_archive(archive, self._data_dir_of(inst)))
+            if owners and self._repair_notes.get(inst.id):
+                owners = set()  # the old files were given back to GameDock's user before the restore
             if owners:
                 ids = ", ".join(str(u) for u in sorted(owners))
                 warnings.append(
@@ -728,7 +879,8 @@ class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin, ProblemsMixin):
             self._prepare_dirs(self._spec(inst))
             return RestoreResult(
                 name, safety,
-                f"Restored '{name}'. Your previous data was saved first as '{safety.name}'.", tuple(warnings))
+                f"Restored '{name}'. Your previous data was saved first as '{safety.name}'." + self._take_repair_note(inst),
+                tuple(warnings))
 
     def delete_backup(self, server_id: str, name: str, confirm: bool = False) -> None:
         inst = self._instance(server_id)
@@ -748,12 +900,15 @@ class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin, ProblemsMixin):
             if not confirm:
                 raise ValidationError("Wiping data needs explicit confirmation (confirm=true)")
             self._require_stopped(inst, "wiping its data")
+            self._repair_notes.pop(inst.id, None)
+            self._proactive_repair(inst)
             safety = self._safety_backup(inst, "pre-wipe")
-            bk.empty_directory(self._data_dir_of(inst))
+            self._with_repair(inst, lambda: bk.empty_directory(self._data_dir_of(inst)))
             self.baselines.remove_server(inst.id)  # the game writes new files (and new defaults) on its next start
             self._baseline_tried.pop(inst.id, None)
             self._prepare_dirs(self._spec(inst))
-            return WipeResult(safety, f"All data was deleted. A backup was saved first as '{safety.name}'.")
+            return WipeResult(safety, f"All data was deleted. A backup was saved first as '{safety.name}'."
+                              + self._take_repair_note(inst))
 
     # ------------------------------------------------------------ delete
     def delete(self, server_id: str, confirm: bool = False, delete_data: bool = False,
@@ -773,14 +928,20 @@ class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin, ProblemsMixin):
             cname = container_name(inst.id)
             self._require_stopped(inst, "deleting it")
             backup = None
+            self._repair_notes.pop(inst.id, None)
             if delete_data:
                 data = self._data_dir_of(inst)
+                self._proactive_repair(inst)  # container is stopped: give root-owned files back before backing up
                 if data.is_dir() and any(data.iterdir()):
-                    backup = bk.create_archive(data, self._deleted_dir(), inst.id, self._clock(), "pre-delete")
+                    # complete or nothing: if a file cannot be read even after a repair, nothing is deleted
+                    backup = self._with_repair(inst, lambda: bk.create_archive(data, self._deleted_dir(), inst.id,
+                                                                               self._clock(), "pre-delete"))
                 # (an empty or missing data folder has nothing worth backing up)
             self.backend.remove(cname)
             if delete_data:
-                bk.remove_tree(self._data_dir_of(inst))  # on failure the server entry is kept so you can retry
+                self._proactive_repair(inst)  # the container is gone now; anything it wrote at the end is repaired too
+                # on failure the server entry is kept so you can retry
+                self._with_repair(inst, lambda: bk.remove_tree(self._data_dir_of(inst)))
                 self.baselines.remove_server(inst.id)    # the recorded defaults belong to those files
             self._baseline_tried.pop(inst.id, None)
             self.store.remove(inst.id)
@@ -791,6 +952,7 @@ class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin, ProblemsMixin):
                         else "Server deleted together with its (empty) data folder.")
             else:
                 note = "Server deleted. Its data folder was kept."
+            note += self._take_repair_note(inst)
             return DeleteResult(inst.id, delete_data, backup, note)
 
     # ------------------------------------------------------------ image updates
@@ -960,7 +1122,7 @@ class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin, ProblemsMixin):
         c = self._config_file(inst, path)
         if not confirm:
             raise ValidationError("Recording new defaults needs explicit confirmation (confirm=true)")
-        r = cfg.read_config(self._data_dir_of(inst), c)
+        r = self._read_cfg(inst, c)
         if not r.exists:
             raise ValidationError("This game has not created its settings file yet; there is nothing to record.")
         form = forms.build_form(r.content, c)
@@ -977,7 +1139,7 @@ class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin, ProblemsMixin):
         secret settings are never included, only "set" / "not set"."""
         inst = self._instance(server_id)
         c = self._config_file(inst, path)
-        r = cfg.read_config(self._data_dir_of(inst), c)
+        r = self._read_cfg(inst, c)
         out: dict = {"server_id": inst.id, "path": c.path, "file_exists": r.exists, "baseline": None, "count": 0,
                      "changes": [], "note": ""}
         if not r.exists:
@@ -1024,11 +1186,14 @@ class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin, ProblemsMixin):
             out["note"] = f"The defaults were recorded by hand at {info.captured_at}."
         return out
 
+    def _read_cfg(self, inst: Instance, c: ConfigFile) -> cfg.ConfigRead:
+        return self._with_repair(inst, lambda: cfg.read_config(self._data_dir_of(inst), c))
+
     # ------------------------------------------------------------ config files (read, form, write)
     def read_config_file(self, server_id: str, path: str) -> ConfigContent:
         inst = self._instance(server_id)
         c = self._config_file(inst, path)
-        r = cfg.read_config(self._data_dir_of(inst), c)
+        r = self._read_cfg(inst, c)
         running = self._is_running(inst)
         editable = c.hot_edit or not running
         if not r.exists:
@@ -1065,7 +1230,7 @@ class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin, ProblemsMixin):
         c = self._config_file(inst, path)
         r = None
         if content is None:
-            r = cfg.read_config(self._data_dir_of(inst), c)
+            r = self._read_cfg(inst, c)
             if not r.exists:
                 raise ValidationError("This game has not created its settings file yet; it appears after the first full start.")
             content = r.content
@@ -1088,7 +1253,7 @@ class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin, ProblemsMixin):
             if running and not c.hot_edit:
                 raise ConflictError("Stop the server before editing this file (it is not marked safe to edit while running)")
             self._capture_baseline(inst, c, None, bl.ORIGIN_PRE_SAVE)  # the file as it is before our first edit
-            w = cfg.write_config(self._data_dir_of(inst), c, content, self._clock())
+            w = self._with_repair(inst, lambda: cfg.write_config(self._data_dir_of(inst), c, content, self._clock()))
             note = "Saved." + (f" The previous version was kept as '{w.backup}'." if w.backup else "")
             note += (" Restart the server for the change to take effect." if running
                      else " The change applies the next time the server starts.")

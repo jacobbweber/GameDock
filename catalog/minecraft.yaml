@@ -20,6 +20,9 @@ config_files:               # editable from the Config button (example path; ver
   - path: data/ops.json
     label: Operators (ops.json)
     format: json
+# Run the game as the user GameDock runs as, so the files it writes can be backed up, edited and deleted without
+# repairs. Documented in https://docker-minecraft-server.readthedocs.io/en/latest/variables/ (UID/GID, default 1000).
+user_env: { UID: uid, GID: gid }
 fields:
   - { name: EULA, label: Accept Minecraft EULA (TRUE or FALSE), default: "FALSE", required: true }
   - { name: VERSION, label: Minecraft version, default: LATEST }

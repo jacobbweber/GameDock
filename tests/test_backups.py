@@ -96,8 +96,9 @@ def test_unreadable_file_gives_clear_error_and_saves_nothing(srv, tmp_path):
     secret = data(tmp_path) / "saves" / "root_owned.dat"
     secret.write_text("x")
     secret.chmod(0)
+    srv.backend.ownership_fail = "simulated helper failure"   # 0.6.2: only when the automatic repair fails too
     try:
-        with pytest.raises(AccessError, match="another user.*PUID"):
+        with pytest.raises(AccessError, match="(?s)another user.*PUID.*tried to give the files back.*simulated helper"):
             srv.create_backup("one")
     finally:
         secret.chmod(0o644)
@@ -111,6 +112,7 @@ def test_unreadable_directory_gives_clear_error(srv, tmp_path):
     d.mkdir()
     (d / "f").write_text("x")
     d.chmod(0)
+    srv.backend.ownership_fail = "simulated helper failure"
     try:
         with pytest.raises(AccessError):
             srv.create_backup("one")
@@ -376,7 +378,10 @@ def test_ownership_hint_quotes_odd_paths(tmp_path):
     hint = bk.ownership_hint(p)
     assert "chown -R $(id -u):$(id -g)" in hint and "PUID" in hint
     import shlex
-    assert shlex.split(hint.split("with: ")[1].split(". To stop")[0])[-1] == str(p)  # copy-paste safe
+    assert shlex.split(hint.split("or with sudo: ")[1].split("). Then")[0])[-1] == str(p)  # copy-paste safe
+    docker_cmd = hint.split("can): ")[1].split(" (or with sudo")[0]
+    assert shlex.split(docker_cmd)[:4] == ["docker", "run", "--rm", "--network"]
+    assert f"type=bind,source={p},target=/d" in shlex.split(docker_cmd)  # the odd path survives quoting
 
 
 def test_disk_full_while_backing_up_is_explained(tmp_path, monkeypatch):
@@ -400,5 +405,6 @@ def test_restore_warns_when_old_files_belonged_to_another_user(service, deployed
     service.create_backup("one")
     name = service.list_backups("one")[0].name
     monkeypatch.setattr(svc_mod, "foreign_owners", lambda root: ({1234}, str(root / "saves" / "w.dat")))
+    service.backend.ownership_fail = "no helper"   # 0.6.2: the warning is only left when the automatic repair fails
     r = service.restore_backup("one", name, confirm=True)
     assert any("user id 1234" in w and "chown -R 1234" in w for w in r.warnings)

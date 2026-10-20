@@ -10,6 +10,10 @@ A server that is still downloading its game files shows **Installing 52%** inste
 
 ![Installing](docs/gamedock-020-installing.png)
 
+**New in 0.6.2:** files a game container wrote as root no longer block backups, config edits, wipes or deletes: GameDock gives them back to its own user with a short-lived helper container that mounts only that server's folder, and Check setup has a **Fix ownership** button (MCP: `fix_data_ownership`). The bundled games now run as GameDock's user through the new catalog key `user_env` (PUID/PGID or UID/GID), Palworld's notes explain its password popup, and an expired Steam login token is recognised. See the [CHANGELOG](CHANGELOG.md).
+
+![Check setup: file ownership](docs/gamedock-062-check-ownership.png)
+
 **New in 0.6.1:** a stuck server now says *why*. When the logs show a known failure (for example Steam rejecting a game server login token) the card and Check setup show it in plain words with the next step; games can add their own explanations (`fail_log_patterns`, `log_files`) and settings can check their shape (`pattern`). The updater also copes with a catalog file that is in the way. See the [CHANGELOG](CHANGELOG.md).
 
 **New in 0.6.0:** troubleshooting and review tools, built from a real AI-agent review (AutoReiv adding ASKA). Each server card has a **Check setup** button: a read-only checklist of what is right and wrong (container, ready line, game version and Steam app id, config files, ports, folders, required settings), with the concrete fix for each problem and a **Copy diagnostics** button (passwords hidden) for pasting into a chat. The Deploy dialog warns, as you type, when a host port is already used by another server or another program, and offers a free one. AI agents get matching read-only tools (`verify_game_setup`, `check_ports`, `preview_deploy`, `get_server_diagnostics`, `get_catalog_review_status`, `get_mcp_audit`), `inspect_image` now says which tags exist when a tag is wrong, and `validate_catalog_entry` catches more mistakes before a person has to.
@@ -100,6 +104,7 @@ Set these as environment variables or in a `.env` file in the folder you start G
 | `GAMEDOCK_SCHEDULER` | `true` | Run scheduled backups and maintenance. `false` keeps the settings but runs nothing (the Run now buttons still work). |
 | `GAMEDOCK_UPDATE_CHECK` | `true` | Look on GitHub (read-only, at most every 6 hours, plus the Check now button) for a newer GameDock, and ask the Steam data service for the newest game builds (cached for an hour). `false`: GameDock contacts neither and says so. |
 | `GAMEDOCK_STEAM_INFO_URL` | `https://api.steamcmd.net/v1/info/{appid}` | Where newest Steam build ids come from. Any address that serves the same JSON (`data.<appid>.depots.branches.<branch>.buildid`); `{appid}` is replaced by the app id. |
+| `GAMEDOCK_HELPER_IMAGE` | `alpine:3` | Small image of the file owner repair helper (0.6.2). An image already on the machine is used first; this one is downloaded only if none is there. |
 | `GAMEDOCK_UPDATE_REPO` | `jacobbweber/GameDock` | The GitHub repository to compare with, as `owner/name` or its URL. Only api.github.com is ever contacted. |
 | `GAMEDOCK_SELF_UPDATE` | `true` | `false` hides the **Update GameDock** button (the version and badge stay; the page shows the manual commands). |
 | `GAMEDOCK_MCP_MODE` | `standard` | `off`, `read_only`, `standard` or `full` (see [AI agents](#ai-agents-mcp)). Forced to `off` when `GAMEDOCK_HOST` is not localhost and no token is set. |
@@ -399,8 +404,8 @@ GameDock serves a [Model Context Protocol](https://modelcontextprotocol.io) endp
 |---|---|
 | `off` | none (`/mcp` answers 404 with an explanation) |
 | `read_only` | `list_catalog`, `get_catalog_entry`, `list_servers`, `get_server_status`, `get_server_stats`, `get_host_stats`, `get_stats_history`, `list_backups`, `list_config_files`, `read_config_file`, `get_config_changes`, `get_server_logs`, `get_gamedock_version`, `list_schedules`, `check_game_update`, and for adding games `get_add_game_guide`, `validate_catalog_entry`, `inspect_image`, and the 0.6.0 checks `get_catalog_review_status`, `verify_game_setup`, `check_ports`, `preview_deploy`, `get_server_diagnostics`, `get_mcp_audit` (24 tools) |
-| `standard` (default) | read-only tools plus `deploy_server`, `start_server`, `stop_server`, `restart_server`, `update_server_settings`, `update_server_image`, `create_backup`, `write_config_file`, `set_backup_schedule`, `set_maintenance_schedule`, `update_game`, `add_catalog_entry`, `update_catalog_entry` (37 tools) |
-| `full` | standard plus the destructive tools `delete_server`, `restore_backup`, `delete_backup`, `wipe_server_data` (41 tools) |
+| `standard` (default) | read-only tools plus `deploy_server`, `start_server`, `stop_server`, `restart_server`, `update_server_settings`, `update_server_image`, `create_backup`, `write_config_file`, `set_backup_schedule`, `set_maintenance_schedule`, `update_game`, `add_catalog_entry`, `update_catalog_entry`, and since 0.6.2 `fix_data_ownership` (non-destructive) (38 tools) |
+| `full` | standard plus the destructive tools `delete_server`, `restore_backup`, `delete_backup`, `wipe_server_data` (42 tools) |
 
 Tools outside the mode are not listed at all and cannot be called. If `GAMEDOCK_HOST` is not localhost and `GAMEDOCK_MCP_TOKEN` is empty, the mode is forced to `off` (a warning is logged and the web page explains why).
 
@@ -504,6 +509,14 @@ The recommended way is a small systemd service running as a normal user with the
 The Docker route mounts `/var/run/docker.sock` into the GameDock container. That gives the container root-equivalent control of the host, and the data folder must be mounted at the same path inside and outside. Use it only if you cannot use systemd. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 Stopping or restarting GameDock does not stop your game servers (they are separate containers with restart policy `unless-stopped`).
+
+## Files owned by root (file ownership)
+
+Many game images run the game as root unless told otherwise, and then the files they write into the server's data folder belong to root, which GameDock (an ordinary user) cannot read or delete. Since 0.6.2:
+
+- **Prevention.** A catalog entry can say `user_env: {PUID: uid, PGID: gid}` (or the image's own names, such as `UID`/`GID`): GameDock fills in the user and group id it runs as when the server is deployed. `run_as_user: true` starts the container with `docker --user` for images that support any user. All bundled games except the smoke test use `user_env`. Servers keep the entry they were deployed with, so an older server needs to be deleted (keep the data) and deployed again to pick this up.
+- **Repair.** When a backup, restore, wipe, delete or config edit hits "permission denied", or before such an action when files of another user are found, GameDock runs a short-lived helper container (image `GAMEDOCK_HELPER_IMAGE`, default `alpine:3`; an image already on the machine is reused, otherwise it is downloaded once) with no network that mounts only `<data folder>/<server id>` and runs `chown -R` to GameDock's user, then tries the action once more. Check setup shows a **File ownership** row and a **Fix ownership** button; the MCP tool is `fix_data_ownership`. Nothing is deleted by a repair.
+- If the helper cannot run (no Docker, or the helper image cannot be downloaded) the error says so and gives a command to run by hand.
 
 ## Troubleshooting a server
 

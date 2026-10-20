@@ -38,6 +38,13 @@ class FakeBackend:
         self.restart_counts: dict[str, int] = {}              # container name -> pretend restart count
         self.exit_info: dict[str, tuple[int, bool]] = {}      # container name -> (exit code, out of memory) while stopped
         self.unpublished_ports: dict[str, set[str]] = {}      # container name -> {"27015/udp"} pretend not published
+        # Ownership helper pretend: every call is recorded; `ownership_fail` makes it raise with that text. The pretend
+        # repair gives the owner (us, in tests) back full access to every file and folder, which is what a chown to
+        # GameDock's own user achieves for files a game container wrote as root with mode 600/700.
+        self.ownership_calls: list[tuple[str, int, int]] = []
+        self.ownership_fail: str | None = None
+        self.helper_image = "alpine:3"
+        self.helper_image_local = True
 
     def _pause(self, action: str) -> None:
         d = self.delays.get(action, 0)
@@ -148,6 +155,32 @@ class FakeBackend:
             self._started.pop(name, None)
             self._logs.pop(name, None)
             self.health.pop(name, None)
+
+    # -- ownership helper (pretend) ---------------------------------------
+    def repair_ownership(self, host_dir: str, uid: int, gid: int) -> str:
+        import os
+        import stat as st
+        with self._lock:
+            self.calls.append(("repair_ownership", host_dir))
+            self.ownership_calls.append((host_dir, uid, gid))
+            if self.ownership_fail:
+                raise BackendError(self.ownership_fail)
+        if not os.path.islink(host_dir) and os.path.isdir(host_dir):
+            os.chmod(host_dir, os.lstat(host_dir).st_mode | st.S_IRWXU)
+        for root, dirs, files in os.walk(host_dir, topdown=True, followlinks=False,
+                                         onerror=lambda e: None):
+            for d in dirs:
+                p = os.path.join(root, d)
+                if not os.path.islink(p):
+                    os.chmod(p, os.lstat(p).st_mode | st.S_IRWXU)
+            for f in files:
+                p = os.path.join(root, f)
+                if not os.path.islink(p):
+                    os.chmod(p, os.lstat(p).st_mode | st.S_IRUSR | st.S_IWUSR)
+        note = (f"used the helper image {self.helper_image} (already on this machine)" if self.helper_image_local
+                else f"downloaded the small helper image {self.helper_image} first")
+        self.helper_image_local = True
+        return note
 
     # -- image simulation ------------------------------------------------
     def _new_id(self) -> str:

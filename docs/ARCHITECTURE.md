@@ -94,6 +94,14 @@ All read-only; the web page and the MCP tools call the same service methods.
 - **`lint.py`** and `scripts/lint_catalog.py` load every catalog file the way the program does and add the Review dialog's checks; a test fails when a catalog file has an error.
 - **MCP.** Six new read-only tools (`get_catalog_review_status`, `verify_game_setup`, `check_ports`, `preview_deploy`, `get_server_diagnostics`, `get_mcp_audit`; read_only 24, standard 37, full 41 tools). The audit tool reuses `AuditLog.recent`, which masks arguments a second time on the way out.
 
+## File owners and running as GameDock's user (0.6.2)
+
+- **Backend.** `repair_ownership(host_dir, uid, gid)` is part of the backend interface. `DockerCliBackend` builds the helper with `build_chown_args` (`docker run --rm --network none --read-only --user 0:0 --cap-drop ALL --cap-add CHOWN,DAC_OVERRIDE,DAC_READ_SEARCH,FOWNER --security-opt no-new-privileges --mount type=bind,source=<dir>,target=/d --entrypoint chown -- <image> -R -h uid:gid /d`) and picks the image in `_helper_image` (configured image if stored, else a stored `alpine`/`busybox`, else pull the configured one). `FakeBackend` records the call and gives the owner back full access to every file (what a chown achieves for root-owned 600/700 files), or raises `ownership_fail`.
+- **Service.** `_ownership_target` allows exactly `<data dir>/<server id>` (plain id, not reserved, not a symlink, realpath's parent is the realpath of the data folder). `_with_repair(inst, fn)` runs `fn`, and on `AccessError` repairs and retries once; `_proactive_repair` repairs before data is backed up, replaced or deleted when `hostcheck.foreign_owners` finds files of another user (it never raises). Used by `_safety_backup`, `_backup_locked`, `restore_backup`, `wipe_data`, `delete` (before the pre-delete backup and again after the container is removed) and the config read/write paths. `fix_data_ownership` is the explicit, non-destructive version for the web button and the MCP tool. A repair adds one sentence to the action's note.
+- **Catalog.** `user_env` (name -> `uid`/`gid`) and `run_as_user` are parsed in `catalog._parse_user`; `GameDockService.user_env_values` and `run_as_value` turn them into env values and `ContainerSpec.user` (`docker create --user`, numeric only) in `_spec` and `preview_deploy`. `authoring.user_id_env_names` drives the lint warnings (fixed ids in env/fields, unmapped id variables of an inspected image).
+- **MCP.** `fix_data_ownership` (standard tier, idempotent, not destructive; audited). Tool counts: read_only 24, standard 38, full 42.
+- **Check.** `OpsMixin._check_ownership` adds the File ownership row; `checks.Check.action = "fix_ownership"` tells the web page to show the button.
+
 ## Where things are stored
 
 | What | Where |

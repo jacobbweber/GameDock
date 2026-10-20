@@ -3,10 +3,12 @@ from .docker_cli import DockerCliBackend
 from .fake import FakeBackend
 
 
-def make_backend(kind: str, stop_timeout: int = 60) -> ContainerBackend:
+def make_backend(kind: str, stop_timeout: int = 60, helper_image: str | None = None) -> ContainerBackend:
     if kind == "fake":
         return FakeBackend()
     if kind == "docker":
+        if helper_image:
+            return DockerCliBackend(stop_timeout=stop_timeout, helper_image=helper_image)
         return DockerCliBackend(stop_timeout=stop_timeout)
     raise ValueError(f"Unknown backend {kind!r} (use 'docker' or 'fake')")
 

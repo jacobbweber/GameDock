@@ -92,6 +92,12 @@ config_files:
     sensitive_keys: [password]
     note: The image may rewrite this file from the settings above when it starts, so prefer changing the settings on the server (Edit). Useful for reading what the game really uses.
 fail_log_patterns:
+  - pattern: 'k_EResultGSLTExpired'
+    title: Steam says the login token has expired.
+    advice: >-
+      On https://steamcommunity.com/dev/managegameservers regenerate the token, or delete it and create a new one for App
+      ID 1898300, then stop the server, click Edit, paste the new token and start it again. If new tokens also show as
+      expired, the Steam account may be limited (for example no phone number on the account).
   - pattern: 'CustomAuthenticationFailed|k_EResultAccountNotFound'
     title: Steam rejected the login token (CustomAuthenticationFailed).
     advice: >-

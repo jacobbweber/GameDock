@@ -285,7 +285,9 @@ def make_tools(service: GameDockService, confirms: ConfirmationStore, audit: Aud
         lists concrete fixes such as "appmanifest_X.acf was found with id Y, not your steam_app_id Z". When the game is not ready,
         a "Known problem" check (and the top-level `problem`) names a failure found in the container log or in the entry's
         `log_files`, using the entry's `fail_log_patterns` first and GameDock's built-in ones (out of memory, port in use,
-        permission denied, disk full, SteamCMD errors, refused Steam login) after; its `fix` is the next step. Read-only."""
+        permission denied, disk full, SteamCMD errors, refused Steam login) after; its `fix` is the next step. A "File
+        ownership" check warns when files in the data folder belong to another user (usually root, written by the game
+        container); fix_data_ownership (standard and full modes) repairs that without deleting anything. Read-only."""
         r = service.verify_game_setup(server_id)
         r["_audit_detail"] = f"{r['overall']}: {r['summary']}"
         return r
@@ -485,6 +487,18 @@ def make_tools(service: GameDockService, confirms: ConfirmationStore, audit: Aud
         """Replace a config file's content. The previous version is kept as an automatic .bak copy.
         Masked placeholders from read_config_file keep the existing secret values."""
         return to_plain(service.write_config_file(server_id, path, content))
+
+    @tool(STANDARD, _ann(idempotent=True))
+    def fix_data_ownership(server_id: ServerId) -> Result:
+        """Give every file in a server's data folder back to the user GameDock runs as. Use it when verify_game_setup's
+        "File ownership" check warns, or when a backup, config edit, wipe or delete failed with "permission denied"
+        (files written as root by the game container). A short-lived helper container (no network, removed when done)
+        mounts ONLY this server's data folder and runs chown; nothing is deleted or moved. GameDock also does this
+        automatically before backups, restores, wipes and deletes. To stop it coming back, the catalog entry should use
+        user_env (PUID/PGID-style variables) or run_as_user. Logged in the audit log."""
+        r = service.fix_data_ownership(server_id)
+        r["_audit_detail"] = "changed" if r.get("changed") else "nothing to change"
+        return r
 
     # ------------------------------------------------------------------ destructive (two steps)
     def two_step(action: str, args: dict[str, Any], token: str | None, describe: Callable[[], str],

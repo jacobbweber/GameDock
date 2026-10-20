@@ -21,7 +21,9 @@ READ = {"list_catalog", "get_catalog_entry", "list_servers", "get_server_status"
         "get_mcp_audit"}
 STANDARD = {"deploy_server", "start_server", "stop_server", "restart_server", "update_server_settings",
             "update_server_image", "create_backup", "write_config_file", "set_backup_schedule",
-            "set_maintenance_schedule", "update_game", "add_catalog_entry", "update_catalog_entry"}
+            "set_maintenance_schedule", "update_game", "add_catalog_entry", "update_catalog_entry",
+            # 0.6.2: non-destructive file owner repair
+            "fix_data_ownership"}
 DESTRUCTIVE = {"delete_server", "restore_backup", "delete_backup", "wipe_server_data"}
 SECRET = "sup3r-s3cret-pw"
 RPC = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
