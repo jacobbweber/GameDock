@@ -470,3 +470,16 @@ pre.diagbox { margin: 8px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; f
   background: #0d1117; border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
 .audit-controls { margin-bottom: 8px; }
 .audit-controls .hint { flex: 1 1 260px; font-size: 12.5px; }
+
+/* 0.6.3: setting rules (dropdowns, invalid values) */
+.cfg-select { width: 100%; max-width: 100%; }
+.cfg-desc { color: var(--muted); font-size: 12px; margin-top: 4px; }
+.cfg-row.invalid { box-shadow: inset 3px 0 0 #f85149; background: rgba(218,54,51,.07); }
+.cfg-row.invalid input, .cfg-row.invalid select { border-color: #f85149; }
+.cfg-invalid { color: #ff9b9b; font-size: 12px; margin-top: 6px; }
+.cfg-invalid[hidden] { display: none; }
+.cfg-invalid .fixes { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.bad-count { color: #ff9b9b; font-size: 12px; font-weight: 600; }
+.bad-count[hidden] { display: none; }
+.save-anyway { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.problem-allowed { margin-top: 8px; font-size: 12px; }

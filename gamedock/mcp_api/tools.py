@@ -6,6 +6,7 @@ Note: no `from __future__ import annotations` here on purpose. The MCP SDK build
 schema from the real type annotations of the function.
 """
 import functools
+import json
 import logging
 import time
 from contextvars import ContextVar
@@ -18,6 +19,7 @@ from mcp_types import ToolAnnotations
 from pydantic import BaseModel, Field, ValidationError
 
 from ..errors import GameDockError
+from ..settings_schema import SettingsInvalid
 from ..models import PortMapping, Status
 from ..serialize import catalog_to_dict, delete_result_to_dict, server_to_dict, to_plain
 from ..service import BACKUPS_DIRNAME, DELETED_DIRNAME, GameDockService
@@ -110,7 +112,8 @@ def make_tools(service: GameDockService, confirms: ConfirmationStore, audit: Aud
         """List deployed servers with their status (running, stopped, not_created, error), ports and
         settings. Secret settings are never shown, only whether they are set. `status: running` only means the
         container is up: check `ready` (true = the game can be joined) and `phase` (starting, installing with
-        `progress` percent, ready, unhealthy). `problem` is empty, or a known failure found in the logs of a server that is
+        `progress` percent, ready, unhealthy, failed = the game inside gave up or refused its settings and will not become
+        ready by waiting: read `problem`). `problem` is empty, or a known failure found in the logs of a server that is
         not ready ({title, advice, ...}: read it before guessing). `activity` shows what GameDock is doing right now (e.g. deploying).
         `update_available` says whether a newer game image exists (null = unknown). For SteamCMD games
         `game_version`, `installed_build`, `latest_build` and `game_update_status` (up_to_date, update_available,
@@ -121,8 +124,9 @@ def make_tools(service: GameDockService, confirms: ConfirmationStore, audit: Aud
     @tool(READ, _ann(read=True))
     def get_server_status(server_id: ServerId) -> Result:
         """Current status and settings of one server. `status: running` only means the container is up; the game can
-        be joined when `ready` is true. `phase` is starting, installing (with `progress` percent), ready or
-        unhealthy; `phase_detail` explains it in plain words. `problem` is empty, or (while the game is not ready, or after it was killed
+        be joined when `ready` is true. `phase` is starting, installing (with `progress` percent), ready,
+        unhealthy or failed (the game gave up, e.g. it refused its settings file; `problem` then names the setting, its
+        `value` and the `allowed` values, and `config_path` / `setting_path` where to fix it); `phase_detail` explains it in plain words. `problem` is empty, or (while the game is not ready, or after it was killed
         for memory) `{title, advice, source, where, excerpt}`: a known failure found in the logs, such as "Steam rejected the
         login token", with the next step and one matching log line (passwords hidden). `activity` is what GameDock is doing right now.
         `update_available` is true when the registry has a newer image than the container runs, false when it is current
@@ -176,10 +180,32 @@ def make_tools(service: GameDockService, confirms: ConfirmationStore, audit: Aud
     def read_config_file(server_id: ServerId,
                          path: Annotated[str, Field(description="Path exactly as listed by list_config_files")]) -> Result:
         """Read one config file. Values of sensitive keys are replaced by a placeholder. If the game has not
-        created the file yet (first start not finished) `info.exists` is false and `content` is empty."""
+        created the file yet (first start not finished) `info.exists` is false and `content` is empty.
+        `schema` lists the setting rules from the catalog (type, `choices` = the ONLY accepted values, min/max,
+        description, default, restart_required) and `invalid` the settings whose current value breaks them (a game may
+        refuse to start then). Before changing a setting, use only values from `schema` / get_setting_options; never
+        invent a value (a misspelt word such as "Off" for an enum can stop the game from starting)."""
         d = to_plain(service.read_config_file(server_id, path))
         d.pop("form", None)  # the structured view is for the web page; agents work with the text
         return d
+
+    @tool(READ, _ann(read=True))
+    def get_setting_options(
+        server_id: Annotated[str | None, Field(description="A deployed server (rules of its game, plus its current "
+                                                            "invalid values). Give this OR game_id.")] = None,
+        game_id: Annotated[str | None, Field(description="A catalog game id (rules only). Give this OR server_id.")] = None,
+        path: Annotated[str | None, Field(description="One config file path as listed by list_config_files, or 'fields' "
+                                                       "for the deploy-form settings. Empty = all.")] = None,
+        setting: Annotated[str | None, Field(description="One setting: its path (gameSettings.tombstoneMode), ini key, "
+                                                          "or field name (ASKA_MODE). Empty = all.")] = None,
+    ) -> Result:
+        """The allowed values of a game's settings, from its catalog entry: for each config file the `settings` rules
+        (type string/integer/number/boolean/enum, `choices` with labels and descriptions, min/max, pattern, default,
+        restart_required) and for the deploy-form `fields` the same rules. With server_id also each file's `invalid`
+        settings and current values. ALWAYS call this (or read_config_file's `schema`) before writing a setting, and use
+        only the listed values: write tools refuse anything else and there is no override. A setting without rules here
+        is not checked by GameDock, so take its value from the game's documentation, never guess. Read-only."""
+        return service.get_setting_options(server_id, game_id, path, setting)
 
     @tool(READ, _ann(read=True))
     def get_config_changes(server_id: ServerId,
@@ -287,7 +313,9 @@ def make_tools(service: GameDockService, confirms: ConfirmationStore, audit: Aud
         `log_files`, using the entry's `fail_log_patterns` first and GameDock's built-in ones (out of memory, port in use,
         permission denied, disk full, SteamCMD errors, refused Steam login) after; its `fix` is the next step. A "File
         ownership" check warns when files in the data folder belong to another user (usually root, written by the game
-        container); fix_data_ownership (standard and full modes) repairs that without deleting anything. Read-only."""
+        container); fix_data_ownership (standard and full modes) repairs that without deleting anything. A "Settings valid"
+        check compares the current config files and server settings with the catalog's setting rules and names every value
+        the game would refuse, with the allowed values. Read-only."""
         r = service.verify_game_setup(server_id)
         r["_audit_detail"] = f"{r['overall']}: {r['summary']}"
         return r
@@ -426,7 +454,9 @@ def make_tools(service: GameDockService, confirms: ConfirmationStore, audit: Aud
             description="Settings by field name, see get_catalog_entry. Required secret fields must be given.")] = None,
         start: Annotated[bool, Field(description="Start the server right after creating it")] = False,
     ) -> Result:
-        """Create a new server from a catalog entry (and optionally start it). Fails if a port is already used."""
+        """Create a new server from a catalog entry (and optionally start it). Fails if a port is already used. Settings
+        with value rules (choices, min/max; see get_setting_options with game_id) are checked: read the allowed values
+        first and never invent one; a wrong value is refused with JSON `invalid_settings` (no override)."""
         return server_to_dict(service.deploy(game_id, name, _ports(ports), env or {}, start))
 
     @tool(STANDARD, _ann(idempotent=True))
@@ -452,7 +482,9 @@ def make_tools(service: GameDockService, confirms: ConfirmationStore, audit: Aud
         env: Annotated[dict[str, str] | None, Field(
             description="Settings to change, by field name. Leave a secret out to keep its current value.")] = None,
     ) -> Result:
-        """Change a server's name, ports or settings. Changes apply the next time it starts."""
+        """Change a server's name, ports or settings. Changes apply the next time it starts. Values are checked against
+        the setting rules (get_setting_options): use only allowed values; a wrong one is refused with JSON
+        `invalid_settings` listing them (no override)."""
         return server_to_dict(service.update(server_id, name, _ports(ports), env))
 
     @tool(STANDARD, _ann())
@@ -485,8 +517,28 @@ def make_tools(service: GameDockService, confirms: ConfirmationStore, audit: Aud
                           path: Annotated[str, Field(description="Path exactly as listed by list_config_files")],
                           content: Annotated[str, Field(description="The complete new file content")]) -> Result:
         """Replace a config file's content. The previous version is kept as an automatic .bak copy.
-        Masked placeholders from read_config_file keep the existing secret values."""
+        Masked placeholders from read_config_file keep the existing secret values. Every value is checked against the
+        catalog's setting rules first (see get_setting_options): if any setting breaks them NOTHING is written and the
+        error is JSON with `invalid_settings` [{setting, value, message, allowed, min, max}]. There is no override for AI
+        tools. Prefer update_config_settings for changing a few settings: it touches only those values."""
         return to_plain(service.write_config_file(server_id, path, content))
+
+    @tool(STANDARD, _ann(idempotent=True))
+    def update_config_settings(
+        server_id: ServerId,
+        path: Annotated[str, Field(description="Path exactly as listed by list_config_files")],
+        changes: Annotated[dict[str, str], Field(description="{setting: new value}. The setting is its path as in "
+                                                             "get_setting_options (gameSettings.tombstoneMode), an ini key "
+                                                             "(ServerName) or [Section]key. Values as text ('true', '2', "
+                                                             "'NoTombstone').")],
+    ) -> Result:
+        """Change single settings of a config file and leave every other byte as it is (comments, order, spacing). Read
+        the allowed values with get_setting_options first and use only those; never invent a value. A value outside the
+        rules is refused with JSON `invalid_settings` listing the allowed values, and nothing is written (no override).
+        The server must be stopped unless the file is safe to edit while running. A .bak copy of the old file is kept."""
+        r = service.update_config_settings(server_id, path, changes)
+        r["_audit_detail"] = "changed: " + ", ".join(r.get("changed") or []) if r.get("changed") else "nothing changed"
+        return r
 
     @tool(STANDARD, _ann(idempotent=True))
     def fix_data_ownership(server_id: ServerId) -> Result:
@@ -657,6 +709,12 @@ def wrap_with_audit(d: ToolDef, audit: AuditLog) -> Callable:
         except ToolError as e:
             audit.record(d.name, kwargs, "error", str(e), client)
             raise
+        except SettingsInvalid as e:
+            audit.record(d.name, kwargs, "refused", f"invalid settings: {', '.join(p['setting'] for p in e.problems)}", client)
+            raise ToolError(json.dumps({"error": str(e), "invalid_settings": e.problems,
+                                        "how_to_fix": "Use only the allowed values (get_setting_options lists them). "
+                                                      "Nothing was written. There is no override for AI tools."},
+                                       ensure_ascii=False)) from None
         except GameDockError as e:
             audit.record(d.name, kwargs, "error", str(e), client)
             raise ToolError(str(e)) from None

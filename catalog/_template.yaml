@@ -46,6 +46,10 @@ fields:
     description: Leave empty for no password.   # say what an empty value does; check that the image really means that
     # pattern: "[0-9A-Fa-f]{32}"          # optional: the WHOLE value must match this (a wrong paste is refused; the value is never shown back)
     # pattern_hint: "It is exactly 32 letters and digits (0-9, A-F)."   # what a right value looks like
+  # Allowed values: a setting with a fixed set of words gets choices (exact spelling from the docs; quote off/on/yes/no),
+  # a number gets type and min/max. Wrong values are refused when deploying or editing, also over MCP.
+  # - { name: GAME_MODE, label: Game mode, default: normal, choices: [normal, hard] }   # REPLACE from the image's docs
+  # - { name: MAX_PLAYERS, label: Max players, default: "8", type: integer, min: 1, max: 16 }
 
 # ---- config_files: settings files people may edit with the Config button (path is relative to the server's data folder)
 # config_files:
@@ -55,6 +59,11 @@ fields:
 #     sensitive_keys: [AdminPassword]
 #     hot_edit: false            # false = stop the server before saving
 #     note: "Say here if the image rewrites this file on every start."
+#     schema:                    # allowed values per setting, FROM THE GAME'S DOCUMENTATION (never guessed)
+#       Difficulty: { choices: [Easy, Normal, Hard], default: Normal, description: "World difficulty." }
+#       MaxPlayers: { type: integer, min: 1, max: 32 }
+#       PvP: { type: boolean }
+#       # JSON files: dotted paths such as gameSettings.tombstoneMode; unclear settings: { type: string }
 
 # ---- readiness: log lines that tell "container is up" from "players can join" (read them with the Logs button)
 # ready_log_pattern: "Server is ready"                     # a regular expression

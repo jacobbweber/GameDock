@@ -20,6 +20,7 @@ from ..errors import (
     TooLargeError,
 )
 from ..models import PortMapping
+from ..settings_schema import SettingsInvalid
 from ..serialize import catalog_to_dict, delete_result_to_dict, server_to_dict
 from ..config import Settings
 from ..doctor import run_doctor
@@ -74,6 +75,9 @@ class BackupIn(BaseModel):
 class ConfigWriteIn(BaseModel):
     path: str
     content: str
+    # A person's deliberate "Save anyway" for values outside the catalog's setting rules (the MCP tools have no such
+    # option). Without it such a save is refused with the allowed values.
+    force: StrictBool = False
 
 
 class ConfigBaselineIn(BaseModel):
@@ -218,6 +222,10 @@ def create_app(service: GameDockService, sampler=None, metrics_enabled: bool = F
     @app.exception_handler(CatalogError)
     async def _ce(_: Request, e: CatalogError):
         return JSONResponse({"error": f"catalog problem: {e}"}, status_code=500)
+
+    @app.exception_handler(SettingsInvalid)
+    async def _si(_: Request, e: SettingsInvalid):
+        return JSONResponse({"error": str(e), "invalid_settings": e.problems}, status_code=400)
 
     @app.exception_handler(GameDockError)
     async def _ge(_: Request, e: GameDockError):
@@ -443,7 +451,7 @@ def create_app(service: GameDockService, sampler=None, metrics_enabled: bool = F
 
     @app.put("/api/servers/{server_id}/config/file")
     def write_config(server_id: str, body: ConfigWriteIn):
-        return asdict(service.write_config_file(server_id, body.path, body.content))
+        return asdict(service.write_config_file(server_id, body.path, body.content, force=body.force))
 
     @app.get("/api/servers/{server_id}")
     def get_server(server_id: str):

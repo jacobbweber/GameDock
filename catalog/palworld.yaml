@@ -46,15 +46,115 @@ config_files:               # editable from the Config button (example path; ver
       full start.
     format: ini
     sensitive_keys: [AdminPassword, ServerPassword]
+    # Allowed values (0.6.3). Sources: Pocketpair's server guide https://docs.palworldgame.com/settings-and-operation/configuration/
+    # (DeathPenalty, RandomizerType, LogFormatType, the b... switches, the ranges named there) and the image README
+    # https://github.com/thijsvanloef/palworld-server-docker (Difficulty None/Normal/Difficult, players 1-32, booleans).
+    # Rates are plain numbers: neither source gives a range, so none is enforced. Unlisted settings are not checked.
+    schema:
+      Difficulty: { choices: [None, Normal, Difficult], description: "Game difficulty (image README). Other words are not accepted." }
+      DeathPenalty:
+        choices:
+          - { value: None, label: Drop nothing }
+          - { value: Item, label: "Drop items, keep equipment" }
+          - { value: ItemAndEquipment, label: Drop items and equipment }
+          - { value: All, label: Drop items and the Pals in the party }
+        default: Item
+        description: What players drop when they die.
+      RandomizerType: { choices: [None, Region, All], default: None, description: "Pal spawn randomization: none, per region, or fully random." }
+      LogFormatType: { choices: [Text, Json], default: Text, description: Log format. }
+      ServerPlayerMaxNum: { type: integer, min: 1, max: 32, description: "Maximum players (the image allows 1-32)." }
+      BaseCampMaxNumInGuild: { type: integer, max: 10, description: "Bases per guild (default 4, max 10)." }
+      BaseCampWorkerMaxNum: { type: integer, max: 50, description: "Pals working per base (max 50)." }
+      ServerReplicatePawnCullDistance: { type: number, min: 5000, max: 15000, description: "Pal sync distance in cm (5000-15000)." }
+      FishingDifficultyRate: { type: number, min: 0.1, max: 1.0, description: "Fishing difficulty (0.1-1.0)." }
+      PublicPort: { type: integer, min: 1, max: 65535 }
+      RCONPort: { type: integer, min: 1, max: 65535 }
+      RESTAPIPort: { type: integer, min: 1, max: 65535 }
+      MaxBuildingLimitNum: { type: integer, description: "Buildings per player; 0 = unlimited." }
+      GuildPlayerMaxNum: { type: integer }
+      ChatPostLimitPerMinute: { type: integer }
+      SupplyDropSpan: { type: number, description: Minutes between supply drops. }
+      bAllowClientMod: { type: boolean }
+      bEnableBuildingPlayerUIdDisplay: { type: boolean }
+      bIsShowJoinLeftMessage: { type: boolean }
+      bIsUseBackupSaveData: { type: boolean }
+      RCONEnabled: { type: boolean }
+      RESTAPIEnabled: { type: boolean }
+      bAllowEnemyCampSpawnNearBaseCamp: { type: boolean }
+      bAllowEnhanceStat_Attack: { type: boolean }
+      bAllowEnhanceStat_Health: { type: boolean }
+      bAllowEnhanceStat_Stamina: { type: boolean }
+      bAllowEnhanceStat_Weight: { type: boolean }
+      bAllowEnhanceStat_WorkSpeed: { type: boolean }
+      bAllowGlobalPalboxExport: { type: boolean }
+      bAllowGlobalPalboxImport: { type: boolean }
+      bAutoResetGuildNoOnlinePlayers: { type: boolean }
+      bBuildAreaLimit: { type: boolean }
+      bCharacterRecreateInHardcore: { type: boolean }
+      bDisplayPvPItemNumOnWorldMap_BaseCamp: { type: boolean }
+      bDisplayPvPItemNumOnWorldMap_Player: { type: boolean }
+      bEnableFastTravel: { type: boolean }
+      bEnableFastTravelOnlyBaseCamp: { type: boolean }
+      bEnableInvaderEnemy: { type: boolean }
+      bEnableVoiceChat: { type: boolean }
+      bExistPlayerAfterLogout: { type: boolean }
+      bHardcore: { type: boolean }
+      bInvisibleOtherGuildBaseCampAreaFX: { type: boolean }
+      bIsPvP: { type: boolean }
+      bIsRandomizerPalLevelRandom: { type: boolean }
+      bIsStartLocationSelectByMap: { type: boolean }
+      bShowPlayerList: { type: boolean }
+      bAdditionalDropItemWhenPlayerKillingInPvPMode: { type: boolean }
+      bPalLost: { type: boolean }
+      bEnablePlayerToPlayerDamage: { type: boolean }
+      bEnableFriendlyFire: { type: boolean }
+      bActiveUNKO: { type: boolean }
+      bEnableAimAssistPad: { type: boolean }
+      bEnableAimAssistKeyboard: { type: boolean }
+      bIsMultiplay: { type: boolean }
+      bCanPickupOtherGuildDeathPenaltyDrop: { type: boolean }
+      bEnableNonLoginPenalty: { type: boolean }
+      bEnableDefenseOtherGuildPlayer: { type: boolean }
+      bUseAuth: { type: boolean }
+      DayTimeSpeedRate: { type: number }
+      NightTimeSpeedRate: { type: number }
+      ExpRate: { type: number }
+      PalCaptureRate: { type: number }
+      PalSpawnNumRate: { type: number }
+      PalDamageRateAttack: { type: number }
+      PalDamageRateDefense: { type: number }
+      PlayerDamageRateAttack: { type: number }
+      PlayerDamageRateDefense: { type: number }
+      PlayerStomachDecreaceRate: { type: number }
+      PlayerStaminaDecreaceRate: { type: number }
+      PlayerAutoHPRegeneRate: { type: number }
+      PlayerAutoHpRegeneRateInSleep: { type: number }
+      PalStomachDecreaceRate: { type: number }
+      PalStaminaDecreaceRate: { type: number }
+      PalAutoHPRegeneRate: { type: number }
+      PalAutoHpRegeneRateInSleep: { type: number }
+      BuildObjectHpRate: { type: number }
+      BuildObjectDamageRate: { type: number }
+      BuildObjectDeteriorationDamageRate: { type: number }
+      CollectionDropRate: { type: number }
+      CollectionObjectHpRate: { type: number }
+      CollectionObjectRespawnSpeedRate: { type: number }
+      EnemyDropItemRate: { type: number }
+      EquipmentDurabilityDamageRate: { type: number }
+      ItemWeightRate: { type: number }
+      WorkSpeedRate: { type: number }
+      MonsterFarmActionSpeedRate: { type: number }
+      ItemCorruptionMultiplier: { type: number }
+      RespawnPenaltyTimeScale: { type: number }
     # hot_edit: false  -> the server must be stopped before saving
 # Run the game as the user GameDock runs as, so the files it writes can be backed up, edited and deleted without
 # repairs. Documented in https://github.com/thijsvanloef/palworld-server-docker#environment-variables (PUID/PGID, default 1000).
 user_env: { PUID: uid, PGID: gid }
 fields:
   - { name: SERVER_NAME, label: Server name, default: "My Palworld Server", required: true }
-  - { name: PLAYERS, label: Max players, default: "16" }
+  - { name: PLAYERS, label: Max players, default: "16", type: integer, min: 1, max: 32 }
   - { name: SERVER_PASSWORD, label: Server password, secret: true,
       description: Leave empty for no password. }
   - { name: ADMIN_PASSWORD, label: Admin password, secret: true, required: true }
-  - { name: DISABLE_GENERATE_SETTINGS, label: Keep hand-edited settings file, default: "false",
+  - { name: DISABLE_GENERATE_SETTINGS, label: Keep hand-edited settings file, default: "false", choices: ["false", "true"],
       description: "false = the image rewrites PalWorldSettings.ini from these settings at every start. Set to true after the first full start to keep edits made in the config editor." }

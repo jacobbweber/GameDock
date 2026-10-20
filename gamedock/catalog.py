@@ -10,6 +10,7 @@ from typing import Mapping
 
 import yaml
 
+from . import settings_schema as ss
 from .errors import CatalogError
 from .steam import APP_ID_RE, BRANCH_RE
 from .models import (
@@ -47,6 +48,14 @@ def _parse_field(f: object, source: str) -> EnvField:
     default = "" if f.get("default") is None else str(f["default"])
     if pattern and default and not _full_match(pattern, default):
         raise CatalogError(f"{source}: the default of {f['name']} does not match its own pattern")
+    rules = None
+    if any(f.get(k) not in (None, "", []) for k in ("type", "choices", "min", "max")):
+        raw_rules = {k: f[k] for k in ("type", "choices", "min", "max") if f.get(k) not in (None, "", [])}
+        rules = ss.parse_spec(f["name"], raw_rules, source)
+        rules = replace(rules, label=str(f.get("label") or f["name"]))
+        if default and ss.check_value(rules, default):
+            raise CatalogError(f"{source}: the default of {f['name']} ({default!r}) is not allowed by its own rules "
+                               f"({rules.allowed_text()})")
     return EnvField(
         name=f["name"],
         label=str(f.get("label") or f["name"]),
@@ -56,10 +65,11 @@ def _parse_field(f: object, source: str) -> EnvField:
         description=str(f.get("description", "")),
         pattern=pattern,
         pattern_hint=hint,
+        rules=rules,
     )
 
 
-KEY_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
+KEY_RE = re.compile(r"^[A-Za-z0-9_.\-](?:[A-Za-z0-9_. \-]{0,62}[A-Za-z0-9_.\-])?$")  # 0.6.3: inner spaces ("authentication token")
 MAX_HINT = 300
 MAX_FAIL_PATTERNS = 12
 MAX_LOG_FILES = 6
@@ -87,9 +97,14 @@ def _parse_config_file(c: object, source: str) -> ConfigFile:
     keys = c.get("sensitive_keys") or []
     if not isinstance(keys, list) or not all(isinstance(k, str) and KEY_RE.match(k) for k in keys):
         raise CatalogError(f"{source}: bad sensitive_keys in config file {path!r}")
+    schema = ss.parse_schema(c.get("schema"), f"{source}: config file {path!r}")
+    if schema and fmt in ("text", "yaml"):
+        raise CatalogError(f"{source}: config file {path!r} has a schema but format {fmt}; schemas work with ini and json "
+                           "files (set format)")
     return ConfigFile(path=str(pp), label=str(c.get("label") or path), format=fmt,
                       sensitive_keys=tuple(keys), hot_edit=bool(c.get("hot_edit", False)),
-                      note=str(c.get("note") or "").strip())
+                      note=str(c.get("note") or "").strip(), schema=schema,
+                      schema_none="schema" in c and c.get("schema") in ({},) and not schema)
 
 
 MAX_PATTERN_LEN = 300
@@ -265,9 +280,10 @@ ENTRY_KEYS = ("id", "name", "image", "description", "notes", "ports", "volumes",
               "run_as_user", "user_env")
 PORT_KEYS = ("protocol", "host", "container")
 VOLUME_KEYS = ("host", "container")
-FIELD_KEYS = ("name", "label", "default", "secret", "required", "description", "pattern", "pattern_hint")
+FIELD_KEYS = ("name", "label", "default", "secret", "required", "description", "pattern", "pattern_hint", "type", "choices",
+              "min", "max")
 FAIL_PATTERN_KEYS = ("pattern", "title", "advice")
-CONFIG_FILE_KEYS = ("path", "label", "format", "sensitive_keys", "hot_edit", "note")
+CONFIG_FILE_KEYS = ("path", "label", "format", "sensitive_keys", "hot_edit", "note", "schema")
 
 # Things a catalog file must never ask for. GameDock always creates plain, unprivileged containers on Docker's
 # default network, so these keys do nothing; they are rejected (for every entry, not only AI-added ones) so nobody
@@ -518,7 +534,8 @@ def entry_to_dict(e: CatalogEntry) -> dict:
         "user_env": dict(e.user_env),
         "config_files": [
             {"path": c.path, "label": c.label, "format": c.format,
-             "sensitive_keys": list(c.sensitive_keys), "hot_edit": c.hot_edit, "note": c.note}
+             "sensitive_keys": list(c.sensitive_keys), "hot_edit": c.hot_edit, "note": c.note,
+             "schema": ss.schema_to_yaml(c.schema)}
             for c in e.config_files
         ],
         "ports": [{"protocol": p.protocol, "host": p.host, "container": p.container} for p in e.ports],
@@ -527,10 +544,15 @@ def entry_to_dict(e: CatalogEntry) -> dict:
         "fields": [
             {"name": f.name, "label": f.label, "default": f.default, "secret": f.secret,
              "required": f.required, "description": f.description, "pattern": f.pattern,
-             "pattern_hint": f.pattern_hint}
+             "pattern_hint": f.pattern_hint, **_field_rules_yaml(f)}
             for f in e.fields
         ],
     }
+
+
+def _field_rules_yaml(f: EnvField) -> dict:
+    d = f.rules.to_yaml() if f.rules is not None else {}
+    return {"type": d.get("type", ""), "choices": d.get("choices", []), "min": d.get("min"), "max": d.get("max")}
 
 
 def load_catalog(directory: Path, errors: list[tuple[str, str]] | None = None,

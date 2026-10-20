@@ -420,3 +420,51 @@ def apply_changes(text: str, cf: ConfigFile, changes: dict[str, str]) -> tuple[s
     for start, end, rendered in sorted(edits, reverse=True):
         out = out[:start] + rendered + out[end:]
     return out, changed
+
+
+# ------------------------------------------------------------------ setting rules (0.6.3, see settings_schema.py)
+def validate_text(text: str, cf: ConfigFile) -> list[dict]:
+    """Every setting in `text` whose value breaks the catalog's rules for this file (empty list = fine or no rules).
+    Masked secrets are skipped. JSON files must also parse."""
+    from . import settings_schema as ss
+    if not cf.schema:
+        return []
+    kind = detect_kind(text, cf)
+    if kind is None:
+        return []
+    out: list[dict] = []
+    for it in _scan(text, cf, kind) or []:
+        spec = ss.find_spec(cf.schema, it.id, it.key)
+        if spec is None or (it.sensitive and it.value == MASK):
+            continue
+        value = it.value
+        if kind == KIND_JSON and spec.type in ("enum", "string") and it.type != "text" and not spec.choices:
+            continue
+        err = ss.check_value(spec, value)
+        if err is None and kind == KIND_JSON and spec.type == "boolean" and it.type != "bool":
+            err = f"{value!r} is not a valid value for {spec.label or spec.path}: it must be true or false (without quotes)."
+        if err is None and kind == KIND_JSON and spec.type in ("integer", "number") and it.type != "number":
+            err = f"{value!r} is not a valid value for {spec.label or spec.path}: it must be a number (without quotes)."
+        if err:
+            out.append(ss.problem_dict(spec, value, err, cf.path, it.id))
+    return out
+
+
+def annotate(form: ConfigForm | None, cf: ConfigFile) -> ConfigForm | None:
+    """The form with each field's rules (`setting`) and, for a value that breaks them, `invalid` filled in."""
+    from dataclasses import replace as _replace
+
+    from . import settings_schema as ss
+    if form is None or not cf.schema:
+        return form
+    fields = []
+    for f in form.fields:
+        spec = ss.find_spec(cf.schema, f.id, f.key)
+        if spec is None:
+            fields.append(f)
+            continue
+        invalid = ""
+        if not (f.sensitive and f.value == MASK):
+            invalid = ss.check_value(spec, f.value) or ""
+        fields.append(_replace(f, setting=spec.to_dict(), invalid=invalid))
+    return _replace(form, fields=tuple(fields))

@@ -33,7 +33,7 @@ DIAG_MAX_LOG_LINES = 200
 _DRIFT_SKIP = {"id", "name", "description", "notes", "update_note",
                # read-only hints that always come from the current entry (see ProblemsMixin)
                "fail_log_patterns", "log_files", "builtin_fail_patterns"}
-_FIELD_RULE_KEYS = ("pattern", "pattern_hint")   # format rules of a setting: they check typing, not the container
+_FIELD_RULE_KEYS = ("pattern", "pattern_hint", "type", "choices", "min", "max")   # value rules: they check typing, not the container
 _SNAPSHOT_OPTIONAL = {"update_note", "backup_stop_first", "save_command", "steam_app_id", "steam_branch", "steam_manifest_dir",
                       "version_log_pattern", "game_update_method", "installed_build_file", "ready_log_pattern",
                       "progress_log_pattern"}
@@ -72,6 +72,8 @@ class OpsMixin:
         now = entry_to_dict(current)
         for d in (snap, now):
             d["fields"] = [{k: v for k, v in f.items() if k not in _FIELD_RULE_KEYS} for f in d.get("fields", [])]
+            # setting rules of config files always come from the current entry (see _with_current_schema)
+            d["config_files"] = [{k: v for k, v in c.items() if k not in ("schema", "settings")} for c in d.get("config_files", [])]
         out = []
         for k, v in now.items():
             if k in _DRIFT_SKIP or (k in _SNAPSHOT_OPTIONAL and k not in inst.template):
@@ -261,6 +263,7 @@ class OpsMixin:
         if hints.steam_app_id or hints.installed_build_file:
             self._check_steam(checks, inst, hints, running, text, ready_now and game_ready)
         self._check_config_files(checks, inst, t, running)
+        self._check_setting_values(checks, inst, t)
         self._check_ports_published(checks, inst, state, details)
         self._check_volumes(checks, inst, t, running, details)
         self._check_settings(checks, inst, t)
@@ -622,6 +625,53 @@ class OpsMixin:
                                f"example {self._rel(base, example)}. Backups, the config editor, wipe and delete may need "
                                f"to repair them first (GameDock does that automatically); {runs_as}.",
                                fix, action="fix_ownership" if self.ownership_supported() else ""))
+
+    # -- values against the catalog's setting rules (0.6.3)
+    def _check_setting_values(self, checks, inst, t) -> None:
+        from . import settings_schema as ss
+        files = [c for c in self.config_schema(inst) if c.schema]
+        tt = self._with_current_field_rules(inst, t)
+        ruled = [f for f in tt.fields if f.rules is not None]
+        if not files and not ruled:
+            return      # the entry declares no setting rules (the catalog lint warns about that, not this checklist)
+        bad: list[dict] = []
+        checked, missing = 0, []
+        base = self._data_dir_of(inst)
+        for c in files:
+            try:
+                r = cfg.read_config(base, c)
+            except GameDockError:
+                continue
+            if not r.exists:
+                missing.append(c.path)
+                continue
+            checked += 1
+            try:
+                bad.extend(forms.validate_text(r.content, c))
+            except Exception:  # noqa: BLE001 - only informational
+                continue
+        for f in ruled:
+            v = inst.env.get(f.name, f.default)
+            if v and not f.secret:
+                err = ss.check_value(f.rules, v)
+                if err:
+                    bad.append(ss.problem_dict(f.rules, v, err) | {"setting": f.name, "file": "server settings (Edit)"})
+        if bad:
+            detail = " ".join(f"{p.get('file', '')}: {p['message']}".strip(": ") for p in bad[:6])
+            checks.append(ck.Check("settings-valid", "Settings valid", ck.FAIL, detail,
+                                   "Open Config (or Edit for server settings) and choose one of the allowed values; the form "
+                                   "marks the wrong ones and offers them. The game may refuse to start until then."))
+            return
+        what = []
+        if checked:
+            what.append(f"{checked} config file{'s' if checked != 1 else ''}")
+        if ruled:
+            what.append(f"{len(ruled)} server setting{'s' if len(ruled) != 1 else ''}")
+        detail = ("Every value with a rule is allowed (" + " and ".join(what) + " checked)." if what else
+                  "Nothing to check yet.")
+        if missing:
+            detail += f" Not created yet: {', '.join(missing)}."
+        checks.append(ck.Check("settings-valid", "Settings valid", ck.PASS if checked or ruled else ck.WARN, detail))
 
     # -- required settings
     def _check_settings(self, checks, inst, t) -> None:

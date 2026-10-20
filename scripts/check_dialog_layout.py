@@ -60,8 +60,12 @@ def enshrouded_json() -> str:
     for k in FACTORS:
         if k.startswith("enable") or k.startswith("pacify"):
             gs[k] = True
-        elif k in ("tombstoneMode", "weatherFrequency", "fishingDifficulty", "randomSpawnerAmount", "tamingStartleRepercussion"):
+        elif k in ("weatherFrequency", "fishingDifficulty", "randomSpawnerAmount", "aggroPoolAmount"):
             gs[k] = "Normal"
+        elif k == "tombstoneMode":
+            gs[k] = "AddBackpackMaterials"     # valid values only (0.6.3 checks them)
+        elif k == "tamingStartleRepercussion":
+            gs[k] = "LoseSomeProgress"
         elif k.endswith("Duration"):
             gs[k] = 1800000000000
         else:
@@ -220,6 +224,8 @@ def run(shots: Path | None = None, prefix: str = "gamedock-051", suffix: str = "
                     loc.scroll_into_view_if_needed()
                     if how == "toggle":
                         loc.evaluate("e => e.click()")
+                    elif loc.evaluate("e => e.tagName") == "SELECT":     # 0.6.3: settings with choices are dropdowns
+                        loc.select_option(how)
                     else:
                         loc.fill(how)
                 expect(pg.locator(".cfg-row.changed")).to_have_count(4)
@@ -254,8 +260,8 @@ def run(shots: Path | None = None, prefix: str = "gamedock-051", suffix: str = "
                 for f in ["gameSettings.playerHealthFactor", "gameSettings.playerManaFactor", "gameSettings.playerStaminaFactor",
                           "gameSettings.playerBodyHeatFactor", "gameSettings.playerDivingTimeFactor", "gameSettings.shroudTimeFactor",
                           "gameSettings.miningDamageFactor", "gameSettings.perkCostFactor", "gameSettings.enemyDamageFactor",
-                          "gameSettings.bossHealthFactor", "gameSettings.threatBonus", "gameSettings.aggroPoolAmount"]:
-                    pg.locator(f'[id="cfg-{f}"]').fill("3")
+                          "gameSettings.bossHealthFactor", "gameSettings.threatBonus", "gameSettings.experienceCombatFactor"]:
+                    pg.locator(f'[id="cfg-{f}"]').fill("1.5")     # inside every factor's allowed range (0.6.3 rules)
                 pg.wait_for_timeout(250)
                 if c.box() != before:
                     c.fail("config form, 16 changes", f"dialog size changed: {before} -> {c.box()}")
@@ -291,6 +297,8 @@ def run(shots: Path | None = None, prefix: str = "gamedock-051", suffix: str = "
                     loc.scroll_into_view_if_needed()
                     if how == "toggle":
                         loc.evaluate("e => e.click()")
+                    elif loc.evaluate("e => e.tagName") == "SELECT":     # 0.6.3: settings with choices are dropdowns
+                        loc.select_option(how)
                     else:
                         loc.fill(how)
                 expect(pg.locator(".cfg-row.nondefault")).to_have_count(4)      # also live, before saving

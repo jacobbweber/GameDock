@@ -412,7 +412,7 @@ def test_endpoints(service, deployed, tmp_path):
     assert [f["id"] for f in r["form"]["fields"]] == ["name", "AdminPassword", "slots"]
     assert r["form"]["fields"][2] == {"id": "slots", "key": "slots", "label": "Slots", "value": "8", "type": "number",
                                       "sensitive": False, "group": "", "default": "8", "default_set": None,
-                                      "differs": False, "status": "same"}
+                                      "differs": False, "status": "same", "setting": None, "invalid": ""}
     assert r["baseline"]["available"] and r["baseline"]["just_recorded"] and r["form"]["differing"] == 0
     p = c.post("/api/servers/one/config/form", json={"path": INI, "changes": {"slots": "9"}}).json()
     assert p["changed"] == ["slots"] and "slots=9" in p["content"] and "s3cret" not in json.dumps(p)

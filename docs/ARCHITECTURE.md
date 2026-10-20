@@ -129,6 +129,14 @@ All read-only; the web page and the MCP tools call the same service methods.
 
 ## Testing
 
+## Setting rules (0.6.3)
+
+- **`settings_schema.py`** is pure: `SettingSpec` / `Choice`, `parse_schema` (catalog errors for malformed rules, including YAML booleans among word choices), `check_value`, `find_spec` (JSON dotted path, ini key or `[Section]key`) and `find_by_name` (the name a game prints in its error). `SettingsInvalid` is a `ValidationError` carrying `problems`.
+- **Catalog.** `ConfigFile.schema` / `schema_none` and `EnvField.rules`. `service._config_file` / `config_schema` replace a server's snapshot schema with the current catalog entry's (as with problem hints), so rules reach deployed servers without a redeploy.
+- **Checks.** `configforms.validate_text` checks a whole file (masked values skipped), `annotate` marks form fields (`setting`, `invalid`). `write_config_file` raises `SettingsInvalid` unless `force` (web only; logged); `update_config_settings` edits single settings via `apply_changes`; `_merge_env` checks field rules on deploy/update. The web app maps `SettingsInvalid` to 400 `{error, invalid_settings}`; MCP to a ToolError with that JSON (audit status `refused`).
+- **Failed to start.** `problems.py` has built-in `config-invalid` and `process-gave-up` patterns (`FATAL_IDS`); `config_error_detail` extracts setting, value and allowed values; `problem_service._locate_setting` maps them to `config_path`/`setting_path`. `_info` turns a fatal problem on a running, not ready server into `readiness.PHASE_FAILED`. `ops_service._check_setting_values` adds the "Settings valid" row.
+- **MCP.** `get_setting_options` (read) and `update_config_settings` (standard): read_only 25, standard 40, full 44 tools.
+
 `scripts/make_screenshots.py` (and `make_screenshots_authoring.py` for the review step) start the real app on the fake backend and drives it with a headless browser (Playwright, not part of the normal test run); it doubles as a browser smoke test for the progress UI, log viewer and config form. `make_screenshots_defaults.py` shows the 0.5.2 "Not default" markers and `make_screenshots_checks.py` the 0.6.0 Check setup dialog, the port-conflict note and the diagnostics. `scripts/lint_catalog.py` lints the catalog (the tests run it).
 
 `scripts/check_dialog_layout.py` is the layout check for dialogs: every dialog is built by `openDialog()` as title, one scrolling body and a footer (CSS classes `.dlg`, `.dialog-body`, `.dialog-foot`), and the check asserts a fixed size, visible buttons and a single scroll area at 1000x880, 700x500 and 390x760 (it also runs under pytest, skipped without Playwright and Chrome).

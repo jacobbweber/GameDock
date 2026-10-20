@@ -34,10 +34,27 @@ class Problem:
     source: str            # catalog | builtin | docker
     where: str = ""        # "the container log" or the file path the line came from
     excerpt: str = ""      # the matching line, secrets hidden
+    # 0.6.3: the game cannot start at all (refused its settings, or its process manager gave up). The card then says
+    # "Failed to start" instead of "Starting". Taken from the log when it says so: the setting, its value, the allowed
+    # values; config_path / setting_path are filled in by the service from the catalog's setting rules.
+    fatal: bool = False
+    setting: str = ""
+    value: str = ""
+    allowed: tuple[str, ...] = ()
+    config_path: str = ""
+    setting_path: str = ""
 
     def to_dict(self) -> dict:
-        return {"id": self.id, "title": self.title, "advice": self.advice, "source": self.source,
-                "where": self.where, "excerpt": self.excerpt}
+        d = {"id": self.id, "title": self.title, "advice": self.advice, "source": self.source,
+             "where": self.where, "excerpt": self.excerpt}
+        if self.fatal:
+            d["fatal"] = True
+        for k in ("setting", "value", "config_path", "setting_path"):
+            if getattr(self, k):
+                d[k] = getattr(self, k)
+        if self.allowed:
+            d["allowed"] = list(self.allowed)
+        return d
 
     @property
     def sentence(self) -> str:
@@ -47,6 +64,16 @@ class Problem:
 
 # id, regular expression (case-insensitive), title, advice
 _BUILTIN: tuple[tuple[str, str, str, str], ...] = (
+    # 0.6.3: a settings file the game refuses (first, so it wins over "the process gave up" that follows it in the log)
+    ("config-invalid", r"\bFailed to parse (?:Config|enum|config|settings|the config)\b|\bSupported '?[\w.]+'? values\b|"
+                       r"\bInternal Error: Failed to parse\b|\bInvalid value '[^'\n]{0,80}'[^\n]{0,40}\b(?:enum|setting|config)\b",
+     "The game refused its settings file and cannot start.",
+     "A setting has a value the game does not accept. Open Config, fix the value (the form shows the allowed ones), save "
+     "and start the server again."),
+    ("process-gave-up", r"\bgave up: [\w.:-]+ entered FATAL state\b|\bentered FATAL state, too many start retries\b",
+     "The game failed to start: it stopped again right after each try, so its process manager gave up.",
+     "The container is still up, but the game inside is not running. Look a few lines above in the Logs for the reason "
+     "(often a settings file the game cannot read), fix it, then stop and start the server."),
     ("steam-state", r"Error! App '?\d+'? state is 0x(?:202|402|602)\b",
      "SteamCMD could not finish installing or updating the game files.",
      "This usually means the disk is full, the data folder cannot be written, or the download was interrupted. Check the "
@@ -102,6 +129,42 @@ _BUILTIN: tuple[tuple[str, str, str, str], ...] = (
 BUILTIN_PATTERNS: tuple[FailPattern, ...] = tuple(FailPattern("(?i)" + rx, title, advice) for _, rx, title, advice in _BUILTIN)
 _BUILTIN_IDS = tuple(i for i, *_ in _BUILTIN)
 BUILTIN_IDS = _BUILTIN_IDS
+FATAL_IDS = frozenset({"config-invalid", "process-gave-up"})
+
+# What a game says about a bad setting (Enshrouded: "Failed to parse enum 'TombstoneMode: Invalid value 'Off'." and
+# "Supported 'TombstoneMode' values: AddBackpackMaterials, Everything, NoTombstone"). Kept loose on purpose.
+_BAD_VALUE_RES = (
+    re.compile(r"enum '(?P<setting>[\w.\[\]-]{1,80}):? *Invalid value '(?P<value>[^'\n]{0,80})'", re.I),
+    re.compile(r"Invalid value '(?P<value>[^'\n]{0,80})' for (?:enum |setting |key |option )?'?(?P<setting>[\w.\[\]-]{1,80})'?", re.I),
+    re.compile(r"'?(?P<setting>[\w.\[\]-]{1,80})'?:? *Invalid value '(?P<value>[^'\n]{0,80})'", re.I),
+)
+_SUPPORTED_RE = re.compile(r"Supported '?(?P<setting>[\w.\[\]-]{1,80})'? values:? *(?P<values>[^\n]{1,400})", re.I)
+
+
+def config_error_detail(lines: Sequence[str]) -> tuple[str, str, tuple[str, ...]] | None:
+    """(setting, value, allowed values) from the newest lines that name a refused setting, or None."""
+    setting = value = ""
+    allowed: tuple[str, ...] = ()
+    for line in reversed(lines):
+        if not allowed:
+            m = _SUPPORTED_RE.search(line)
+            if m and (not setting or m.group("setting").lower() == setting.lower()):
+                vals = [v.strip(" .'\"[]") for v in re.split(r"[,|]", m.group("values"))]
+                allowed = tuple(v for v in vals if v and len(v) <= 80)[:60]
+                setting = setting or m.group("setting")
+        if not value:
+            for rx in _BAD_VALUE_RES:
+                m = rx.search(line)
+                if m:
+                    if setting and m.group("setting").lower() != setting.lower():
+                        continue
+                    setting, value = m.group("setting"), m.group("value")
+                    break
+        if value and allowed:
+            break
+    if not setting:
+        return None
+    return setting, value, allowed
 
 
 def _lines(text: str) -> list[str]:
@@ -151,7 +214,33 @@ def scan(sources: Sequence[tuple[str, str]], catalog_patterns: Iterable[FailPatt
                     shown = ck.redact_text(line.strip(), secret_values)
                     if len(shown) > MAX_EXCERPT:
                         shown = shown[:MAX_EXCERPT - 1] + "\u2026"
-                    return Problem(pid, fp.title, fp.advice, source, where, shown)
+                    p = Problem(pid, fp.title, fp.advice, source, where, shown,
+                                fatal=pid in FATAL_IDS or (source == SOURCE_CATALOG and _looks_like_config_error(shown)))
+                    return _with_config_detail(p, [ln for _, ls in prepared for ln in ls])
     return None
+
+
+def _with_config_detail(p: Problem, lines: list[str]) -> Problem:
+    """Name the refused setting, its value and the allowed values when the log says them."""
+    from dataclasses import replace as _replace
+    if p.id not in FATAL_IDS and not (p.source == SOURCE_CATALOG and _looks_like_config_error(p.excerpt)):
+        return p
+    got = config_error_detail(lines[-400:])
+    if got is None:
+        return p
+    setting, value, allowed = got
+    title = (f"The game refused its settings: {value!r} is not a valid value for {setting}." if value else
+             f"The game refused its settings: the value of {setting} is not valid.")
+    advice = ((f"Allowed values: {', '.join(allowed)}. " if allowed else "")
+              + "Open Config, choose one of the allowed values for this setting, save, and start the server again.")
+    if p.source == SOURCE_CATALOG:
+        title, advice = p.title, (f"{p.advice} " if p.advice else "") + (f"Here: {setting} = {value!r}" if value else f"Setting: {setting}") \
+            + (f"; allowed: {', '.join(allowed)}." if allowed else ".")
+    return _replace(p, id="config-invalid" if p.source != SOURCE_CATALOG else p.id, title=title[:300], advice=advice[:900],
+                    fatal=True, setting=setting, value=value, allowed=allowed)
+
+
+def _looks_like_config_error(text: str) -> bool:
+    return bool(re.search(r"Failed to parse|Invalid value|Supported .{0,80} values|entered FATAL state", text or "", re.I))
 
 

@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 if TYPE_CHECKING:
     from .backups import BackupInfo
+    from .settings_schema import SettingSpec
 
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 IMAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}$")  # name[:tag][@digest], may start with a registry host
@@ -64,6 +65,9 @@ class EnvField:
     # right value looks like. The value itself is never echoed back in the error.
     pattern: str = ""
     pattern_hint: str = ""
+    # Optional value rules (0.6.3): type (string | integer | number | boolean | enum), choices, min, max. Built from the
+    # field's `type`, `choices`, `min` and `max` keys; None = no rules. See gamedock/settings_schema.py.
+    rules: "SettingSpec | None" = None
 
 
 @dataclass(frozen=True)
@@ -91,6 +95,9 @@ class ConfigFile:
     sensitive_keys: tuple[str, ...] = ()  # values of these keys are masked in the editor
     hot_edit: bool = False  # True = safe to edit while the server runs
     note: str = ""  # optional warning shown above the editor (for example "the image regenerates this file")
+    # Optional value rules per setting (0.6.3): {path: SettingSpec}. See gamedock/settings_schema.py.
+    schema: tuple["SettingSpec", ...] = ()
+    schema_none: bool = False  # `schema: {}` written on purpose: the file holds no settings (e.g. a player list)
 
 
 @dataclass(frozen=True)
@@ -313,6 +320,10 @@ class FormField:
     default_set: bool | None = None   # sensitive settings only: whether a value was set in the defaults
     differs: bool = False             # the value differs from the recorded default (or the setting is new)
     status: str = "same"              # same | changed | new (not in the recorded defaults)
+    # 0.6.3: the catalog's rules for this setting (type, choices, min/max, description, restart_required) and, when the
+    # current value breaks them, a plain sentence saying so ("" = fine or no rules).
+    setting: dict | None = None
+    invalid: str = ""
 
 
 @dataclass(frozen=True)
@@ -359,6 +370,8 @@ class ConfigContent:
     note: str
     form: "ConfigForm | None" = None  # None: this file's format has no structured view (use the raw text)
     baseline: "BaselineInfo | None" = None
+    schema: tuple = ()                # 0.6.3: the setting rules of this file (dicts), from the CURRENT catalog entry
+    invalid: tuple = ()               # 0.6.3: settings in the file whose value breaks those rules (dicts)
 
 
 @dataclass(frozen=True)
@@ -367,6 +380,7 @@ class ConfigFormResult:
     content: str          # the text with the requested changes applied (sensitive values still masked)
     changed: tuple[str, ...]  # ids of the fields that differ from the text that was sent
     baseline: "BaselineInfo | None" = None
+    invalid: tuple = ()       # 0.6.3: settings of `content` whose value breaks the rules (dicts)
 
 
 @dataclass(frozen=True)
@@ -386,6 +400,7 @@ class ConfigSaveResult:
     backup: str | None
     running: bool
     note: str
+    forced: tuple = ()        # 0.6.3: invalid settings saved anyway on purpose (web page only, never MCP)
 
 
 

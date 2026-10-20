@@ -2,6 +2,27 @@
 
 All notable changes. Dates are 2026.
 
+## 0.6.3: allowed setting values, enforced everywhere (also for AI agents), and "Failed to start"
+
+Built from a real case: an Enshrouded server's `enshrouded_server.json` had `"tombstoneMode": "Off"`. The game accepts only `AddBackpackMaterials`, `Everything` or `NoTombstone`; it logged `Failed to parse enum 'TombstoneMode: Invalid value 'Off'`, its process manager gave up (`entered FATAL state`), the container stayed up, and the card said "starting" forever.
+
+### Added
+
+- **Setting rules in the catalog.** `config_files[].schema` (setting path -> `type` string/integer/number/boolean/enum, `choices` with optional `label`/`description`/`aliases`, `min`, `max`, `pattern`, `description`, `default`, `restart_required`) and `type`/`choices`/`min`/`max` on deploy-form fields (`gamedock/settings_schema.py`). Malformed rules are catalog errors; an unquoted YAML `off`/`no` among word choices is refused. `schema: {}` says "this file has no settings" (player lists).
+- **Schemas for the bundled games**, from their documentation: Enshrouded (44 settings, from the mornedhels image's SERVER_DIFFICULTY.md / the game's server readme), Palworld (88, docs.palworldgame.com), Minecraft server.properties (minecraft.wiki), plus field rules for Valheim, Satisfactory and the ASKA example entry. Unclear settings are `type: string` instead of guessed.
+- **Config form.** Settings with choices are dropdowns (with labels and descriptions), numbers show their range, every row shows its description. A wrong value already in the file is marked in red ("not a valid value") with one-click "Use ..." fixes, counted in the toolbar, and named in the note. The form refuses to save wrong values; the raw view's save is checked by the server, and a person can still **Save anyway** after the warning.
+- **Enforcement on the server.** `write_config_file` (API and MCP), the new `update_config_settings`, `deploy_server` and `update_server_settings` refuse values outside the rules with HTTP 400 / an MCP error carrying JSON `invalid_settings` (setting, value, allowed values) and write nothing. MCP has no override; only the web page's Save anyway (`force: true`) does, and it is logged.
+- **MCP.** New read-only `get_setting_options` (allowed values per setting, current and invalid values of a server) and standard `update_config_settings` (change single settings, every other byte kept). Descriptions of `read_config_file`, `write_config_file`, `deploy_server`, `update_server_settings`, `get_server_status`, `list_servers` and `verify_game_setup` say to read the allowed values first and never invent one; the guide gains "Allowed values". read_only 25, standard 40, full 44 tools.
+- **"Failed to start".** Built-in patterns for config parse errors (`Failed to parse enum/Config`, `Supported ... values`) and a process manager giving up (`entered FATAL state`, `gave up`) are fatal: a running but not ready server gets phase `failed`, and the card names the setting, the wrong value, the allowed values and the config file. Enshrouded has matching `fail_log_patterns`.
+- **Check setup** has a **Settings valid** row (each config file and deploy setting checked against the rules).
+- **Authoring.** `validate_catalog_entry` warns about an ini/json settings file without `schema`, enum-looking settings without choices, and choices without a description; the guide, ADDING_A_GAME (trap 18), the prompt and `_template.yaml` explain the rules.
+- `scripts/make_screenshots_settings.py` (docs/gamedock-063-*.png).
+
+### Changed
+
+- Rules always come from the **current** catalog entry, so already-deployed servers get them without a redeploy.
+- ASKA example: `authentication token` is a sensitive key of its settings file (it was shown in the Config editor).
+
 ## 0.6.2: root-owned files no longer block backups or deletes, and games run as GameDock's user
 
 Built from a real case: deleting a Valheim server together with its data stopped with "Could not delete .../data/weber-brothers-2/config: permission denied (belongs to root)". The Valheim image runs the game as root unless told otherwise (its `PUID` defaults to 0), so the files it wrote into the mounted folder belonged to root, and GameDock (an ordinary user in the docker group, no sudo) could back them up only partly and not delete them. It was fixed by hand with a one-off `docker run ... chown`. GameDock now does that itself, and the bundled games no longer write root-owned files in the first place.

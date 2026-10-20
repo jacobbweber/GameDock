@@ -23,6 +23,7 @@ import re
 from dataclasses import dataclass
 
 PHASE_READY, PHASE_INSTALLING, PHASE_STARTING, PHASE_UNHEALTHY = "ready", "installing", "starting", "unhealthy"
+PHASE_FAILED = "failed"   # 0.6.3: the container is up but the game gave up (see problems.FATAL_IDS); set by the service
 
 # CSI sequences (colours, cursor moves), OSC sequences (window titles) and lone ESC commands.
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]")

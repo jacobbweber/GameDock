@@ -10,6 +10,10 @@ A server that is still downloading its game files shows **Installing 52%** inste
 
 ![Installing](docs/gamedock-020-installing.png)
 
+**New in 0.6.3:** GameDock knows which values each setting accepts. The Config form shows dropdowns and ranges, marks a wrong value already in a file with a one-click fix, and wrong values are refused when deploying or saving, also for AI agents over MCP (new tools `get_setting_options` and `update_config_settings`, no override). A game that refuses its settings now shows **Failed to start** with the setting, the wrong value and the allowed values instead of "starting" forever, and Check setup has a **Settings valid** row. Rules come from the current catalog, so existing servers get them without a redeploy. See the [CHANGELOG](CHANGELOG.md).
+
+![Allowed values as a dropdown](docs/gamedock-063-tombstone-dropdown.png)
+
 **New in 0.6.2:** files a game container wrote as root no longer block backups, config edits, wipes or deletes: GameDock gives them back to its own user with a short-lived helper container that mounts only that server's folder, and Check setup has a **Fix ownership** button (MCP: `fix_data_ownership`). The bundled games now run as GameDock's user through the new catalog key `user_env` (PUID/PGID or UID/GID), Palworld's notes explain its password popup, and an expired Steam login token is recognised. See the [CHANGELOG](CHANGELOG.md).
 
 ![Check setup: file ownership](docs/gamedock-062-check-ownership.png)
@@ -403,9 +407,9 @@ GameDock serves a [Model Context Protocol](https://modelcontextprotocol.io) endp
 | Mode | Tools served |
 |---|---|
 | `off` | none (`/mcp` answers 404 with an explanation) |
-| `read_only` | `list_catalog`, `get_catalog_entry`, `list_servers`, `get_server_status`, `get_server_stats`, `get_host_stats`, `get_stats_history`, `list_backups`, `list_config_files`, `read_config_file`, `get_config_changes`, `get_server_logs`, `get_gamedock_version`, `list_schedules`, `check_game_update`, and for adding games `get_add_game_guide`, `validate_catalog_entry`, `inspect_image`, and the 0.6.0 checks `get_catalog_review_status`, `verify_game_setup`, `check_ports`, `preview_deploy`, `get_server_diagnostics`, `get_mcp_audit` (24 tools) |
-| `standard` (default) | read-only tools plus `deploy_server`, `start_server`, `stop_server`, `restart_server`, `update_server_settings`, `update_server_image`, `create_backup`, `write_config_file`, `set_backup_schedule`, `set_maintenance_schedule`, `update_game`, `add_catalog_entry`, `update_catalog_entry`, and since 0.6.2 `fix_data_ownership` (non-destructive) (38 tools) |
-| `full` | standard plus the destructive tools `delete_server`, `restore_backup`, `delete_backup`, `wipe_server_data` (42 tools) |
+| `read_only` | `list_catalog`, `get_catalog_entry`, `list_servers`, `get_server_status`, `get_server_stats`, `get_host_stats`, `get_stats_history`, `list_backups`, `list_config_files`, `read_config_file`, `get_config_changes`, `get_server_logs`, `get_gamedock_version`, `list_schedules`, `check_game_update`, and for adding games `get_add_game_guide`, `validate_catalog_entry`, `inspect_image`, and the 0.6.0 checks `get_catalog_review_status`, `verify_game_setup`, `check_ports`, `preview_deploy`, `get_server_diagnostics`, `get_mcp_audit`, and since 0.6.3 `get_setting_options` (25 tools) |
+| `standard` (default) | read-only tools plus `deploy_server`, `start_server`, `stop_server`, `restart_server`, `update_server_settings`, `update_server_image`, `create_backup`, `write_config_file`, `set_backup_schedule`, `set_maintenance_schedule`, `update_game`, `add_catalog_entry`, `update_catalog_entry`, since 0.6.2 `fix_data_ownership` (non-destructive), and since 0.6.3 `update_config_settings` (40 tools) |
+| `full` | standard plus the destructive tools `delete_server`, `restore_backup`, `delete_backup`, `wipe_server_data` (44 tools) |
 
 Tools outside the mode are not listed at all and cannot be called. If `GAMEDOCK_HOST` is not localhost and `GAMEDOCK_MCP_TOKEN` is empty, the mode is forced to `off` (a warning is logged and the web page explains why).
 

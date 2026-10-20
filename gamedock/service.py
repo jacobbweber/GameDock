@@ -32,6 +32,7 @@ from . import configfiles as cfg
 from . import configforms as forms
 from . import readiness as rd
 from . import schedule as sch
+from . import settings_schema as ss
 from . import steam as stm
 from .backends.base import ContainerBackend, DockerDiagnosis
 from .catalog import entry_to_dict, load_catalog, parse_definition
@@ -402,6 +403,11 @@ class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin, ProblemsMixin):
         phase_detail = r.detail if r else ""
         if problem and r is not None and r.phase == rd.PHASE_UNHEALTHY:
             phase_detail = f"{problem['title']} {problem['advice']}"
+        if problem and problem.get("fatal") and r is not None and not r.ready:
+            # The container is up but the game inside has given up (or refused its settings): it will not become
+            # ready by waiting, so do not keep saying "starting".
+            r = rd.Readiness(rd.PHASE_FAILED, None, f"Failed to start. {problem['title']} {problem['advice']}")
+            phase_detail = r.detail
         hints = self._with_current_hints(inst, t)
         chk = self._image_checks.get(inst.id)
         game = self._game_report(inst, hints, status == Status.RUNNING, started) if hints.steam_app_id else None
@@ -536,6 +542,7 @@ class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin, ProblemsMixin):
         """Apply provided values over current (or defaults). Blank secrets keep the existing value."""
         by_name = {f.name: f for f in t.fields}
         values = {f.name: f.default for f in t.fields} if current is None else dict(current)
+        bad: list[dict] = []
         for name, value in (provided or {}).items():
             f = by_name.get(name)
             if f is None:
@@ -554,7 +561,18 @@ class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin, ProblemsMixin):
                     raise ValidationError(f"The setting '{f.label}' ({f.name}) does not look right: "
                                           f"{f.pattern_hint or 'it does not have the format this game expects'}. "
                                           "The value you typed is not shown here; check it and try again.")
+            if f.rules is not None and value != "":
+                err = ss.check_value(f.rules, value)
+                if err and f.rules.type in ("integer", "number", "boolean") and not ss.check_value(f.rules, value.strip()):
+                    value, err = value.strip(), None
+                if err:
+                    shown = "(hidden)" if f.secret else value
+                    msg = (f"The setting '{f.label}' ({f.name}) cannot be {shown!r}: it must be {f.rules.allowed_text()}."
+                           if not f.secret else f"The setting '{f.label}' ({f.name}) must be {f.rules.allowed_text()}.")
+                    bad.append(ss.problem_dict(f.rules, shown, msg) | {"setting": f.name})
             values[name] = value
+        if bad:
+            raise ss.SettingsInvalid(ss.summary_message(bad, f"the settings of {t.name}"), bad)
         for f in t.fields:
             if f.required and not values.get(f.name, "").strip():
                 raise ValidationError(f"The setting '{f.label}' ({f.name}) is required: fill it in and try again.")
@@ -1022,8 +1040,123 @@ class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin, ProblemsMixin):
     def _config_file(self, inst: Instance, path: str) -> ConfigFile:
         for c in self._template(inst).config_files:
             if c.path == path:
-                return c
+                return self._with_current_schema(inst, c)
         raise NotFoundError(f"'{path}' is not an editable config file for this server")
+
+    def _with_current_schema(self, inst: Instance, c: ConfigFile) -> ConfigFile:
+        """Setting rules only describe which values the game accepts (they change no container), so they always come
+        from the CURRENT catalog entry of the same game when it has rules for this file. A server deployed before the
+        catalog entry got its schema is therefore checked with the current one, without a redeploy."""
+        try:
+            cur = self._current_entries().get(inst.game_id)
+        except Exception:  # noqa: BLE001 - a broken catalog must never break the editor
+            return c
+        if cur is None:
+            return c
+        for cc in cur.config_files:
+            if cc.path == c.path and cc.schema:
+                return replace(c, schema=cc.schema)
+        return c
+
+    def config_schema(self, inst: Instance) -> list[ConfigFile]:
+        """The server's config files with the current setting rules."""
+        return [self._with_current_schema(inst, c) for c in self._template(inst).config_files]
+
+    def get_setting_options(self, server_id: str | None = None, game_id: str | None = None, path: str | None = None,
+                            setting: str | None = None) -> dict:
+        """The allowed values of a game's settings: for every config file its schema (type, choices with labels, min/max,
+        description, default, restart_required) and the value rules of the deploy-form fields. With `server_id` the
+        rules come from the CURRENT catalog entry of that server's game, and the current invalid values are listed.
+        `path` limits it to one config file (or 'fields' for the deploy-form settings); `setting` to one setting."""
+        if bool(server_id) == bool(game_id):
+            raise ValidationError("Give exactly one of server_id or game_id")
+        inst = None
+        if server_id:
+            inst = self._instance(server_id)
+            t = self._with_current_field_rules(inst, self._template(inst))
+            files = self.config_schema(inst)
+            gid = inst.game_id
+        else:
+            t = self.get_catalog_entry(str(game_id))
+            files = list(t.config_files)
+            gid = t.id
+        out: dict = {"game_id": gid, "server_id": inst.id if inst else None,
+                     "how_to_use": ("Use ONLY these values. A value outside `choices` or min/max is refused by every write "
+                                    "tool with the allowed values; never invent a value. A setting with no rules here may "
+                                    "take any value of its kind, so check the game's documentation for it."),
+                     "config_files": [], "fields": []}
+        want_fields = path in (None, "", "fields")
+        known_paths = [c.path for c in files]
+        if path not in (None, "", "fields") and path not in known_paths:
+            raise NotFoundError(f"'{path}' is not a config file of this game. Its config files: "
+                                f"{', '.join(known_paths) or 'none'} (or 'fields' for the deploy-form settings)")
+        for c in files:
+            if path not in (None, "") and path != c.path:
+                continue
+            specs = [sp for sp in c.schema if not setting or sp.path == setting or sp.path.split(".")[-1] == setting]
+            item = {"path": c.path, "label": c.label, "format": c.format, "has_schema": bool(c.schema),
+                    "settings": [sp.to_dict() for sp in specs]}
+            if inst is not None and c.schema:
+                try:
+                    r = self._read_cfg(inst, c)
+                    item["file_exists"] = r.exists
+                    item["invalid"] = self._validate_config(inst, c, r.content) if r.exists else []
+                    if setting and r.exists:
+                        form = forms.build_form(r.content, c)
+                        cur = [f.value for f in (form.fields if form else ())
+                               if (ss.find_spec(c.schema, f.id, f.key) or ss.SettingSpec("")).path in {sp.path for sp in specs}
+                               and not f.sensitive]
+                        item["current_value"] = cur[0] if cur else None
+                except GameDockError as e:
+                    item["read_error"] = str(e)
+            if not c.schema:
+                item["note"] = "No setting rules are declared for this file: GameDock cannot tell which values the game accepts."
+            out["config_files"].append(item)
+        if want_fields:
+            for f in t.fields:
+                if setting and f.name != setting:
+                    continue
+                d = {"name": f.name, "label": f.label, "default": f.default, "required": f.required, "secret": f.secret,
+                     "description": f.description}
+                if f.rules is not None:
+                    d.update({k: v for k, v in f.rules.to_dict().items() if k not in ("path", "label")})
+                if f.pattern:
+                    d["pattern"], d["pattern_hint"] = f.pattern, f.pattern_hint
+                if inst is not None and not f.secret:
+                    d["current_value"] = inst.env.get(f.name, f.default)
+                    if f.rules is not None and d["current_value"]:
+                        err = ss.check_value(f.rules, d["current_value"])
+                        if err:
+                            d["invalid"] = err
+                out["fields"].append(d)
+        if setting and not any(i["settings"] for i in out["config_files"]) and not out["fields"]:
+            out["note"] = (f"No rules are declared for '{setting}'. Read the file with read_config_file and the game's "
+                           "documentation before changing it; do not guess a value.")
+        return out
+
+    def update_config_settings(self, server_id: str, path: str, changes: Mapping[str, str]) -> dict:
+        """Change single settings of a config file (by setting id as shown by get_setting_options / the form: a JSON path
+        such as gameSettings.tombstoneMode, an ini key or [Section]key). Every other byte of the file stays as it is.
+        Values are checked against the setting rules and refused (no override) when they break them."""
+        inst = self._instance(server_id)
+        c = self._config_file(inst, path)
+        if not changes:
+            raise ValidationError("No changes given")
+        r = self._read_cfg(inst, c)
+        if not r.exists:
+            raise ValidationError("This game has not created its settings file yet; it appears after the first full start.")
+        text, changed = forms.apply_changes(r.content, c, {str(k): ("" if v is None else str(v)) for k, v in changes.items()})
+        if not changed:
+            return {"path": c.path, "changed": [], "note": "Nothing changed: the file already has these values."}
+        res = self.write_config_file(server_id, path, text)
+        return {"path": res.path, "changed": list(changed), "backup": res.backup, "running": res.running, "note": res.note}
+
+    def _validate_config(self, inst: Instance, c: ConfigFile, content: str) -> list[dict]:
+        try:
+            return forms.validate_text(content, c)
+        except Exception:  # noqa: BLE001 - a parser hiccup must not block saving; the game's own check still applies
+            log.warning("could not check %s of %s against its setting rules", c.path, inst.id, exc_info=True)
+            return []
 
     def _config_info(self, inst: Instance, c: ConfigFile) -> ConfigFileInfo:
         root = self._data_dir_of(inst)
@@ -1217,7 +1350,13 @@ class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin, ProblemsMixin):
                 snap, just = self._baseline_for(inst, c, r)
                 baseline = self._baseline_info(inst, c, snap, just)
                 form = self._compared_form(inst, c, form, snap)
-        return ConfigContent(self._config_info(inst, c), r.content, r.masked, running, editable, note, form, baseline)
+                form = forms.annotate(form, c)
+        invalid = tuple(self._validate_config(inst, c, r.content)) if r.exists else ()
+        if invalid:
+            note = ("Some settings have values the game will refuse (it may not start): "
+                    + " ".join(p["message"] for p in invalid[:3]) + " " + note)
+        return ConfigContent(self._config_info(inst, c), r.content, r.masked, running, editable, note, form, baseline,
+                             tuple(s.to_dict() for s in c.schema), invalid)
 
     def config_form(self, server_id: str, path: str, content: str | None = None,
                     changes: dict[str, str] | None = None) -> ConfigFormResult:
@@ -1243,21 +1382,33 @@ class GameDockService(GameUpdateMixin, AuthoringMixin, OpsMixin, ProblemsMixin):
             snap, just = self._baseline_for(inst, c, r)
             baseline = self._baseline_info(inst, c, snap, just)
             form = self._compared_form(inst, c, form, snap)
-        return ConfigFormResult(form, text, tuple(changed), baseline)
+            form = forms.annotate(form, c)
+        return ConfigFormResult(form, text, tuple(changed), baseline, tuple(self._validate_config(inst, c, text)))
 
-    def write_config_file(self, server_id: str, path: str, content: str) -> ConfigSaveResult:
+    def write_config_file(self, server_id: str, path: str, content: str, force: bool = False) -> ConfigSaveResult:
+        """Save a config file. Values that break the catalog's setting rules are refused (SettingsInvalid, listing the
+        allowed values) unless `force` is true. Only the web page offers `force` (a person's deliberate "Save anyway");
+        the MCP tools never pass it."""
         with self._operation(server_id, "saving config"):
             inst = self._instance(server_id)
             c = self._config_file(inst, path)
             running = self._is_running(inst)
             if running and not c.hot_edit:
                 raise ConflictError("Stop the server before editing this file (it is not marked safe to edit while running)")
+            invalid = self._validate_config(inst, c, content)
+            if invalid and not force:
+                raise ss.SettingsInvalid(ss.summary_message(invalid, c.path), invalid)
             self._capture_baseline(inst, c, None, bl.ORIGIN_PRE_SAVE)  # the file as it is before our first edit
             w = self._with_repair(inst, lambda: cfg.write_config(self._data_dir_of(inst), c, content, self._clock()))
             note = "Saved." + (f" The previous version was kept as '{w.backup}'." if w.backup else "")
             note += (" Restart the server for the change to take effect." if running
                      else " The change applies the next time the server starts.")
-            return ConfigSaveResult(c.path, w.size, w.backup, running, note)
+            if invalid:
+                note += (f" Saved anyway on purpose with {len(invalid)} value(s) the game may refuse: "
+                         + "; ".join(f"{p['setting']} = {p['value']!r}" for p in invalid[:5]) + ".")
+                log.warning("config %s of %s saved with %d value(s) outside the setting rules (save anyway)",
+                            c.path, inst.id, len(invalid))
+            return ConfigSaveResult(c.path, w.size, w.backup, running, note, tuple(invalid))
 
     # ------------------------------------------------------------ logs
     def get_logs(self, server_id: str, lines: int | None = None, max_chars: int = MAX_LOG_CHARS) -> LogsResult:

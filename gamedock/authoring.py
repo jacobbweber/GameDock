@@ -26,6 +26,8 @@ from typing import Callable, Mapping
 
 import yaml
 
+from . import settings_schema as ss
+
 from .catalog import ENTRY_KEYS, MAX_PATTERN_LEN, parse_definition, safety_problems
 from .errors import CatalogError, ConflictError, NotFoundError, OperationError, ValidationError
 from . import portcheck
@@ -107,6 +109,19 @@ FIELD_REFERENCE: list[dict] = [
     {"key": "fields[].pattern_hint", "type": "text", "required": False, "default": "empty",
      "meaning": "What a right value looks like, in plain words, shown when the pattern does not match (for example 'It is "
                 "exactly 32 letters and digits (0-9, A-F)'). One line, at most 300 characters. Needs pattern."},
+    {"key": "fields[].type", "type": "string, integer, number, boolean or enum", "required": False,
+     "default": "empty (no value rules; enum when choices is given)",
+     "meaning": "What kind of value the setting takes. A value of the wrong kind is refused when a server is deployed or "
+                "edited, by the web page AND by every MCP tool. Take it from the image's documentation; do not guess."},
+    {"key": "fields[].choices", "type": "list of values (or {value, label, description, aliases})", "required": False,
+     "default": "none",
+     "meaning": "The ONLY values the setting accepts, spelled exactly as the image documents them (case matters). The deploy "
+                "form shows a dropdown and anything else is refused. Use it for every setting with a fixed set of words "
+                "(mode, difficulty, region, autosave style...). aliases = other spellings the game also accepts."},
+    {"key": "fields[].min", "type": "number", "required": False, "default": "none",
+     "meaning": "Smallest allowed value (type integer or number)."},
+    {"key": "fields[].max", "type": "number", "required": False, "default": "none",
+     "meaning": "Largest allowed value (type integer or number)."},
     {"key": "config_files", "type": "list of files", "required": False, "default": "none",
      "meaning": "Settings files people may read and edit with the Config button. Each must be inside a mounted folder."},
     {"key": "config_files[].path", "type": "relative file path", "required": True, "default": "(none)",
@@ -125,6 +140,16 @@ FIELD_REFERENCE: list[dict] = [
                 "(the game would overwrite the file when it exits)."},
     {"key": "config_files[].note", "type": "text", "required": False, "default": "empty",
      "meaning": "A warning shown above the editor, for example 'the image rewrites this file on every start'."},
+    {"key": "config_files[].schema", "type": "mapping of setting path to rules", "required": False, "default": "none",
+     "meaning": "Which values each setting of the file accepts, from the game's or the image's documentation. The key is "
+                "the setting's path: a JSON path with dots (gameSettings.tombstoneMode, userGroups[0].name) or an ini "
+                "key ([Section]key also works). The rules: type (string, integer, number, boolean, enum), choices (list "
+                "of values or {value, label, description, aliases}), min, max, pattern, pattern_hint, description, "
+                "default, label, restart_required. Enums become dropdowns; a value outside the rules is refused when "
+                "saved, by the web page (a person may 'Save anyway' in the raw text) and ALWAYS by MCP tools; Check setup "
+                "flags wrong values already in the file. Write schema: {} for a file that holds no settings (a player list). Declare every setting with a fixed set of words or a documented "
+                "range; leave a setting out (or type string) when the documentation does not say. Servers deployed "
+                "earlier use the current schema without a redeploy. Malformed rules are an error."},
     {"key": "update_method", "type": "pull_recreate or none", "required": False, "default": "pull_recreate",
      "meaning": "pull_recreate = the Update button downloads the newest image and recreates the container. none = the "
                 "game updates itself inside the container and image updates are switched off."},
@@ -441,6 +466,22 @@ def analyze_entry(e: CatalogEntry, others: Mapping[str, CatalogEntry] | None = N
         if f.secret and f.required and not f.pattern:
             add("info", f"The required secret {f.name} has no format check (pattern). If it has a known shape (a fixed length, "
                         "hex digits), add pattern and pattern_hint so a wrong paste is refused with a clear message.")
+    for c in e.config_files:
+        if c.format in ("ini", "json") and not c.schema and not c.schema_none:
+            add("warn", f"The config file {c.path} has no schema, so GameDock cannot refuse values the game does not accept "
+                        "(for example a misspelt mode, which can stop some games from starting). Add config_files[].schema "
+                        "with the allowed values (choices) and ranges (min/max) from the game's documentation.")
+        for spec in c.schema:
+            last = re.split(r"[.\]]", spec.path)[-1]
+            if spec.type == "string" and not spec.pattern and not spec.description and ss.ENUM_LOOKING_RE.search(last):
+                add("warn", f"In {c.path}, {spec.path} looks like a setting with a fixed set of values but has no choices. "
+                            "If the documentation lists the allowed values, add them as choices (exact spelling); if it "
+                            "does not, say so in the setting's description.")
+    for f in e.fields:
+        if f.rules is None and not f.secret and not f.pattern and ss.ENUM_LOOKING_RE.search(f.name.replace("_", " ").split()[-1] if f.name else ""):
+            add("warn", f"The field {f.name} looks like a setting with a fixed set of values (mode, difficulty, style...) but "
+                        "declares no choices. If the image documents the allowed values, add choices (exact spelling); "
+                        "otherwise set type: string to say it is deliberately not restricted.")
     for f in e.fields:
         if f.pattern and not f.pattern_hint:
             add("warn", f"The field {f.name} has a pattern but no pattern_hint, so a wrong value is refused with a vague message. "

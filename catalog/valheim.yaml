@@ -29,4 +29,5 @@ fields:
   - { name: SERVER_NAME, label: Server name, default: "My Valheim Server", required: true }
   - { name: WORLD_NAME, label: World name, default: "Dedicated", required: true }
   - { name: SERVER_PASS, label: Server password, secret: true, required: true,
+      pattern: '.{5,}', pattern_hint: "The password must be at least 5 characters (the image's README: otherwise the server refuses to start)",
       description: At least 5 characters. }

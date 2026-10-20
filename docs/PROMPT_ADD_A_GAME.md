@@ -49,7 +49,10 @@ STEPS
    documents "run as this user" variables (PUID/PGID, UID/GID or similar), map them with "user_env" (for example
    user_env: {PUID: uid, PGID: gid}) so GameDock fills in its own user and group id; never put fixed numbers in env.
    Use "run_as_user: true" only if the image's documentation says it runs as any user with docker --user. If it has
-   neither, say so in "notes". Call validate_catalog_entry repeatedly
+   neither, say so in "notes". Declare the ALLOWED VALUES from the documentation: "choices" (exact spelling;
+   quote off/on/yes/no) or "type" with "min"/"max" on fields, and a "schema" for each settings file in
+   "config_files" (setting path -> type, choices, min, max, description, default). Never guess a value or a
+   range: where the documentation is unclear use "type: string" and say so. Call validate_catalog_entry repeatedly
    until "valid" is true. Read the warnings and fix those that apply.
 5. If you have standard or full mode: call add_catalog_entry. If you only have read-only mode: stop here
    and give me the validated YAML in your report. After adding, tell me the entry is waiting for my review
@@ -66,7 +69,8 @@ STEPS
    get_server_logs). Do not tell me to join before it is ready.
 7. Verify: call verify_game_setup first (and get_server_diagnostics if anything fails) and act on each
    fix it names. Then use the checklist in the guide: logs show the ready and version lines and they match the
-   patterns; read_config_file works for each listed config file; an empty password means no password;
+   patterns; read_config_file works for each listed config file and its "invalid" list is empty (the "Settings
+   valid" check passes); before changing ANY setting call get_setting_options and use only the values it lists; an empty password means no password;
    create_backup works and list_backups shows it; the "File ownership" check passes (if it warns, report it; with
    standard or full mode you may call fix_data_ownership, which deletes nothing); stop_server and start_server work. Do not restore or
    delete anything. If something fails, use update_catalog_entry to fix the entry (it goes back to "needs

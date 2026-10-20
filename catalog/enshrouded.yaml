@@ -54,12 +54,28 @@ env:                         # fixed values, not shown in the deploy form (all q
   SERVER_ROLE_0_CAN_EDIT_BASE: "true"
   SERVER_ROLE_0_CAN_EXTEND_BASE: "true"
   SERVER_ROLE_0_RESERVED_SLOTS: "0"
+# Known failures (0.6.3). Real incident: a settings file with "tombstoneMode": "Off" made the game log
+#   Failed to parse enum 'TombstoneMode: Invalid value 'Off'.  /  Supported 'TombstoneMode' values: ...
+#   Internal Error: Failed to parse Config
+# after which supervisord retried and logged "gave up: enshrouded-server entered FATAL state" while the container stayed up.
+fail_log_patterns:
+  - pattern: "Failed to parse enum|Supported '[A-Za-z]+' values|Internal Error: Failed to parse Config"
+    title: Enshrouded refused its settings file (enshrouded_server.json) and cannot start.
+    advice: >-
+      A setting has a value the game does not accept (for example tombstoneMode "Off"; the right word is NoTombstone).
+      Open Config, pick an allowed value in the form (wrong ones are marked), save, then stop and start the server.
+  - pattern: "gave up: enshrouded-server entered FATAL state"
+    title: The Enshrouded server process stopped and will not be retried, so the game is not running.
+    advice: >-
+      The container is still up, but the game inside gave up after several failed starts. Look a few lines above in the
+      Logs for the reason (often the settings file), fix it, then stop and start the server.
 # Run the game as the user GameDock runs as (the image's PUID/PGID, default 4711; documented in
 # https://github.com/mornedhels/enshrouded-server#environment-variables), filled in at deploy time.
 user_env: { PUID: uid, PGID: gid }
 fields:                      # values the user can set when deploying or editing
   - { name: SERVER_NAME, label: Server name, default: "My Enshrouded Server", required: true }
-  - { name: SERVER_SLOT_COUNT, label: Player slots, default: "16" }
+  - { name: SERVER_SLOT_COUNT, label: Player slots, default: "16", type: integer, min: 1, max: 16,
+      description: "1 to 16 (the image's documented range)." }
   # Do NOT use SERVER_PASSWORD: the image ignores it when empty and the game then keeps its own random default
   # password. The role variable below is always sent, even when empty, and an empty value means "no password".
   - { name: SERVER_ROLE_0_PASSWORD, label: Server password, secret: true,
@@ -76,3 +92,60 @@ config_files:
       the deploy form are written into this file again every time the server starts, so changes to those keys here are
       replaced on the next start; change them in the server's settings (Edit) instead. Everything else in the file
       (for example gameSettings.*) is kept as you saved it.
+    # Allowed values (0.6.3). Source: the image's difficulty guide
+    # https://github.com/mornedhels/enshrouded-server/blob/main/docs/SERVER_DIFFICULTY.md ("Ranges and allowed values follow
+    # the bundled enshrouded_server_readme.txt, version 1.0.0.0"; Keen Games' guide:
+    # https://enshrouded.zendesk.com/hc/en-us/articles/20453241249821-Server-Difficulty-Settings) and the image README
+    # (slot count 1-16, voice chat mode). Enum values are case-sensitive. The game refuses to start on a wrong one
+    # (real incident: "tombstoneMode": "Off").
+    schema:
+      slotCount: { type: integer, min: 1, max: 16, default: 16, description: "Max players at once. Replaced from the server's settings (Edit) at every start." }
+      queryPort: { type: integer, min: 1, max: 65535, default: 15637, description: Steam query port inside the container. }
+      voiceChatMode: { choices: [Proximity, Global], default: Proximity, description: Proximity or server-wide voice chat. }
+      enableVoiceChat: { type: boolean, default: "false", description: Switches voice chat on or off. }
+      enableTextChat: { type: boolean, default: "false", description: Switches text chat on or off. }
+      gameSettingsPreset: { choices: [Default, Relaxed, Hard, Survival, Custom], default: Default, description: "The difficulty preset for the server. Other settings only work with preset Custom." }
+      gameSettings.playerHealthFactor: { type: number, min: 0.25, max: 4, default: 1, description: "Scales the max health for players by a factor." }
+      gameSettings.playerManaFactor: { type: number, min: 0.25, max: 4, default: 1, description: "Scales the max mana for players by a factor." }
+      gameSettings.playerStaminaFactor: { type: number, min: 0.25, max: 4, default: 1, description: "Scales the max stamina for players by a factor." }
+      gameSettings.playerBodyHeatFactor: { type: number, min: 0.5, max: 2, default: 1, description: "Scales the max amount of available body heat in the player. The higher the factor the longer the player can stay in very cold areas before hypothermia sets in." }
+      gameSettings.playerDivingTimeFactor: { type: number, min: 0.5, max: 2, default: 1, description: "Modifies the initial amount of oxygen for players and therefore the time available underwater." }
+      gameSettings.enableDurability: { type: boolean, default: "true", description: "Whether weapon durability is enabled." }
+      gameSettings.enableStarvingDebuff: { type: boolean, default: "false", description: "Enables hunger and starvation. During starvation, the player loses health periodically until death if no food or drink is consumed." }
+      gameSettings.foodBuffDurationFactor: { type: number, min: 0.5, max: 2, default: 1, description: "Scales food buff durations." }
+      gameSettings.fromHungerToStarving: { type: integer, min: 300000000000, max: 1200000000000, default: 600000000000, description: "This setting controls the length of the hungry state before the starving sets in. The unit in this setting is nanoseconds. Ingame the time is displayed in minutes." }
+      gameSettings.shroudTimeFactor: { type: number, min: 0.5, max: 2, default: 1, description: "Scales how long player characters can remain within the Shroud." }
+      gameSettings.flameLevelFogRemoval: { type: integer, min: 0, max: 20, default: 11, description: "Required Flame level to enable placing Flame Altars in the Shroud." }
+      gameSettings.enableGliderTurbulences: { type: boolean, default: "true", description: "If turned off, the glider will not be affected by air turbulences, just as in previous versions of the game." }
+      gameSettings.weatherFrequency: { choices: [Disabled, Rare, Normal, Often], default: Normal, description: "This setting allows defining how often new weather phenomena appear in the game world." }
+      gameSettings.fishingDifficulty: { choices: [VeryEasy, Easy, Normal, Hard, VeryHard], default: Normal, description: "This setting defines the strength of the fish during the fishing minigame. The stronger a fish is, the longer the minigame will proceed." }
+      gameSettings.randomSpawnerAmount: { choices: [Few, Normal, Automatic, Many, Extreme], default: Normal, description: "This setting controls the amount of enemies in the world." }
+      gameSettings.miningDamageFactor: { type: number, min: 0.5, max: 2, default: 1, description: "This scales the mining damage. A higher mining damage leads to increased terraforming and more yield of resources per hit." }
+      gameSettings.plantGrowthSpeedFactor: { type: number, min: 0.25, max: 2, default: 1, description: "Scales the value of the plant growth speed." }
+      gameSettings.resourceDropStackAmountFactor: { type: number, min: 0.25, max: 2, default: 1, description: "Scales the amount of materials per loot stack in chests, defeated enemies etc." }
+      gameSettings.factoryProductionSpeedFactor: { type: number, min: 0.25, max: 2, default: 1, description: "Scales the length of production times for workshop items." }
+      gameSettings.perkUpgradeRecyclingFactor: { type: number, min: 0, max: 1, default: 0.5, description: "Scales the amount of Runes that are returned to you when salvaging upgraded weapons." }
+      gameSettings.perkCostFactor: { type: number, min: 0.25, max: 2, default: 1, description: "Scales the amount of Runes required for upgrading weapons." }
+      gameSettings.experienceCombatFactor: { type: number, min: 0.25, max: 2, default: 1, description: "Scales the amount of XP received through combat." }
+      gameSettings.experienceMiningFactor: { type: number, min: 0, max: 2, default: 1, description: "Scales the amount of XP received by mining resources." }
+      gameSettings.experienceExplorationQuestsFactor: { type: number, min: 0.25, max: 2, default: 1, description: "Scales the amount of XP received by exploring and completing quests." }
+      gameSettings.aggroPoolAmount: { choices: [Few, Normal, Many, Extreme], default: Normal, description: "This setting controls how many enemies are allowed to attack at the same time." }
+      gameSettings.enemyDamageFactor: { type: number, min: 0.25, max: 5, default: 1, description: "Scales all enemy damage by this value - except for bosses." }
+      gameSettings.enemyHealthFactor: { type: number, min: 0.25, max: 4, default: 1, description: "Scales all enemy health by this value - except for bosses." }
+      gameSettings.enemyStaminaFactor: { type: number, min: 0.5, max: 2, default: 1, description: "Scales all enemy stamina by this value. It will take longer to stun enemies with a higher enemy stamina. This excludes bosses." }
+      gameSettings.enemyPerceptionRangeFactor: { type: number, min: 0.5, max: 2, default: 1, description: "Scales how far enemies can see and hear the player. This excludes bosses." }
+      gameSettings.bossDamageFactor: { type: number, min: 0.2, max: 5, default: 1, description: "This setting scales the damage of boss attacks." }
+      gameSettings.bossHealthFactor: { type: number, min: 0.2, max: 5, default: 1, description: "Scales all health of bosses by this value." }
+      gameSettings.threatBonus: { type: number, min: 0.25, max: 4, default: 1, description: "Scales the frequency of enemy attacks. This excludes bosses." }
+      gameSettings.pacifyAllEnemies: { type: boolean, default: "false", description: "If turned on, enemies won't attack the players until they are attacked. This excludes bosses." }
+      gameSettings.tamingStartleRepercussion: { choices: [KeepProgress, LoseSomeProgress, LoseAllProgress], default: LoseSomeProgress, description: "This setting allows defining how the game reacts when the player startles the wildlife during taming. Progress is visualized by hearts in the game." }
+      gameSettings.dayTimeDuration: { type: integer, min: 120000000000, max: 3600000000000, default: 1800000000000, description: "Scales the length of daytime. A smaller value equals shorter daytime. The unit is nanoseconds." }
+      gameSettings.nightTimeDuration: { type: integer, min: 120000000000, max: 3600000000000, default: 720000000000, description: "Scales the length of nighttime (2-60 minutes). A smaller value equals shorter nighttime. The unit is nanoseconds." }
+      gameSettings.tombstoneMode:
+        choices:
+          - { value: AddBackpackMaterials, label: Drop crafting materials, description: "The default: materials from the backpack go into a tombstone." }
+          - { value: Everything, label: Drop everything, description: All backpack items go into a tombstone. }
+          - { value: NoTombstone, label: Keep everything, description: Nothing is dropped when a player dies. }
+        default: AddBackpackMaterials
+        description: "What players lose when they die; lost items are stored in a tombstone and can be recovered there. ('Off' is NOT a value: use NoTombstone.)"
+      gameSettings.curseModifier: { choices: [Easy, Normal, Hard], default: Normal, description: "The chances of getting cursed by enemies. Easy disables the curse mechanic; Hard doubles the chance relative to Normal." }

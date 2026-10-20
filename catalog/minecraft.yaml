@@ -17,14 +17,89 @@ config_files:               # editable from the Config button (example path; ver
     label: server.properties
     format: ini
     sensitive_keys: [rcon.password]
+    # Allowed values (0.6.3). Source: https://minecraft.wiki/w/Server.properties (Java Edition). Legacy numbers for
+    # gamemode and difficulty are still accepted by the game, so they are aliases. level-type is not restricted (datapacks
+    # can add presets). pvp, spawn-* and allow-nether are older keys that are still plain true/false.
+    schema:
+      gamemode:
+        choices:
+          - { value: survival, aliases: ["0"] }
+          - { value: creative, aliases: ["1"] }
+          - { value: adventure, aliases: ["2"] }
+          - { value: spectator, aliases: ["3"] }
+        default: survival
+        description: The default game mode.
+      difficulty:
+        choices:
+          - { value: peaceful, aliases: ["0"] }
+          - { value: easy, aliases: ["1"] }
+          - { value: normal, aliases: ["2"] }
+          - { value: hard, aliases: ["3"] }
+        default: easy
+        description: The world difficulty.
+      level-type: { type: string, default: "minecraft:normal", description: "World preset, e.g. minecraft:normal, minecraft:flat, minecraft:large_biomes, minecraft:amplified (namespace optional)." }
+      region-file-compression: { choices: [deflate, lz4, none], default: deflate }
+      text-filtering-version: { choices: ["0", "1"], default: "0" }
+      view-distance: { type: integer, min: 3, max: 32 }
+      simulation-distance: { type: integer, min: 3, max: 32 }
+      op-permission-level: { type: integer, min: 0, max: 4 }
+      function-permission-level: { type: integer, min: 1, max: 4 }
+      entity-broadcast-range-percentage: { type: integer, min: 10, max: 1000 }
+      server-port: { type: integer, min: 1, max: 65534 }
+      query.port: { type: integer, min: 1, max: 65534 }
+      rcon.port: { type: integer, min: 1, max: 65534 }
+      max-players: { type: integer }
+      spawn-protection: { type: integer }
+      max-world-size: { type: integer }
+      network-compression-threshold: { type: integer }
+      rate-limit: { type: integer }
+      player-idle-timeout: { type: integer }
+      max-tick-time: { type: integer }
+      pause-when-empty-seconds: { type: integer }
+      max-chained-neighbor-updates: { type: integer }
+      allow-flight: { type: boolean }
+      broadcast-console-to-ops: { type: boolean }
+      broadcast-rcon-to-ops: { type: boolean }
+      enable-code-of-conduct: { type: boolean }
+      enable-jmx-monitoring: { type: boolean }
+      enable-query: { type: boolean }
+      enable-rcon: { type: boolean }
+      enable-status: { type: boolean }
+      enforce-secure-profile: { type: boolean }
+      enforce-whitelist: { type: boolean }
+      force-gamemode: { type: boolean }
+      generate-structures: { type: boolean }
+      hardcore: { type: boolean }
+      hide-online-players: { type: boolean }
+      log-ips: { type: boolean }
+      online-mode: { type: boolean }
+      prevent-proxy-connections: { type: boolean }
+      require-resource-pack: { type: boolean }
+      sync-chunk-writes: { type: boolean }
+      use-native-transport: { type: boolean }
+      white-list: { type: boolean }
+      pvp: { type: boolean }
+      spawn-monsters: { type: boolean }
+      spawn-animals: { type: boolean }
+      spawn-npcs: { type: boolean }
+      allow-nether: { type: boolean }
+      enable-command-block: { type: boolean }
+      accepts-transfers: { type: boolean }
   - path: data/ops.json
     label: Operators (ops.json)
     format: json
+    schema: {}               # a list of players, not settings: nothing to restrict
 # Run the game as the user GameDock runs as, so the files it writes can be backed up, edited and deleted without
 # repairs. Documented in https://docker-minecraft-server.readthedocs.io/en/latest/variables/ (UID/GID, default 1000).
 user_env: { UID: uid, GID: gid }
 fields:
-  - { name: EULA, label: Accept Minecraft EULA (TRUE or FALSE), default: "FALSE", required: true }
+  - name: EULA
+    label: Accept Minecraft EULA (TRUE or FALSE)
+    default: "FALSE"
+    required: true
+    choices:
+      - { value: "TRUE", label: "TRUE (I accept the EULA)", aliases: ["true"] }
+      - { value: "FALSE", aliases: ["false"] }
   - { name: VERSION, label: Minecraft version, default: LATEST }
   - { name: MEMORY, label: Java memory, default: 2G }
   - { name: MOTD, label: Message of the day, default: "A GameDock server" }

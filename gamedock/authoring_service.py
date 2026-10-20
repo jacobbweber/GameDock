@@ -163,6 +163,13 @@ class AuthoringMixin:
                 "Never invent an image name, a port or a Steam app id. Research them from the image's own documentation; "
                 "if you cannot confirm something, leave it out or say so in the entry's notes.",
                 "Never put a password or token in the entry. Make it a field with secret: true.",
+                "Declare the allowed values of every setting with a fixed set of words or a documented range, from the "
+                "game's or the image's documentation: config_files[].schema for settings files ({path: {type, choices, "
+                "min, max, description, default}}) and type/choices/min/max on fields. Spell choices exactly (case "
+                "matters; quote off/on/yes/no). Where the documentation is unclear, use type: string and say so instead of "
+                "guessing. validate_catalog_entry warns about a settings file without a schema and enum-looking settings "
+                "without choices, and refuses malformed rules. Without rules a misspelt value (Enshrouded "
+                "tombstoneMode \"Off\") can stop a game from starting.",
                 "Entries you add are marked 'Added by AI, needs your review' and cannot be deployed until a person "
                 "approves them in the web page. There is no tool to approve.",
                 "Entries that came from the repository are never changed by MCP; only entries you added can be updated, "
@@ -170,7 +177,7 @@ class AuthoringMixin:
                 "Only ports 1024 and above, relative host folders, and the documented keys are accepted. Privileged mode, "
                 "host networking, devices, extra capabilities and the Docker socket are never allowed.",
             ],
-            "tools": ["get_add_game_guide", "inspect_image", "validate_catalog_entry", "add_catalog_entry",
+            "tools": ["get_add_game_guide", "inspect_image", "validate_catalog_entry", "add_catalog_entry", "get_setting_options",
                       "update_catalog_entry", "get_catalog_review_status", "check_ports", "preview_deploy",
                       "verify_game_setup", "get_server_diagnostics"],
             "workflow": ["add_catalog_entry", "(person approves in the web page; poll get_catalog_review_status)",

@@ -84,11 +84,17 @@ class ProblemsMixin:
         if cur is None:
             return t
         rules = {f.name: f for f in cur.fields if f.pattern}
-        if not rules:
+        values = {f.name: f.rules for f in cur.fields if f.rules is not None}
+        if not rules and not values:
             return t
-        return replace(t, fields=tuple(
-            replace(f, pattern=rules[f.name].pattern, pattern_hint=rules[f.name].pattern_hint)
-            if f.name in rules and not f.pattern else f for f in t.fields))
+        out = []
+        for f in t.fields:
+            if f.name in rules and not f.pattern:
+                f = replace(f, pattern=rules[f.name].pattern, pattern_hint=rules[f.name].pattern_hint)
+            if f.name in values:      # value rules (choices, ranges) always come from the current catalog entry
+                f = replace(f, rules=values[f.name])
+            out.append(f)
+        return replace(t, fields=tuple(out))
 
     # ------------------------------------------------------------------ reading the sources
     def _secret_values(self, inst: Instance, t: CatalogEntry) -> tuple[str, ...]:
@@ -121,7 +127,33 @@ class ProblemsMixin:
         if container_text:
             sources.append(("the container log", container_text))
         sources += [(f"the game's log file {rel}", text) for rel, text in self._log_file_sources(inst, t, started)]
-        return pb.scan(sources, t.fail_log_patterns, t.builtin_fail_patterns, self._secret_values(inst, t))
+        p = pb.scan(sources, t.fail_log_patterns, t.builtin_fail_patterns, self._secret_values(inst, t))
+        if p is not None and p.setting:
+            p = self._locate_setting(inst, p)
+        return p
+
+    def _locate_setting(self, inst: Instance, p: pb.Problem) -> pb.Problem:
+        """Which config file and setting path the log's setting name is (TombstoneMode -> gameSettings.tombstoneMode in
+        game/server/enshrouded_server.json), from the current setting rules; also the allowed values when the log did
+        not list them."""
+        from . import settings_schema as ss
+        try:
+            files = self.config_schema(inst)
+        except Exception:  # noqa: BLE001
+            return p
+        for c in files:
+            spec = ss.find_by_name(c.schema, p.setting) if c.schema else None
+            if spec is None:
+                continue
+            allowed = p.allowed or tuple(spec.allowed_values)
+            advice = p.advice
+            if allowed and not p.allowed:
+                advice = f"Allowed values: {', '.join(allowed)}. " + advice
+            return replace(p, config_path=c.path, setting_path=spec.path, allowed=allowed,
+                           advice=advice.replace("Open Config,", f"Open Config ({c.path}, setting {spec.path}),", 1))
+        if len(files) == 1 and files[0].format in ("json", "ini"):
+            return replace(p, config_path=files[0].path)
+        return p
 
     # ------------------------------------------------------------------ for the server list
     def _card_problem(self, inst: Instance, t: CatalogEntry, status, health: str, started_text: str,

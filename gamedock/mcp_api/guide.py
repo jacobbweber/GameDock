@@ -28,6 +28,14 @@ and GameDock works for any game: a game is just an entry in the catalog.
 - **Ready vs running**: `running` only means the container is up. A game that downloads files on first start
   (several GB) cannot be joined yet. `ready` is true once the game can be joined; `phase` says `starting`,
   `installing` (with a `progress` percent) or `ready`. Wait for `ready` before telling anyone to connect.
+- **Allowed values (never invent one)**: many settings accept only fixed words or a range (Enshrouded's
+  `gameSettings.tombstoneMode` is `AddBackpackMaterials`, `Everything` or `NoTombstone`; "Off" stops the game from
+  starting). `get_setting_options` (and `schema` in `read_config_file`) lists the rules from the catalog: type, `choices`,
+  min/max, description, default, restart_required. ALWAYS read them before writing a setting, and use only listed values.
+  `write_config_file`, `update_config_settings`, `deploy_server` and `update_server_settings` refuse anything else with
+  JSON `invalid_settings` naming the allowed values, and nothing is written; there is no override. A setting without
+  rules is not checked by GameDock: take its value from the game's documentation, never guess. `phase: failed` with a
+  `problem` naming a `setting` means the game refused its settings: fix that value (Config) and start it again.
 - **Settings (env)**: values you fill in when deploying (see `get_catalog_entry`). Settings marked `secret`
   (passwords) are accepted but never shown back: you only see whether they are set. Never ask for or repeat them.
 - **Backups**: archives of a server's data. GameDock makes automatic safety backups before risky actions
@@ -61,7 +69,8 @@ and GameDock works for any game: a game is just an entry in the catalog.
   say in `notes` why one was left out: `validate_catalog_entry` warns about both. **Write down how the game fails:** put the
   image's documented error lines in `fail_log_patterns` (each with a plain `title` and the next step as `advice`), name the
   game's own log files in `log_files` when the real error never reaches `docker logs`, and give a secret with a known shape
-  (a fixed-length token) a `pattern` and `pattern_hint`. Say in the field's `description` exactly where the person gets it
+  (a fixed-length token) a `pattern` and `pattern_hint`. **Declare allowed values:** a `schema` for each settings file and
+  `choices` / `type` / `min` / `max` on fields, from the documentation (exact spelling); `type: string` where it is unclear. Say in the field's `description` exactly where the person gets it
   (the page, the App ID, and what NOT to use instead).
 - **After you add a game (add -> approve -> deploy a test copy -> verify -> fix -> re-review)**: `add_catalog_entry` saves the
   entry as "waiting for approval". You cannot see the person's click directly, so poll `get_catalog_review_status(game_id)`:
@@ -74,7 +83,8 @@ and GameDock works for any game: a game is just an entry in the catalog.
   entry call `update_catalog_entry` (it needs a new approval) and then deploy a NEW test copy: a deployed server keeps a
   snapshot of the entry, so catalog changes never reach it (`get_catalog_review_status` lists servers on an older
   snapshot). Two things DO reach existing servers without a redeploy because they change no container: `fail_log_patterns`
-  / `log_files` / `builtin_fail_patterns` (how GameDock explains a stuck server) and the format rule `pattern` of a field. Deleting the old test server needs the person, or full mode. Only a person can approve or delete: say what
+  / `log_files` / `builtin_fail_patterns` (how GameDock explains a stuck server), the format rule `pattern` of a field, and
+  the setting rules (config_files[].schema and fields' choices/type/min/max). Deleting the old test server needs the person, or full mode. Only a person can approve or delete: say what
   you need and wait.
 - **Checking and troubleshooting (all read-only)**: `verify_game_setup`, `get_server_diagnostics` (status, container exit code
   and restarts, ports, disk, backups, a `problem` when a known failure is in the logs, newest redacted log lines), `check_ports`, `preview_deploy`, and `get_mcp_audit` (what

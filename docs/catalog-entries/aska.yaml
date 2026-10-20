@@ -45,12 +45,15 @@ fields:
   - name: ASKA_REGION
     label: Region
     default: default
-    description: "default, Asia, EU, US and so on: the region the server is listed under."
+    type: string           # deliberately loose: the image README says "default, Asia, EU, US, etc." and the game's own list differs
+    description: "default, Asia, EU, US and so on: the region the server is listed under (the image's README does not give the full list, so GameDock does not restrict it)."
   - name: ASKA_MAX_PLAYERS
     label: Maximum players
     default: "4"
     pattern: '[1-9][0-9]{0,2}'
     pattern_hint: A whole number such as 4.
+    type: integer
+    min: 1
     description: How many players can be connected at once.
   - name: ASKA_SAVE_ID
     label: Save to load
@@ -60,27 +63,47 @@ fields:
   - name: ASKA_MODE
     label: Game mode
     default: normal
-    description: The game mode, as the game's own settings file spells it (for example normal). Leave as normal if unsure.
+    # normal / custom: the game's server properties file (server hosts' ASKA docs, WindowsGSM.ASKA) agree on these two.
+    choices:
+      - { value: normal, label: Normal, description: The standard game balance. }
+      - { value: custom, label: Custom, description: "Unlocks the world settings in the properties file (custom mode only)." }
+    description: "normal = the standard game. custom = the advanced world settings in the properties file apply."
   - name: ASKA_SEED
     label: World seed
     description: The world generation seed for a NEW world. Leave empty for a random world. Has no effect on an existing save.
   - name: ASKA_KEEP_WORLD_ALIVE
     label: Keep the world running with nobody online
     default: "false"
+    choices:
+      - { value: "false", label: "No (pause when empty)" }
+      - { value: "true", label: "Yes (keep running)" }
     description: "true = the world keeps simulating while nobody is connected. false = it pauses."
   - name: ASKA_AUTOSAVE_STYLE
     label: Autosave style
     default: every morning
-    description: "How often the world is saved: every morning, frequent or manual."
+    # The image passes this value straight into the game's properties file. The game's documented values (ASKA server
+    # hosts' docs and WindowsGSM.ASKA agree) are the five below; the image README's "frequent, manual" are not among them.
+    choices:
+      - every morning
+      - every 5 minutes
+      - every 10 minutes
+      - every 15 minutes
+      - { value: disabled, label: "disabled (no autosave)" }
+    description: "How often the world is saved: every morning (the default), every 5, 10 or 15 minutes, or disabled."
   - name: ASKA_SAVE_BACKUP
     label: Back up saves when the server starts
     default: "1"
+    choices:
+      - { value: "1", label: "Yes" }
+      - { value: "0", label: "No" }
     description: "1 = the image writes a .tar.gz of the saves into saves/backups at each start. 0 = no. (GameDock's own backups are separate.)"
   - name: ASKA_KEEP_SAVES
     label: Start-up backups to keep
     default: "3"
     pattern: '[0-9]{1,3}'
     pattern_hint: A whole number such as 3.
+    type: integer
+    min: 0
     description: How many of those start-up backups the image keeps per world.
   - name: TZ
     label: Time zone
@@ -89,7 +112,28 @@ config_files:
   - path: server/server.properties.docker.txt
     label: Server properties
     format: ini
-    sensitive_keys: [password]
+    sensitive_keys: [password, authentication token]
+    # Allowed values: the game's "server properties.txt" as documented by ASKA server hosts (xgamingserver.com/docs/aska,
+    # mintservers.com, low.ms) and github.com/tadavispmd040507/WindowsGSM.ASKA. Only values those sources AGREE on are
+    # restricted; day length, year length, monster density and structure decay are left out because they disagree.
+    schema:
+      mode: { choices: [normal, custom], default: normal, description: "custom unlocks the world settings below; with normal they are ignored." }
+      autosave style:
+        choices: [every morning, every 5 minutes, every 10 minutes, every 15 minutes, disabled]
+        default: every morning
+      keep server world alive: { type: boolean, default: "false", description: "true = the world keeps running with nobody online." }
+      region: { type: string, default: default, description: "Region the server is listed under, such as default, europe, usa east (not restricted: the sources list different sets)." }
+      steam game port: { type: integer, min: 1, max: 65535, description: Port inside the container; GameDock maps the host port. }
+      steam query port: { type: integer, min: 1, max: 65535, description: Port inside the container; GameDock maps the host port. }
+      precipitation: { type: integer, min: 0, max: 6, description: "0 = sunny ... 6 = soggy (custom mode)." }
+      invasion difficulty: { choices: ["off", easy, normal, hard], description: Raid difficulty (custom mode). }
+      monster population: { choices: [low, medium, high], description: custom mode. }
+      wulfar population: { choices: [low, medium, high], description: custom mode. }
+      herbivore population: { choices: [low, medium, high], description: custom mode. }
+      bear population: { choices: [low, medium, high], description: custom mode. }
+      terrain aspect: { choices: [smooth, normal, rocky], description: custom mode. }
+      terrain height: { choices: [flat, normal, varied], description: custom mode. }
+      starting season: { choices: [spring, summer, autumn, winter], description: custom mode. }
     note: The image may rewrite this file from the settings above when it starts, so prefer changing the settings on the server (Edit). Useful for reading what the game really uses.
 fail_log_patterns:
   - pattern: 'k_EResultGSLTExpired'

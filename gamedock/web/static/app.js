@@ -43,7 +43,11 @@ async function api(path, method = "GET", body = undefined) {
   const res = await fetch(path, opts);
   let data = null;
   try { data = await res.json(); } catch (_) { /* no body */ }
-  if (!res.ok) throw new Error((data && data.error) || `${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    const err = new Error((data && data.error) || `${res.status} ${res.statusText}`);
+    err.data = data;
+    throw err;
+  }
   return data;
 }
 
@@ -132,6 +136,7 @@ function serverState(s) {
         sub: s.phase_detail || "The container is up but the game is not ready to join yet.", problem: hasProblem(s) ? s.problem : null };
     }
     const problem = hasProblem(s) ? s.problem : null;
+    if (s.phase === "failed") return { kind: "unhealthy", label: "Failed to start", working: false, progress: null, sub: s.phase_detail, problem };
     if (s.phase === "unhealthy") return { kind: "unhealthy", label: problem ? "Problem" : "Unhealthy", working: false, progress: null, sub: s.phase_detail, problem };
     return { kind: "running", label: "Running", working: false, progress: null, sub: "", ready: s.ready !== false };
   }
@@ -145,8 +150,12 @@ function problemBlock(p) {
   return el("div", { class: "problem-box", role: "alert", "data-problem": p.id },
     el("div", { class: "problem-title", textContent: p.title }),
     el("div", { class: "problem-advice", textContent: p.advice }),
+    p.allowed && p.allowed.length ? el("div", { class: "problem-allowed" },
+      el("span", { textContent: `Allowed for ${p.setting_path || p.setting || "this setting"}: ` }),
+      ...p.allowed.map((v, i) => [i ? ", " : "", el("code", { textContent: v })]).flat()) : null,
     p.excerpt ? el("div", { class: "problem-seen" }, el("span", { textContent: `Seen in ${p.where || "the logs"}: ` }), el("code", { textContent: p.excerpt })) : null,
-    el("div", { class: "problem-links", textContent: "Logs shows the whole output; Check setup gives a checklist." }));
+    el("div", { class: "problem-links", textContent: p.config_path ? `Fix it in Config (${p.config_path}), then start the server again. Logs shows the whole output.`
+      : "Logs shows the whole output; Check setup gives a checklist." }));
 }
 
 function progressBar(st) {
@@ -1119,7 +1128,42 @@ async function openCheckSetup(id) {
 
 // -------------------------------------------------------------------- config editor
 const MASK = "********";
-const isBool = (f) => f.type === "bool";
+// ---- setting rules from the catalog (0.6.3): mirrors gamedock/settings_schema.py check_value
+const ruleOf = (f) => f.setting || null;
+const isBool = (f) => f.type === "bool" || !!(f.setting && f.setting.type === "boolean" && !f.setting.choices);
+function choiceFor(rule, v) {
+  return (rule.choices || []).find((c) => c.value === v || (c.aliases || []).includes(v)
+    || ((rule.type === "integer" || rule.type === "number") && v.trim() !== "" && !isNaN(Number(v)) && Number(c.value) === Number(v))) || null;
+}
+function allowedText(rule) {
+  if (rule.choices) return rule.choices.map((c) => (c.label && c.label !== c.value ? `${c.value} (${c.label})` : c.value)).join(", ");
+  if (rule.type === "boolean") return "true or false";
+  if (rule.type === "integer" || rule.type === "number") {
+    const k = rule.type === "integer" ? "a whole number" : "a number";
+    if (rule.min !== undefined && rule.max !== undefined) return `${k} from ${rule.min} to ${rule.max}`;
+    if (rule.min !== undefined) return `${k} of at least ${rule.min}`;
+    if (rule.max !== undefined) return `${k} of at most ${rule.max}`;
+    return k;
+  }
+  return rule.pattern_hint || "text";
+}
+function settingError(f, v) {
+  const rule = ruleOf(f);
+  if (!rule || (f.sensitive && v === MASK)) return "";
+  v = v === null || v === undefined ? "" : String(v);
+  if (rule.choices) return choiceFor(rule, v) ? "" : `Not a valid value; the game will refuse to start. Allowed: ${rule.choices.map((c) => c.value).join(", ")}.`;
+  if (rule.type === "boolean") return /^(true|false)$/i.test(v.trim()) ? "" : "Must be true or false.";
+  if (rule.type === "integer" || rule.type === "number") {
+    const t = v.trim();
+    const okNum = rule.type === "integer" ? /^[+-]?\d+(\.0*)?$/.test(t) : /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(t);
+    if (!okNum) return `Must be ${allowedText(rule)}.`;
+    const n = Number(t);
+    if ((rule.min !== undefined && n < rule.min) || (rule.max !== undefined && n > rule.max)) return `Out of range: must be ${allowedText(rule)}.`;
+    return "";
+  }
+  if (rule.pattern) { try { if (!new RegExp(`^(?:${rule.pattern})$`).test(v)) return `Not valid: ${rule.pattern_hint || "it does not have the expected form"}.`; } catch (_) { /* ignore */ } }
+  return "";
+}
 const boolOf = (v) => String(v).trim().toLowerCase() === "true";
 const sameValue = (f, a, b) => (isBool(f) ? boolOf(a) === boolOf(b) : a === b);
 
@@ -1219,7 +1263,13 @@ async function openConfig(id) {
       ui.defCount.classList.toggle("has", nd > 0);
       ui.resetAll.hidden = !hasDefaults() || !cur.fields.some((f) => !f.sensitive && resettable(f) && notDefault(f));
       ui.resetAll.disabled = !editable();
-      ui.fields.forEach(({ f, row, was, reset, input, pill, defLine, defReset }) => {
+      const nBad = invalidFields().length;
+      if (ui.badCount) {
+        ui.badCount.textContent = nBad ? `${nBad} setting${nBad === 1 ? " has a value" : "s have values"} the game will refuse` : "";
+        ui.badCount.hidden = !nBad;
+      }
+      ui.fields.forEach(({ f, row, was, reset, input, pill, defLine, defReset, bad }) => {
+        paintInvalid(f, row, input, bad);
         const changed = isChanged(f);
         row.classList.toggle("changed", changed);
         was.hidden = !changed;
@@ -1289,6 +1339,24 @@ async function openConfig(id) {
       input.addEventListener("change", () => { text.textContent = input.checked ? "On" : "Off"; set(input.checked ? "true" : "false"); });
       return { input, widget: el("label", { class: "switch" }, input, el("span", { class: "slider" }), text) };
     }
+    const rule = ruleOf(f);
+    if (rule && rule.choices && f.type !== "json") {
+      const curV = valueOf(f);
+      input = el("select", { id: `cfg-${f.id}`, disabled: ro, class: "cfg-select" });
+      if (!choiceFor(rule, curV)) {
+        input.append(el("option", { value: curV, textContent: `${curV === "" ? "(empty)" : curV} – not a valid value`, class: "bad-option" }));
+      }
+      rule.choices.forEach((c) => input.append(el("option", { value: c.value, title: c.description || "",
+        textContent: c.label && c.label !== c.value ? `${c.label} (${c.value})` : c.value })));
+      const hit = choiceFor(rule, curV);
+      input.value = curV;
+      if (hit && hit.value !== curV) {           // an alias (e.g. a legacy number): keep showing what the file holds
+        input.prepend(el("option", { value: curV, textContent: `${curV} (= ${hit.label || hit.value})` }));
+        input.value = curV;
+      }
+      input.addEventListener("change", () => set(input.value));
+      return { input, widget: input };
+    }
     if (f.type === "json") {
       input = el("textarea", { class: "cfg-json", rows: Math.min(8, Math.max(2, valueOf(f).split("\n").length)), spellcheck: false, disabled: ro, id: `cfg-${f.id}` });
       input.value = valueOf(f);
@@ -1297,16 +1365,43 @@ async function openConfig(id) {
     }
     input = el("input", { type: f.sensitive ? "password" : "text", value: valueOf(f), disabled: ro, id: `cfg-${f.id}`,
       autocomplete: f.sensitive ? "new-password" : "off", spellcheck: false,
-      inputMode: f.type === "number" ? "decimal" : "text" });
+      inputMode: f.type === "number" || (rule && (rule.type === "number" || rule.type === "integer")) ? "decimal" : "text" });
+    if (rule && rule.min !== undefined) input.dataset.min = rule.min;
+    if (rule && rule.max !== undefined) input.dataset.max = rule.max;
+    if (rule && (rule.type === "integer" || rule.type === "number")) input.placeholder = allowedText(rule);
     if (f.sensitive && valueOf(f) === MASK) input.title = "Hidden. Leave as it is to keep the current value, or type a new one.";
     input.addEventListener("input", () => set(input.value));
     return { input, widget: input };
   }
 
+  function paintInvalid(f, row, input, bad) {
+    const msg = settingError(f, valueOf(f));
+    row.classList.toggle("invalid", !!msg);
+    if (input) input.setAttribute("aria-invalid", msg ? "true" : "false");
+    if (!bad) return;
+    bad.hidden = !msg;
+    if (!msg) { bad.replaceChildren(); return; }
+    const rule = ruleOf(f);
+    const fromFile = !cur.edits.has(f.id) && f.invalid;
+    const fixes = [];
+    if (rule.choices && rule.choices.length <= 6 && editable()) {
+      rule.choices.forEach((c) => fixes.push(el("button", { type: "button", class: "small secondary fix-choice", "data-value": c.value,
+        textContent: `Use ${c.label && c.label !== c.value ? c.label : c.value}`, title: c.description || c.value,
+        onclick: () => { fillField(f, input, c.value); refreshButtons(); } })));
+    } else if (rule.default !== undefined && rule.default !== null && editable()) {
+      fixes.push(el("button", { type: "button", class: "small secondary fix-choice", "data-value": rule.default,
+        textContent: `Use the default (${rule.default})`, onclick: () => { fillField(f, input, rule.default); refreshButtons(); } }));
+    }
+    bad.replaceChildren(el("span", { class: "msg", textContent: fromFile ? `The file holds ${JSON.stringify(valueOf(f))}. ${msg}` : msg }),
+      fixes.length ? el("span", { class: "fixes" }, ...fixes) : null);
+  }
+
   function fillField(f, input, v) {
     if (isBool(f)) { input.checked = boolOf(v); input.dispatchEvent(new Event("change")); }
+    else if (input.tagName === "SELECT") { input.value = v; input.dispatchEvent(new Event("change")); }
     else { input.value = v; input.dispatchEvent(new Event("input")); }
   }
+  const invalidFields = () => (cur && cur.mode === "form" ? cur.fields.filter((f) => settingError(f, valueOf(f))) : []);
 
   const BASELINE_WHY = {
     deploy: "when the server first became ready after it was deployed",
@@ -1369,6 +1464,7 @@ async function openConfig(id) {
           el("button", { type: "button", class: "small secondary", textContent: "Cancel", onclick: () => { ui.resetAllConfirm.hidden = true; ui.resetAll.hidden = false; } }));
         ui.resetAllConfirm.hidden = false; ui.resetAll.hidden = true;
       } });
+    ui.badCount = el("span", { class: "bad-count", id: "cfg-bad-count", role: "status", hidden: true });
     ui.review = el("div", { class: "review", id: "cfg-review", hidden: true });
     ui.none = el("p", { class: "empty-small", hidden: true });
     const byGroup = new Map();
@@ -1392,13 +1488,18 @@ async function openConfig(id) {
         const defLine = el("div", { class: "def-line", hidden: true });
         const defReset = el("button", { type: "button", class: "small secondary def-reset", textContent: "Reset to default", hidden: true,
           "aria-label": `Reset ${f.label} to its default`, onclick: () => { fillField(f, input, f.sensitive ? "" : f.default); refreshButtons(); } });
+        const rule = ruleOf(f);
+        const bad = el("div", { class: "cfg-invalid", id: `bad-${f.id}`, role: "alert", hidden: true });
+        const desc = rule && (rule.description || rule.restart_required !== undefined)
+          ? el("div", { class: "cfg-desc", textContent: [rule.description, rule.restart_required === false ? "Applies without a restart." : rule.restart_required ? "Needs a restart." : ""].filter(Boolean).join(" ") })
+          : null;
         const row = el("div", { class: "cfg-row", id: `row-${f.id}` },
           el("label", { class: "cfg-label", htmlFor: `cfg-${f.id}` }, el("span", { class: "nm" }, f.label, " ", pill),
             el("span", { class: "key", textContent: f.key })),
-          el("div", { class: "cfg-input" }, widget, el("div", { class: "cfg-sub" }, was, reset), el("div", { class: "cfg-sub def" }, defLine, defReset)));
+          el("div", { class: "cfg-input" }, widget, desc, bad, el("div", { class: "cfg-sub" }, was, reset), el("div", { class: "cfg-sub def" }, defLine, defReset)));
         box.append(row);
         rows.push({ f, row });
-        ui.fields.push({ f, row, was, reset, input, pill, defLine, defReset });
+        ui.fields.push({ f, row, was, reset, input, pill, defLine, defReset, bad });
       });
       ui.groups.push({ box, rows });
       groupBoxes.push(box);
@@ -1425,7 +1526,7 @@ async function openConfig(id) {
       el("div", { class: "cfg-tools" }, ui.search,
         el("label", { class: "check", title: "Show only the settings you have changed since you opened this window" }, ui.onlyChanged, ...lbl("Only changed in this session", "Changed (session)")),
         hasDefaults() ? el("label", { class: "check", title: "Show only the settings that differ from the recorded defaults. This stays after saving and reopening." }, ui.onlyDefault, ...lbl("Only differing from default", "Differs from default")) : null,
-        ui.defCount, ui.resetAll, ui.resetAllConfirm),
+        ui.defCount, ui.resetAll, ui.resetAllConfirm, ui.badCount),
       ui.review,
       el("div", { class: "cfg-list" }, baselineNote(), ...groupBoxes, ui.none));
   }
@@ -1518,19 +1619,41 @@ async function openConfig(id) {
 
   const wrap = el("div", { class: "cfg-wrap" });
   select.addEventListener("change", load);
-  save.addEventListener("click", async () => {
+  // Values outside the catalog's rules are refused. In the form nothing is sent; the raw text is checked by the server,
+  // which lists the allowed values, and only there may a person deliberately "Save anyway" (never the AI tools).
+  async function doSave(force) {
     err.hidden = true; ok.hidden = true; save.disabled = true;
+    const bad = invalidFields();
+    if (bad.length) {
+      err.replaceChildren(`Not saved: ${bad.map((f) => `${f.label} – ${settingError(f, valueOf(f))}`).join(" ")}`);
+      err.hidden = false; refreshButtons();
+      const first = ui.fields.find((x) => x.f === bad[0]);
+      if (first) first.row.scrollIntoView({ block: "nearest" });
+      return;
+    }
     save.replaceChildren(spinner(), "Saving\u2026");
     try {
       let content;
       if (cur.mode === "raw") content = ui.area.value;
       else content = (await preview(cur.formBase.text, cur.edits)).content;
-      const r = await api(`/api/servers/${sid(id)}/config/file`, "PUT", { path: select.value, content });
+      const r = await api(`/api/servers/${sid(id)}/config/file`, "PUT", { path: select.value, content, force: !!force });
       await load();
       ok.textContent = r.note; ok.hidden = false;
-    } catch (e) { err.textContent = e.message; err.hidden = false; if (cur) refreshButtons(); }
+    } catch (e) {
+      err.replaceChildren(e.message);
+      const problems = e.data && e.data.invalid_settings;
+      if (problems && problems.length && cur && cur.mode === "raw") {
+        const anyway = el("button", { type: "button", class: "small danger", id: "config-save-anyway", textContent: "Save anyway",
+          title: "Write the file as it is. The game will probably refuse to start until the value is fixed.",
+          onclick: () => doSave(true) });
+        err.append(el("div", { class: "save-anyway" },
+          el("span", { textContent: "Only if you know the game accepts it (for example after a game update added a value): " }), anyway));
+      }
+      err.hidden = false; if (cur) refreshButtons();
+    }
     finally { save.textContent = "Save"; if (cur) refreshButtons(); }
-  });
+  }
+  save.addEventListener("click", () => doSave(false));
 
   openTall(el("div", { class: "panel" },
     el("h3", { textContent: `Config \u2013 ${s.name}` }),

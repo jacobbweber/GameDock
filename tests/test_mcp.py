@@ -18,12 +18,16 @@ READ = {"list_catalog", "get_catalog_entry", "list_servers", "get_server_status"
         "inspect_image", "get_config_changes",
         # 0.6.0: checking and troubleshooting (all read-only)
         "get_catalog_review_status", "verify_game_setup", "check_ports", "preview_deploy", "get_server_diagnostics",
-        "get_mcp_audit"}
+        "get_mcp_audit",
+        # 0.6.3: allowed setting values
+        "get_setting_options"}
 STANDARD = {"deploy_server", "start_server", "stop_server", "restart_server", "update_server_settings",
             "update_server_image", "create_backup", "write_config_file", "set_backup_schedule",
             "set_maintenance_schedule", "update_game", "add_catalog_entry", "update_catalog_entry",
             # 0.6.2: non-destructive file owner repair
-            "fix_data_ownership"}
+            "fix_data_ownership",
+            # 0.6.3: change single settings, checked against the setting rules
+            "update_config_settings"}
 DESTRUCTIVE = {"delete_server", "restore_backup", "delete_backup", "wipe_server_data"}
 SECRET = "sup3r-s3cret-pw"
 RPC = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
